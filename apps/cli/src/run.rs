@@ -37,10 +37,7 @@ pub struct RunArgs {
     winedebug: String,
     #[arg(long, help = "Close this copy's running F1 25 first")]
     restart: bool,
-    #[arg(
-        long,
-        help = "Launch a Steam copy through Proton directly instead of asking Steam (an EA app copy always starts through the EA app)"
-    )]
+    #[arg(long, help = "Launch through Proton directly instead of asking Steam")]
     direct: bool,
     #[arg(
         long,
@@ -141,7 +138,7 @@ pub fn run(store: &Store, profile: &str, args: RunArgs) -> Result<ExitCode> {
     {
         bail!("Steam is {state} F1 25; wait for it to finish, then press Play again");
     }
-    match crate::ea::store_start(Source::detect(&game)) {
+    match crate::ea::store_start(Source::detect(&game), args.direct) {
         crate::ea::StoreStart::EaApp => {
             crate::ea::check_recorded(&game)?;
             if args.apply {
@@ -394,8 +391,6 @@ fn wrapper(store: &Store, profile: &str, args: &RunArgs, g: &Game) -> Result<Exi
     let lock = crate::recover::lock(store, &info)?;
     crate::recover::stale(store, &lock, g, Scope::All, &info)?;
     crate::offline::gate(store, false)?;
-    swofty_core::entitlement::check_store_start(&g.dir, args.via_ea)?;
-    crate::build::check_entitled(store, g)?;
     let version = swofty_core::exe_version::read(&g.dir.join(GAME_EXE));
     if let Some(d) = swofty_core::known_problems::outdated_exe(version.as_deref()) {
         say("warning", &format!("{}: {}", d.title, d.text()));
@@ -1670,7 +1665,7 @@ fn launch(store: &Store, game: &Path, direct: bool, mode: LaunchMode, extra: &[S
                 .any(|(_, o)| steam::wrapper_installed(o))
         })
         .unwrap_or(false);
-    if crate::ea::store_start(Source::detect(game)) == crate::ea::StoreStart::EaApp {
+    if crate::ea::store_start(Source::detect(game), direct) == crate::ea::StoreStart::EaApp {
         let mut c = Command::new(std::env::current_exe()?);
         c.arg("--data-dir")
             .arg(&store.root)

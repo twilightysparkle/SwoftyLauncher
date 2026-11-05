@@ -36,11 +36,9 @@ pub enum StoreStart {
     EaApp,
 }
 
-/// An EA app copy always starts through the EA app, which launches only a
-/// game its account owns; `--direct` is for Steam copies.
-pub fn store_start(source: Source) -> StoreStart {
+pub fn store_start(source: Source, direct: bool) -> StoreStart {
     match source {
-        Source::EaApp => StoreStart::EaApp,
+        Source::EaApp if !direct => StoreStart::EaApp,
         _ => StoreStart::Steam,
     }
 }
@@ -531,9 +529,10 @@ mod tests {
 
     #[test]
     fn the_active_copy_picks_the_store_to_start() {
-        assert_eq!(store_start(Source::Steam), StoreStart::Steam);
-        assert_eq!(store_start(Source::EaApp), StoreStart::EaApp);
-        assert_eq!(store_start(Source::Unknown), StoreStart::Steam);
+        assert_eq!(store_start(Source::Steam, false), StoreStart::Steam);
+        assert_eq!(store_start(Source::EaApp, false), StoreStart::EaApp);
+        assert_eq!(store_start(Source::EaApp, true), StoreStart::Steam);
+        assert_eq!(store_start(Source::Unknown, false), StoreStart::Steam);
     }
 
     #[test]
