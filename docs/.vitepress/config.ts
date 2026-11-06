@@ -147,6 +147,7 @@ export default defineConfigWithTheme<DocsThemeConfig>({
               { text: "Driver Manager", link: "/using/driver-manager" },
               { text: "DB Editor", link: "/using/db-editor" },
               { text: "Tools", link: "/using/tools" },
+              { text: "Settings", link: "/using/settings" },
               { text: "Restoring the game", link: "/using/profiles-and-restoring" },
               { text: "Updating", link: "/using/updating" },
               { text: "Sending your logs", link: "/using/send-logs" },
@@ -165,6 +166,9 @@ export default defineConfigWithTheme<DocsThemeConfig>({
           {
             text: "Releases",
             items: [
+              { text: "1.8.14", link: "/releases/1.8.14" },
+              { text: "1.8.13", link: "/releases/1.8.13" },
+              { text: "1.8.12", link: "/releases/1.8.12" },
               { text: "1.8.11", link: "/releases/1.8.11" },
               { text: "1.8.10", link: "/releases/1.8.10" },
               { text: "1.8.9", link: "/releases/1.8.9" },

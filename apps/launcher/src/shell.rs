@@ -38,6 +38,7 @@ pub enum Page {
     News,
     Addons,
     Browser,
+    Downloads,
     Shaders,
     Importer,
     Tools,
@@ -45,6 +46,7 @@ pub enum Page {
     Careers,
     Database,
     Multiplayer,
+    Settings,
     Section(usize),
 }
 
@@ -54,6 +56,7 @@ impl Page {
             Self::News => "News",
             Self::Addons => "Addons",
             Self::Browser => "Addon Browser",
+            Self::Downloads => "Downloads",
             Self::Shaders => "Shaders",
             Self::Importer => "Simplified Importer",
             Self::Tools => "Tools",
@@ -61,6 +64,7 @@ impl Page {
             Self::Careers => "Saves",
             Self::Database => "DB Editor",
             Self::Multiplayer => "Multiplayer",
+            Self::Settings => "Settings",
             Self::Section(_) => "",
         }
     }
@@ -78,6 +82,7 @@ impl Page {
             Self::News => IconName::Newspaper,
             Self::Addons => IconName::Puzzle,
             Self::Browser => IconName::PackageSearch,
+            Self::Downloads => IconName::Download,
             Self::Shaders => IconName::Palette,
             Self::Importer => IconName::FolderInput,
             Self::Tools => IconName::Wrench,
@@ -85,6 +90,7 @@ impl Page {
             Self::Careers => IconName::Save,
             Self::Database => IconName::Database,
             Self::Multiplayer => IconName::Users,
+            Self::Settings => IconName::Settings,
             Self::Section(_) => IconName::Package,
         }
     }
@@ -154,6 +160,8 @@ pub struct Shell {
     pub(crate) vr_profiles: BTreeSet<String>,
     pub(crate) start_store: bool,
     pub(crate) developer_mode: bool,
+    /// `clear_old_session_logs` from config.json: opt-in, old session logs are cleared at start.
+    pub(crate) clear_old_session_logs: bool,
     reload_generation: u64,
     slow_logged: bool,
     /// `updates.check` from config.json, read when the library loads.
@@ -193,6 +201,7 @@ pub struct Shell {
     pub(crate) shaders: Entity<crate::shaders::ShadersView>,
     _shaders_events: Subscription,
     pub(crate) tools: crate::tools::Carousel,
+    pub(crate) settings: crate::settings::Settings,
     _console_closed: Subscription,
     _poll: Task<()>,
     _live: Task<()>,
@@ -411,7 +420,36 @@ impl Shell {
         let vr_profiles = config.vr_profiles;
         let start_store = config.launch.start_store;
         let developer_mode = config.developer;
+        let clear_old_session_logs = config.clear_old_session_logs;
         let update_check = config.updates.check;
+        let shell = cx.entity().downgrade();
+        let confirming = Rc::new(std::cell::Cell::new(false));
+        window.on_window_should_close(cx, move |window, cx| {
+            let pending = shell.update(cx, |s, _| s.download_pending()).unwrap_or(0);
+            if pending == 0 {
+                return true;
+            }
+            if confirming.replace(true) {
+                return false;
+            }
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                "Downloads are still in progress",
+                Some("Exiting interrupts active downloads and discards queued jobs."),
+                &["Keep launcher open", "Exit anyway"],
+                cx,
+            );
+            let handle = window.window_handle();
+            let confirming = confirming.clone();
+            cx.spawn(async move |cx| {
+                if answer.await.ok() == Some(1) {
+                    handle.update(cx, |_, window, _| window.remove_window()).ok();
+                }
+                confirming.set(false);
+            })
+            .detach();
+            false
+        });
         let stale = store.clone();
         cx.background_executor()
             .spawn(async move {
@@ -420,6 +458,9 @@ impl Shell {
                     Err(e) => eprintln!("swofty-launcher: could not check for an unfinished session: {e}"),
                 }
                 game::vault_at_start(&stale);
+                if clear_old_session_logs {
+                    crate::settings::clear_logs_at_start(&stale.root);
+                }
             })
             .detach();
         let poll = cx.spawn_in(window, async move |this, cx| {
@@ -574,6 +615,7 @@ impl Shell {
             vr_profiles,
             start_store,
             developer_mode,
+            clear_old_session_logs,
             reload_generation: 0,
             slow_logged: false,
             update_check,
@@ -605,6 +647,7 @@ impl Shell {
             shaders,
             _shaders_events: shaders_events,
             tools: Default::default(),
+            settings: Default::default(),
             _console_closed: console_closed,
             _poll: poll,
             _live: live,
@@ -939,6 +982,7 @@ impl Shell {
         self.library = library;
         let config = self.store.config();
         self.developer_mode = config.developer;
+        self.clear_old_session_logs = config.clear_old_session_logs;
         self.vr_profiles = config.vr_profiles;
         self.start_store = config.launch.start_store;
         self.update_check = config.updates.check;
@@ -1113,6 +1157,19 @@ impl Shell {
         }
         if let Some(d) = swofty_core::known_problems::outdated_exe(install.version().as_deref()) {
             window.push_notification(Notification::warning(d.text()).title(d.title).autohide(false), cx);
+        }
+        // Warn only: F1 25 does its own 2 GB check, and Play must never be
+        // blocked by a reading that is wrong.
+        let space = swofty_core::data_usage::Room::now(&self.store.root);
+        if let Some(short) = crate::settings::low_space_warning(space) {
+            let text = format!("{short} Settings shows what takes the room and clears old logs.");
+            crate::app_log::note(&format!("play: {text}"));
+            window.push_notification(
+                Notification::warning(text)
+                    .title("Low on disk space")
+                    .autohide(false),
+                cx,
+            );
         }
         let armed = match &room {
             Some(_) => Some(swofty_core::multiplayer::bridge::ARMED),
@@ -1314,6 +1371,22 @@ impl Shell {
             window.push_notification(Notification::error(e.to_string()), cx);
         }
         self.start_store = config.launch.start_store;
+        cx.notify();
+    }
+
+    pub(crate) fn set_clear_old_session_logs(
+        &mut self,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut config = self.store.config();
+        config.clear_old_session_logs = on;
+        if let Err(e) = self.store.save_config(&config) {
+            crate::app_log::action("save settings").failed(&e);
+            window.push_notification(Notification::error(e.to_string()), cx);
+        }
+        self.clear_old_session_logs = config.clear_old_session_logs;
         cx.notify();
     }
 
@@ -2290,6 +2363,10 @@ impl Shell {
             (Page::News, None),
             (Page::Addons, Some(self.library.listed().count())),
             (Page::Browser, None),
+            (
+                Page::Downloads,
+                (self.download_pending() > 0).then(|| self.download_pending()),
+            ),
             (Page::Shaders, None),
             (Page::Profiles, Some(self.library.profiles.len())),
             (Page::Careers, None),
@@ -2300,6 +2377,7 @@ impl Shell {
         if self.mp_allowed() {
             big.push((Page::Multiplayer, None));
         }
+        big.push((Page::Settings, None));
         v_flex()
             .w(px(220.))
             .h_full()
@@ -2446,11 +2524,13 @@ impl Render for Shell {
             },
             Page::Addons => self.addons_page(p, cx),
             Page::Browser => self.browser_page(p, cx),
+            Page::Downloads => self.downloads_page(p, cx),
             Page::Shaders => self.shaders.clone().into_any_element(),
             Page::Database => self.db_page(p, cx),
             Page::Profiles => self.profiles_page(p, wide, cx),
             Page::Careers => self.careers_page(p, wide, cx),
             Page::Multiplayer => self.multiplayer_page(p, cx),
+            Page::Settings => self.settings_page(p, cx),
             Page::Section(i) => self.section_page(i, p, cx),
         };
         if self.dropping && !cx.has_active_drag() {

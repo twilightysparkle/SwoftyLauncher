@@ -103,6 +103,9 @@ pub fn screens<'a>(
 pub struct SessionMap {
     pub code: String,
     pub name: String,
+    /// The addon that brings the track package: its ADDON SETTINGS tile shows the track.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub addon: String,
     #[serde(default)]
     pub version: String,
     #[serde(default)]
@@ -134,6 +137,12 @@ pub struct SessionAddon {
     pub description: String,
     pub enabled: bool,
     pub locked: bool,
+    /// A track addon: its category is Tracks or it brings a track package, as the launcher shows it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub track: bool,
+    /// The launcher folder the addon is in, by name; ADDON SETTINGS lists a row per folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     #[serde(default)]
     pub dlls: Vec<String>,
     pub enable_commands: [String; 2],
@@ -176,11 +185,13 @@ pub struct SessionState {
 }
 
 impl SessionSettings {
-    pub fn set_maps<'a>(&mut self, packages: impl Iterator<Item = &'a TrackPackage>) {
+    /// The build's track packages, each with the addon that brings it, which is then a track.
+    pub fn set_maps<'a>(&mut self, packages: impl Iterator<Item = (&'a TrackPackage, &'a str)>) {
         self.maps = packages
-            .map(|p| SessionMap {
+            .map(|(p, addon)| SessionMap {
                 code: p.track_code.clone(),
                 name: p.track_name.clone().unwrap_or_else(|| p.track_code.clone()),
+                addon: addon.to_owned(),
                 version: p.version.clone().unwrap_or_default(),
                 author: p.author_name.clone().unwrap_or_default(),
                 description: p
@@ -191,6 +202,9 @@ impl SessionSettings {
                     .to_owned(),
             })
             .collect();
+        for a in &mut self.addons {
+            a.track |= self.maps.iter().any(|m| m.addon == a.id);
+        }
     }
 
     pub fn set_mods(&mut self, items: impl Iterator<Item = SessionMod>) {
@@ -256,6 +270,8 @@ impl SessionSettings {
                 description: m.description.clone().unwrap_or_default(),
                 enabled: enabled.contains(&m.id.as_str()),
                 locked: m.is_builtin() || crate::managed::is_managed(&m.id),
+                track: m.category == Some(crate::manifest::Category::Tracks),
+                folder: None,
                 dlls: m
                     .operations
                     .native
@@ -610,7 +626,7 @@ mod tests {
         };
         let packages = [pkg("okayama", "Okayama"), pkg("bahrain24", "Sepang")];
         let mut s = SessionSettings::build(&p, &installed(), None).unwrap();
-        s.set_maps(packages.iter());
+        s.set_maps(packages.iter().map(|p| (p, "")));
         let codes: Vec<&str> = s.maps.iter().map(|m| m.code.as_str()).collect();
         assert_eq!(codes, ["okayama", "bahrain24"]);
         assert_eq!(s.maps[1].name, "Sepang");
