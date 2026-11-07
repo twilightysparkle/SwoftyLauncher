@@ -683,11 +683,7 @@ mod upscaler_tests {
 
     #[test]
     fn the_protected_files_are_never_drop_ins() {
-        for name in [
-            crate::GAME_EXE,
-            "steam_api64.dll",
-            crate::install::PROXY,
-        ] {
+        for name in [crate::GAME_EXE, "steam_api64.dll", crate::install::PROXY] {
             assert!(!is_upscaler_drop_in(name), "{name}");
             assert!(
                 !UPSCALER_DROP_INS.iter().any(|n| n.eq_ignore_ascii_case(name)),
