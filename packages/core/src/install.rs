@@ -184,6 +184,9 @@ pub struct Installer<'a> {
     /// Files copied so far, of how many, after each one.
     pub progress: &'a dyn Fn(usize, usize),
     pub free_space: fn(&Path) -> Option<u64>,
+    /// The volume a folder is on; tells Play whether the build output and the
+    /// game folder are on different drives.
+    pub volume: fn(&Path) -> Option<crate::disk::Volume>,
     /// Copy every file instead of hard-linking build outputs; set by
     /// `SWOFTY_INSTALL_COPY=1`.
     pub copy_only: bool,
@@ -194,6 +197,15 @@ const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// journal, `placed.json` and the hash cache, each rewritten through a
 /// temporary copy.
 const STATE_PER_FILE: u64 = 2048;
+
+/// Where each placed file is in the link cache by game path, how many files
+/// the sync copied and reused, and why there is no cache when it failed.
+#[derive(Default)]
+struct LinkCache {
+    via: BTreeMap<String, PathBuf>,
+    synced: Option<(usize, usize)>,
+    failure: Option<String>,
+}
 
 fn quiet(_: &str) {}
 
@@ -218,7 +230,7 @@ fn link_replacing(src: &Path, path: &Path) -> std::io::Result<()> {
     renamed
 }
 
-fn copy_replacing(src: &Path, path: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_replacing(src: &Path, path: &Path) -> std::io::Result<()> {
     let tmp = path.with_file_name(format!(
         ".{}.swofty-copy",
         path.file_name().unwrap_or_default().to_string_lossy()
@@ -355,6 +367,7 @@ impl<'a> Installer<'a> {
             out: &quiet,
             progress: &unwatched,
             free_space: crate::disk::free_space,
+            volume: crate::disk::volume,
             copy_only: std::env::var_os("SWOFTY_INSTALL_COPY").is_some_and(|v| v == "1"),
         }
     }
@@ -455,6 +468,16 @@ impl<'a> Installer<'a> {
             addon_storage::save_current(self.data, id)?;
         }
         crate::stdlib::careers::sync(self.data, Some(&self.game.dir), Some(&j.profile)).ok();
+        if j.session {
+            let started =
+                j.id.split('-')
+                    .next()
+                    .and_then(|n| u128::from_str_radix(n, 16).ok());
+            let since_ms = started.map_or(0, |n| (n / 1_000_000) as i64);
+            let log =
+                std::fs::read_to_string(self.game.dir.join(crate::session::LOADER_LOG)).unwrap_or_default();
+            crate::stdlib::careers::record_session(self.data, &j.profile, since_ms, &log).ok();
+        }
         let mut report = Vec::new();
         let same_build = j.build_id == self.game.identity.build_id;
         for e in j.entries.iter().rev() {
@@ -586,6 +609,13 @@ impl<'a> Installer<'a> {
     /// open journal accounts for: a session that lost its journal left them.
     /// Only files that still hold exactly the recorded bytes are touched.
     pub fn sweep(&self) -> Result<Vec<String>> {
+        let mut hashes = Hashes::load(self.data);
+        let result = self.sweep_with(&mut hashes);
+        hashes.save();
+        result
+    }
+
+    fn sweep_with(&self, hashes: &mut Hashes) -> Result<Vec<String>> {
         let mut placed = Placed::load(self.data)?;
         if placed.files.is_empty() && placed.registry.is_none() {
             return Ok(Vec::new());
@@ -617,11 +647,12 @@ impl<'a> Installer<'a> {
                 continue;
             }
             let path = self.path(&f.path);
-            if sha256_opt(&path)?.as_deref() == Some(f.sha256.as_str()) {
+            if hashes.sha256_opt(&path)?.as_deref() == Some(f.sha256.as_str()) {
                 if f.replaced {
                     match baseline.files.get(&f.path) {
                         Some(rec) if self.objects().has(&rec.sha256) => {
                             self.restore_original(&rec.sha256, &path)?;
+                            hashes.wrote(&path, &rec.sha256);
                             notes.push(format!("put the original {} back", f.path));
                         }
                         _ => {
@@ -811,6 +842,17 @@ impl<'a> Installer<'a> {
 
     fn place(&self, plan: &Plan, hashes: &mut Hashes, loaded: Baseline) -> Result<()> {
         crate::now_doing("checking the game files");
+        if let Some(rel) = plan
+            .data
+            .keys()
+            .chain(plan.added.keys())
+            .chain(plan.loader.keys())
+            .find(|rel| crate::stock::is_upscaler_drop_in(rel))
+        {
+            return Err(Error::Resolve(format!(
+                "{rel} is an upscaler drop-in file and stays as the player put it; no addon or profile can replace it"
+            )));
+        }
         let objects = self.objects();
         let mut baseline = loaded.clone();
         let mut placed = Placed::load(self.data)?;
@@ -1023,22 +1065,37 @@ impl<'a> Installer<'a> {
         let (mut n, mut copied, mut told) = (0, 0, std::time::Instant::now());
         let built = crate::store::overlay_root(self.data);
         let mut linking = !self.copy_only;
-        let (mut linked, mut link_failure) = (0usize, None::<String>);
+        let (mut linked, mut linked_cache, mut link_failure) = (0usize, 0usize, None::<String>);
+        let LinkCache {
+            via,
+            synced: cached,
+            failure: cache_failure,
+        } = if linking {
+            self.link_cache(&built, &j.entries, &sources)
+        } else {
+            LinkCache::default()
+        };
         for i in 0..j.entries.len() {
             self.step(&mut n)?;
             let e = &j.entries[i];
             let path = self.path(&e.path);
             let mut link = |src: &Path, replacing: bool| -> bool {
-                if !linking || !src.starts_with(&built) {
+                let cache = via.get(e.path.as_str());
+                if !linking || (cache.is_none() && !src.starts_with(&built)) {
                     return false;
                 }
+                let from_cache = cache.is_some();
+                let src = cache.map_or(src, |p| p.as_path());
                 let made = if replacing {
                     link_replacing(src, &path)
                 } else {
                     std::fs::hard_link(src, &path)
                 };
                 match made {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        linked_cache += usize::from(from_cache);
+                        true
+                    }
                     Err(err) => {
                         link_failure = Some(err.to_string());
                         linking = false;
@@ -1102,14 +1159,31 @@ impl<'a> Installer<'a> {
         }
         let mode = match (&link_failure, self.copy_only) {
             (_, true) => "copy (SWOFTY_INSTALL_COPY=1)".to_owned(),
+            (Some(why), _) if cached.is_some() => format!("copy (link cache link failed: {why})"),
+            (None, _) if cached.is_some() => {
+                let (made, kept) = cached.unwrap_or_default();
+                (self.out)(&format!(
+                    "installing: {linked} linked ({linked_cache} from the link cache: {made} copied into it, {kept} reused), {} copied",
+                    copied - linked
+                ));
+                String::new()
+            }
+            (None, _) if linked == 0 && cache_failure.is_some() => {
+                format!(
+                    "copy (link cache unavailable: {})",
+                    cache_failure.as_deref().unwrap_or_default()
+                )
+            }
             (Some(why), _) => format!("copy (hard link failed: {why})"),
             (None, _) if linked == 0 => "copy (no build output to link)".to_owned(),
             (None, _) => "hard links".to_owned(),
         };
-        (self.out)(&format!(
-            "installing: {mode}; {linked} file(s) linked, {} copied",
-            copied - linked
-        ));
+        if !mode.is_empty() {
+            (self.out)(&format!(
+                "installing: {mode}; {linked} file(s) linked, {} copied",
+                copied - linked
+            ));
+        }
         let planned: BTreeSet<String> = sources.keys().map(|rel| placed::key(rel)).collect();
         for id in addon_storage::ids(sources.keys().copied()) {
             addon_storage::load_profile(self.data, &id, &plan.profile)?;
@@ -1128,6 +1202,60 @@ impl<'a> Installer<'a> {
             }
         }
         j.commit()
+    }
+
+    /// Brings the link cache on the game's drive up to date for the files
+    /// that can't be linked straight from the build output: all of them when
+    /// the build output is on another drive than the game folder, else the
+    /// ones from outside it, such as loose addon files. Returns where each is
+    /// in the cache, what the sync did, and why there is no cache when it
+    /// could not be made.
+    fn link_cache(
+        &self,
+        built: &Path,
+        entries: &[crate::journal::Entry],
+        sources: &BTreeMap<&str, &PathBuf>,
+    ) -> LinkCache {
+        let apart = crate::link_cache::apart((self.volume)(built), (self.volume)(&self.game.dir));
+        let srcs: Vec<(&str, &Path)> = entries
+            .iter()
+            .filter(|e| matches!(e.op, Op::ReplaceFile | Op::CreateFile))
+            .map(|e| (e.path.as_str(), sources[e.path.as_str()].as_path()))
+            .filter(|(_, s)| apart == Some(true) || !s.starts_with(built))
+            .collect();
+        if srcs.is_empty() {
+            if crate::link_cache::dir(&self.game.dir).exists() {
+                crate::link_cache::remove(&self.game.dir);
+            }
+            return LinkCache::default();
+        }
+        crate::now_doing("copying the mods to the game drive");
+        let mut told = std::time::Instant::now();
+        let synced = crate::link_cache::sync(&self.game.dir, &srcs, self.free_space, &mut |done, total| {
+            (self.progress)(done, total);
+            if told.elapsed() >= PROGRESS_EVERY {
+                (self.out)(&format!(
+                    "installing: {done} of {total} file(s) copied into the link cache"
+                ));
+                told = std::time::Instant::now();
+            }
+        });
+        match synced {
+            Ok(s) => LinkCache {
+                via: s.files,
+                synced: Some((s.copied, s.reused)),
+                failure: None,
+            },
+            Err(why) => {
+                (self.out)(&format!(
+                    "installing: link cache unavailable ({why}); copying instead"
+                ));
+                LinkCache {
+                    failure: Some(why),
+                    ..LinkCache::default()
+                }
+            }
+        }
     }
 
     pub fn restore(&self) -> Result<Vec<Drift>> {
@@ -1163,12 +1291,15 @@ impl<'a> Installer<'a> {
             self.objects().put_file(reg)?;
             std::fs::write(reg, out).map_err(io_err(reg))?;
         }
+        let mut hashes = Hashes::load(self.data);
         for (rel, rec) in &baseline.files {
             let path = self.path(rel);
-            if sha256_opt(&path)?.as_deref() != Some(rec.sha256.as_str()) {
+            if hashes.sha256_opt(&path)?.as_deref() != Some(rec.sha256.as_str()) {
                 self.objects().restore_to(&rec.sha256, &path)?;
+                hashes.wrote(&path, &rec.sha256);
             }
         }
+        hashes.save();
         report.extend(self.verify()?);
         Ok(report)
     }
@@ -1278,6 +1409,55 @@ mod tests {
             Source::Steam
         );
         assert_eq!(Source::detect(&root.join("bare/F1 25")), Source::Unknown);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_link_cache_copy_reports_its_progress() {
+        let root = std::env::temp_dir().join(format!("swofty-link-progress-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let built = root.join("built");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let game = Game {
+            dir: root.join("game"),
+            user_reg: None,
+            identity: Identity {
+                build_id: "1".into(),
+                exe_sha256: String::new(),
+            },
+        };
+        std::fs::create_dir_all(&game.dir).unwrap();
+        let mut entries = Vec::new();
+        let mut files = Vec::new();
+        for n in 0..3u32 {
+            let src = outside.join(format!("f{n}.bin"));
+            std::fs::write(&src, [n as u8; 8]).unwrap();
+            entries.push(crate::journal::Entry {
+                seq: n,
+                op: Op::CreateFile,
+                path: format!("mods/f{n}.bin"),
+                before: None,
+                after: None,
+                state: crate::journal::State::Pending,
+            });
+            files.push(src);
+        }
+        let sources: BTreeMap<&str, &PathBuf> = entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .zip(files.iter())
+            .collect();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let progress = |done: usize, total: usize| seen.borrow_mut().push((done, total));
+        let inst = Installer {
+            progress: &progress,
+            free_space: |_| None,
+            ..Installer::new(&root, &game)
+        };
+        let cache = inst.link_cache(&built, &entries, &sources);
+        assert_eq!(cache.synced, Some((3, 0)), "{:?}", cache.failure);
+        assert_eq!(seen.into_inner(), [(1, 3), (2, 3), (3, 3)]);
         std::fs::remove_dir_all(&root).ok();
     }
 

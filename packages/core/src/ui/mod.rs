@@ -4,11 +4,13 @@ pub mod catalog;
 pub mod check;
 pub mod era;
 pub mod hub;
+pub mod icons;
 pub mod idf;
 pub mod mfd;
 pub mod node;
 pub mod pages;
 pub mod patch;
+pub mod rows;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -40,6 +42,7 @@ const FLOWS: &str = "eaid://ui_package/flows.ui";
 const REGIONS: &str = "eaid://ui_package/region_loading.uiconfig";
 const TOOLTIPS: &str = "eaid://ui_package/databases/tool_tips.uidb";
 const UI_DATA: &str = "eaid://ui_package/databases/ui_data.uidb";
+const OVERRIDES: &str = "eaid://ui_package/databases/overrides.uidb";
 const MESSAGES: &str = "eaid://ui_package/message_data/onlineservices_messages.uimsg";
 const HUD_MESSAGES: &str = "eaid://ui_package/message_data/hud_messages.uimsg";
 const PERSISTENT_UI: &str = "eaid://ui_package/screens/persistent.ui";
@@ -185,12 +188,22 @@ fn screen_flow(input: &dyn Fn(&str) -> PathBuf, flows_ui: &[u8], erp: &str, scre
 }
 
 fn panel_shown(settings: &SessionSettings) -> bool {
+    core_toggle(settings, "show_launcher_panel")
+}
+
+// SwoftyMod's split_season_picker: off leaves the era picker with the game's single row.
+fn season_picker_split(settings: &SessionSettings) -> bool {
+    core_toggle(settings, "split_season_picker")
+}
+
+// A SwoftyMod toggle, on unless the profile turns it off.
+fn core_toggle(settings: &SessionSettings, id: &str) -> bool {
     settings
         .addons
         .iter()
         .filter(|m| m.id == CORE_ID)
         .flat_map(|m| &m.options)
-        .find(|o| o.id == "show_launcher_panel")
+        .find(|o| o.id == id)
         .and_then(|o| o.states.get(o.current))
         .is_none_or(|s| s.value != serde_json::Value::Bool(false))
 }
@@ -439,7 +452,26 @@ pub fn build(
     if !mfd_rows.is_empty() {
         persistent.push((mfd::METADATA, Box::new(mfd::metadata)));
     }
-    write_erp(&src_p, &dst_p, persistent)?;
+    // The addon tiles' icons, in persistent.erp so they are loaded wherever ADDON SETTINGS shows.
+    let [view, surface] = icons::resources(
+        &read_frag(&flow_options, icons::STOCK, 0)?,
+        &read_frag(&flow_options, &format!("{}.image", icons::STOCK), 0)?,
+    )?;
+    let persistent = persistent.into_iter().map(|(name, f)| (name, 0, f)).collect();
+    write_archive(
+        &src_p,
+        &dst_p,
+        persistent,
+        vec![
+            (view.0, era::SRV_KIND, view.1),
+            (surface.0, era::SURFACE_KIND, surface.1),
+            (
+                rows::O_ROW.to_owned(),
+                "UILayout",
+                vec![rows::row_scene(&read_frag(&flow_options, rows::O_BLOCK, 0)?)?],
+            ),
+        ],
+    )?;
     for s in &setups {
         for id in [
             format!("{}.{}", s.back, s.route),
@@ -490,6 +522,7 @@ pub fn build(
         vec![
             (TOOLTIPS, Box::new(|d| patch::tooltips(d, ADJUST_TOOLTIP))),
             (UI_DATA, Box::new(move |d| patch::ui_data(d, state))),
+            (OVERRIDES, Box::new(icons::overrides)),
         ],
     )?;
     let (src_f, dst_f) = erp("flow_persistent.erp");
@@ -577,7 +610,15 @@ pub fn build(
                 .join(", ")
         ));
     }
-    let mut eras = era_rows(input, writer, out, &mut build.lines, &mut build.warnings)?;
+    let mut eras = if season_picker_split(settings) {
+        era_rows(input, writer, out, &mut build.lines, &mut build.warnings)?
+    } else {
+        build.lines.push(
+            "ui: the season picker keeps the game's single row (SwoftyMod's Split the season picker is off)"
+                .into(),
+        );
+        Vec::new()
+    };
     for rel in car_category_boxes(input, writer, out, &eras, &mut build.lines, &mut build.warnings)? {
         if !eras.contains(&rel) {
             eras.push(rel);
@@ -1064,6 +1105,55 @@ mod tests {
             .collect();
         serde_json::json!({ "id": id, "type": "choice", "binds": "native", "label": id.replace('_', " "),
                             "description": format!("About {id}."), "current": 0, "states": states })
+    }
+
+    fn core_with(id: &str, on: bool) -> SessionSettings {
+        let states: Vec<serde_json::Value> = [true, false]
+            .iter()
+            .enumerate()
+            .map(|(i, v)| serde_json::json!({ "value": v, "text": v.to_string(), "command": format!("swofty_set:{CORE_ID}:{id}:{i}") }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "schema": 1, "profile": "t", "restart_command": "swofty_restart",
+            "addons": [{
+                "id": CORE_ID, "name": "SwoftyMod", "version": "0.2.13", "enabled": true, "locked": true,
+                "enable_commands": ["", ""],
+                "options": [{ "id": id, "type": "toggle", "binds": "native", "label": id, "current": usize::from(!on),
+                              "states": states }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_season_picker_splits_unless_swoftymod_turns_it_off() {
+        let none: SessionSettings = serde_json::from_value(serde_json::json!({
+            "schema": 1, "profile": "t", "restart_command": "swofty_restart", "addons": []
+        }))
+        .unwrap();
+        assert!(
+            season_picker_split(&none),
+            "a settings.json without the option keeps the split"
+        );
+        assert!(season_picker_split(&core_with("split_season_picker", true)));
+        assert!(!season_picker_split(&core_with("split_season_picker", false)));
+        let panel_off = core_with("show_launcher_panel", false);
+        assert!(
+            season_picker_split(&panel_off),
+            "another SwoftyMod toggle leaves it alone"
+        );
+        assert!(!panel_shown(&panel_off));
+    }
+
+    #[test]
+    fn swoftymod_declares_the_season_picker_toggle_on() {
+        let core = crate::builtin::core_manifest();
+        let o = core
+            .options
+            .iter()
+            .find(|o| o.id == "split_season_picker")
+            .expect("declared");
+        assert_eq!(o.default, serde_json::Value::Bool(true));
     }
 
     fn setup_settings() -> SessionSettings {

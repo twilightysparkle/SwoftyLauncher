@@ -22,6 +22,7 @@ This manifest uses every field. Only `schema_version`, `id`, `name`, `version` a
   "description": "One line, shown on the Tools page.",
   "license": "MIT",                                  // SPDX identifier
   "homepage": "https://example.com/my-addon",
+  "repository": "https://github.com/author/my-addon",
   "icon": "icon.png",                                // a path inside the addon
   "kind": ["database", "erp", "text", "ui", "files", "native"],   // what it touches
   "category": "career",                              // what it is for
@@ -110,6 +111,7 @@ swofty: invalid manifest: yourname.my-addon: option ai_offset: a slider has at m
 "description": "One-line summary.",
 "license": "MIT",
 "homepage": "https://example.com/my-addon",
+"repository": "https://github.com/author/my-addon",
 "icon": "icons/my-addon.svg",
 "kind": ["database", "erp"]
 ```
@@ -122,6 +124,7 @@ swofty: invalid manifest: yourname.my-addon: option ai_offset: a slider has at m
 - **`description`** (string, optional): a one-line summary, shown on the Tools page.
 - **`license`** (string, optional): an SPDX identifier, such as `MIT`.
 - **`homepage`** (string, optional): a URL.
+- **`repository`** (string, optional): the `https://` URL of your addon's source code. The **Addons** page links to it under **Source code**, and shows **Not listed** for an installed addon without one. A launcher before 1.8.19 rejects this field; set `"compat": { "launcher": ">=1.8.19" }` when you use it.
 - **`icon`** (string, optional): a path inside your addon, shown on the Tools page and your addon's sidebar pages. Use an `.svg` for a one-colour glyph in the launcher's icon style, or a square `.png`, `.jpg` or `.webp` to show the image as it is.
 - **`kind`** (string array): what the addon touches.
 
@@ -222,7 +225,7 @@ Only a range the launcher is above counts as a cap: every comparator the launche
 "load_after": ["swofty.track.*"]
 ```
 
-- **`requires`** (`[{ id, version }]`): the addons that must be installed. `version` is a semver range and defaults to `*`.
+- **`requires`** (`[{ id, version }]`): the addons that must be installed. `version` is a semver range and defaults to `*`. `*` and an empty range accept every version, pre-releases included. For any other range a pre-release counts as its base version, so `>=1.0.0` accepts `1.1.0-beta` and `<1.1.0` rejects it. An `=` pin is exact: `=1.0.0` rejects `1.0.0-beta`.
 - **`conflicts`** (`[{ id, touches? }]`): the addons that must not be enabled together. Use `touches` to narrow the conflict to a shared target; `id` may be `*`.
 - **`load_after`** (string array): addon ids or `*` patterns to build before your addon.
 
@@ -449,6 +452,7 @@ Some operation types are still in development. Check [Current status](/design/#c
 | `overlay` | [Overlay](/reference/std/overlay) | Draws over the game | 1.3.7 or later |
 | `shaders` | [Shader packs](./shader-packs) | Changes the picture | 1.4.0 or later |
 | `postfx` | [Post-process passes](./postfx) | Changes the picture | 1.5.4 or later |
+| `telemetry` | [Telemetry](/reference/std/telemetry) | Reads live race data | 1.8.19 or later |
 
 An earlier launcher rejects the manifest.
 

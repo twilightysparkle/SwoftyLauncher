@@ -54,7 +54,7 @@ SWOFTY_REGISTER
 - **`requires`:** Play stops while one is missing, with a message naming the fix, the same way it stops for a missing addon.
 - **`recommends`:** optional. It never stops Play. The Addon Browser offers it at install, and the launcher names it before Play when something is skipped because of it.
 - **`for`:** shown to players. Keep it short and concrete.
-- **A `record` entry** means "some enabled addon provides this record". Its `version` is a range on the providing addon's version.
+- **A `record` entry** means "some enabled addon provides this record". Its `version` is a range on the providing addon's version. Ranges treat a pre-release as its base version, `*` accepts every version, and `=` pins are exact (see [`requires`](/reference/addons/manifest)).
 
 ## Addons that break others
 
@@ -374,6 +374,7 @@ Missing content
 ```
 
 - **What stops Play:** a missing `requires` entry, or a `breaks` on an installed addon, with a message naming the fix.
+- **Database rows stop Play too:** after each session the launcher adds every enabled addon that owns vehicle, engine, team, driver or head rows (`registry/row-ids.json`), and every addon whose track the session loaded (the `track` of its `[apply] facts` loader.log lines), to the addon list of each career of that profile saved in the session, saved Grand Prix seasons included. A track addon the career never raced is not recorded. The game reads every career in the save when it starts, and a Grand Prix or career that races a track whose addon is gone crashes setting up the session, so while one of those addons is off or uninstalled, Play asks first and names the addon and the careers. Only the careers in the save the profile boots count: its own launcher save with Use launcher saves on, otherwise the Steam save. **Play anyway** starts the game; it can crash at Press to Start. Turn the addon back on, or restore a save from before.
 - **What warns:** a `conflicts` entry, and a reference inside a record. An unresolved record hides its era box or tile, or guards it.
 - **Where the launcher gets records:** each enabled addon's `registry.lock.json`, data files and `registry.json`, plus the core's `registry/catalog.json` from the last session for what actually loaded.
 - **Install buttons** appear when the Addon Browser knows a published addon that provides the record.
@@ -387,6 +388,8 @@ Sochi Autodrom is in 1 career
   Autodrom is back on. Your other careers aren't affected.
   [Turn off]  [Cancel]
 ```
+
+Turning an addon off, removing it from a profile or uninstalling it in the launcher shows the same warning, with the careers that need it, when a career lists it.
 
 `swofty addons disable mod.sochi` prints the same text and needs `--yes`. `swofty careers` lists every career and what it needs, checked against a profile.
 

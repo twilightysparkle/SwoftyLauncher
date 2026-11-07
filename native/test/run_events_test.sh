@@ -43,6 +43,9 @@ mkdir -p "$OUT"
     -o "$OUT/netplay_room_test" netplay_room_test.cpp
 "$OUT/netplay_room_test"
 "${PIN[@]}" zig c++ -std=c++23 -O2 -Wall -Wextra -Wno-nullability-completeness -I../src/core \
+    -o "$OUT/entitlements_test" entitlements_test.cpp
+"$OUT/entitlements_test"
+"${PIN[@]}" zig c++ -std=c++23 -O2 -Wall -Wextra -Wno-nullability-completeness -I../src/core \
     -o "$OUT/room_cover_test" room_cover_test.cpp
 "$OUT/room_cover_test"
 "${PIN[@]}" zig c++ -std=c++23 -O2 -Wall -Wextra -Wno-nullability-completeness -I../../packages/sdk/include \
@@ -66,3 +69,9 @@ mkdir -p "$OUT"
 "${PIN[@]}" zig c++ -std=c++23 -O2 -Wall -Wextra -Wno-nullability-completeness -I../../packages/sdk/include \
     -o "$OUT/udp_ids_test" udp_ids_test.cpp
 "$OUT/udp_ids_test"
+"${PIN[@]}" zig c++ -std=c++23 -O2 -Wall -Wextra -Wno-nullability-completeness -I../../packages/sdk/include \
+    -o "$OUT/udp_telemetry_test" udp_telemetry_test.cpp
+"$OUT/udp_telemetry_test"
+"${PIN[@]}" zig c++ -std=c++23 -O2 -Wall -Wextra -Wno-nullability-completeness -I../../packages/sdk/include \
+    -o "$OUT/view_flow_test" view_flow_test.cpp
+"$OUT/view_flow_test"

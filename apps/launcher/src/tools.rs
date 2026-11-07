@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use crate::scale::px;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::notification::Notification;
@@ -19,6 +20,7 @@ use swofty_core::app_control::Block;
 use crate::pages::GUTTER;
 use crate::shell::{Page, Shell};
 use crate::theme::{Palette, scrollbar_x};
+use crate::ui::Card;
 
 mod art {
     include!(concat!(env!("OUT_DIR"), "/tools_art.rs"));
@@ -277,14 +279,10 @@ impl Shell {
             .more
             .clone()
             .map(|l| web_link(format!("tool-{index}-more"), l.label, l.url, p));
-        v_flex()
+        Card::new()
             .w(px(width))
             .flex_shrink_0()
             .rounded(px(14.))
-            .border_1()
-            .border_color(p.border)
-            .bg(p.surface)
-            .overflow_hidden()
             .child(Self::tool_art(tool, width - 2., art, p))
             .child(
                 v_flex()

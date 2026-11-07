@@ -8,7 +8,7 @@
 //! removes it, so the list survives a restore of the game folder, and checks
 //! each career's addons against a profile.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,16 @@ use crate::manifest::AddonManifest;
 
 pub const GAME_PATH: &str = "swofty/careers/index.json";
 pub const DATA_PATH: &str = "careers/index.json";
+
+/// The `why` of an addon recorded because its database rows were on when the career was saved.
+pub const ROWS_WHY: &str = "database rows in the save";
+
+/// The `why` of an addon recorded because a session of the career's save loaded one of its tracks.
+pub const TRACK_WHY: &str = "a track its sessions loaded";
+
+fn holds_rows(a: &CareerAddon) -> bool {
+    matches!(a.why.as_deref(), Some(ROWS_WHY | TRACK_WHY))
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CareerAddon {
@@ -130,6 +140,11 @@ pub fn sync(data: &Path, game: Option<&Path>, stamp: Option<&str>) -> crate::Res
         match kept.iter_mut().find(|k| k.career == c.career) {
             Some(k) => {
                 c.profile = c.profile.or_else(|| k.profile.clone());
+                for a in k.addons.iter().filter(|a| holds_rows(a)) {
+                    if !c.addons.iter().any(|o| o.id == a.id) {
+                        c.addons.push(a.clone());
+                    }
+                }
                 *k = c;
             }
             None => kept.push(c),
@@ -231,11 +246,188 @@ pub fn missing(c: &Career, order: &[String], installed: &BTreeMap<String, AddonM
     out
 }
 
+fn saved_ms(c: &Career) -> Option<i64> {
+    let n = |name: &str| c.extra.get(name).and_then(Value::as_i64);
+    n("last_saved").or_else(|| n("last_played").map(|s| s * 1000))
+}
+
+/// The careers of `list` in the save `profile` boots: the ones made under a profile that boots the
+/// same save (its own launcher save, or the shared Steam save), and the ones with no profile yet.
+pub fn in_save_of<'a>(list: &'a [Career], data: &Path, profile: &str) -> Vec<&'a Career> {
+    let mut sources: BTreeMap<&str, Option<String>> = BTreeMap::new();
+    let mine = crate::vault::Location::source_of_profile(data, profile);
+    list.iter()
+        .filter(|c| match c.profile.as_deref() {
+            None => true,
+            Some(p) => {
+                *sources
+                    .entry(p)
+                    .or_insert_with(|| crate::vault::Location::source_of_profile(data, p))
+                    == mine
+            }
+        })
+        .collect()
+}
+
+/// Records on every career in the save of `profile` saved at or after `since_ms` (or with no save time) each
+/// addon of `on` that owns vehicle, engine, team, driver or head rows, since the game reads those
+/// rows when it loads the save. Returns whether any career changed.
+pub fn record_rows(
+    list: &mut [Career],
+    in_save: &dyn Fn(&Career) -> bool,
+    since_ms: i64,
+    on: &[String],
+    owners: &BTreeSet<String>,
+    installed: &BTreeMap<String, AddonManifest>,
+) -> bool {
+    let ids: Vec<&String> = on.iter().filter(|id| owners.contains(*id)).collect();
+    record(list, in_save, since_ms, &ids, ROWS_WHY, installed)
+}
+
+/// The addons whose tracks a session loaded, from the `[apply] facts` lines of its loader.log
+/// (`track <addon>/<code>`; the game's own tracks name no addon).
+pub fn session_tracks(loader_log: &str) -> BTreeSet<String> {
+    loader_log
+        .lines()
+        .filter_map(|l| {
+            let rest = l.split("[apply] facts: ").nth(1)?;
+            let track = rest.rsplit_once(", track ")?.1.trim();
+            let (addon, _) = track.split_once('/')?;
+            (addon != "game" && !addon.is_empty()).then(|| addon.to_owned())
+        })
+        .collect()
+}
+
+fn record(
+    list: &mut [Career],
+    in_save: &dyn Fn(&Career) -> bool,
+    since_ms: i64,
+    ids: &[&String],
+    why: &str,
+    installed: &BTreeMap<String, AddonManifest>,
+) -> bool {
+    let mut changed = false;
+    for c in list.iter_mut() {
+        if !in_save(c) || c.is_gone() || saved_ms(c).is_some_and(|t| t < since_ms) {
+            continue;
+        }
+        for id in ids {
+            if c.addons.iter().any(|a| &a.id == *id) {
+                continue;
+            }
+            c.addons.push(CareerAddon {
+                id: (*id).clone(),
+                version: installed.get(*id).map(|m| m.version.to_string()),
+                need: None,
+                why: Some(why.to_owned()),
+            });
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// After a session of `profile` that started at `since_ms`: records the database addons that were on
+/// ([`record_rows`]) and the addons whose tracks the session loaded ([`session_tracks`]) in the
+/// data folder's career index.
+pub fn record_session(data: &Path, profile: &str, since_ms: i64, loader_log: &str) -> crate::Result<()> {
+    let mut list = read(&data_path(data));
+    if list.is_empty() {
+        return Ok(());
+    }
+    let store = crate::store::Store::new(data);
+    let (Ok(p), Ok(installed)) = (store.profile(profile), store.addons()) else {
+        return Ok(());
+    };
+    let Ok(plan) = crate::resolver::resolve(&p, &installed) else {
+        return Ok(());
+    };
+    let owners = crate::row_ids::save_owners(data);
+    let ids: BTreeSet<String> = in_save_of(&list, data, profile)
+        .into_iter()
+        .map(|c| c.career.clone())
+        .collect();
+    let in_save = |c: &Career| ids.contains(&c.career);
+    let tracks: Vec<String> = session_tracks(loader_log)
+        .into_iter()
+        .filter(|id| installed.contains_key(id))
+        .collect();
+    let mut changed = record_rows(&mut list, &in_save, since_ms, &plan.order, &owners, &installed);
+    changed |= record(
+        &mut list,
+        &in_save,
+        since_ms,
+        &tracks.iter().collect::<Vec<_>>(),
+        TRACK_WHY,
+        &installed,
+    );
+    if changed {
+        crate::write_json_shared(
+            &data_path(data),
+            &serde_json::json!({ "version": 1, "careers": list }),
+        )?;
+    }
+    Ok(())
+}
+
+/// The Play stop for careers whose saved database rows come from an addon that is off or not
+/// installed in profile `order`: the game reads every career in the save when it starts, so it
+/// crashes whichever career is picked. `None` when no such addon is missing.
+pub fn stop_line(
+    list: &[Career],
+    order: &[String],
+    installed: &BTreeMap<String, AddonManifest>,
+) -> Option<String> {
+    let mut addons: BTreeMap<&str, String> = BTreeMap::new();
+    let mut careers: Vec<&str> = Vec::new();
+    for c in list.iter().filter(|c| !c.is_gone()) {
+        let gone: Vec<&CareerAddon> = c
+            .addons
+            .iter()
+            .filter(|a| holds_rows(a))
+            .filter(|a| !order.contains(&a.id) || !installed.contains_key(&a.id))
+            .collect();
+        if gone.is_empty() {
+            continue;
+        }
+        for a in gone {
+            let name = installed.get(&a.id).map_or(a.id.clone(), |m| m.name.clone());
+            let state = if installed.contains_key(&a.id) {
+                "off"
+            } else {
+                "not installed"
+            };
+            addons.insert(&a.id, format!("{name} ({state})"));
+        }
+        careers.push(if c.label.is_empty() { &c.career } else { &c.label });
+    }
+    if addons.is_empty() {
+        return None;
+    }
+    let names = addons.values().cloned().collect::<Vec<_>>().join(", ");
+    let shown = careers.iter().take(3).copied().collect::<Vec<_>>().join("; ");
+    let more = careers.len().saturating_sub(3);
+    let more = if more > 0 {
+        format!("; {more} more")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "The game won't start with {names}: {} in your save use its database rows ({shown}{more}). \
+         Turn {} back on and press Play, or restore a save from before in Profiles > Saves.",
+        match careers.len() {
+            1 => "1 career".to_owned(),
+            n => format!("{n} careers"),
+        },
+        if addons.len() == 1 { "it" } else { "them" }
+    ))
+}
+
 /// The careers in `list` that list `addon` among the addons they need and are still in the save:
 /// the careers turning `addon` off would stop from loading.
 pub fn needing<'a>(list: &'a [Career], addon: &str) -> Vec<&'a Career> {
     list.iter()
-        .filter(|c| c.status() != "missing")
+        .filter(|c| !c.is_gone())
         .filter(|c| c.addons.iter().any(|a| a.id == addon))
         .collect()
 }
@@ -249,7 +441,7 @@ pub fn play_line(
 ) -> Option<String> {
     let short: Vec<(&Career, Vec<String>)> = list
         .iter()
-        .filter(|c| c.status() != "missing")
+        .filter(|c| !c.is_gone())
         .map(|c| (c, missing(c, order, installed)))
         .filter(|(_, m)| !m.is_empty())
         .collect();
@@ -285,6 +477,11 @@ pub fn play_line(
 }
 
 impl Career {
+    /// Whether the career is gone from the save: missing from the last profile load or deleted in game.
+    pub fn is_gone(&self) -> bool {
+        matches!(self.status(), "missing" | "deleted")
+    }
+
     /// `present` unless the core marked the career missing from the last profile load.
     pub fn status(&self) -> &str {
         self.extra
@@ -414,6 +611,221 @@ mod tests {
                 "2 careers won't load in this profile: L a needs N x.one (x.one), which is off; L c needs N x.two (x.two), which is off"
             )
         );
+    }
+
+    #[test]
+    fn careers_deleted_in_game_are_left_out_of_the_play_line_and_stop_line() {
+        let record = |id: &str, status: &str| {
+            format!(
+                r#"{{"career":"{id}","label":"L {id}","status":"{status}","addons":[{{"id":"x.one","why":"{ROWS_WHY}"}}]}}"#
+            )
+        };
+        let installed = installed_of(&["x.one"]);
+        let list_of = |status: &str| parse(&format!("[{}]", record("a", status)));
+
+        assert!(play_line(&list_of("present"), &[], &installed).is_some());
+        assert!(needing(&list_of("present"), "x.one").len() == 1);
+
+        let deleted = list_of("deleted");
+        assert_eq!(play_line(&deleted, &[], &installed), None);
+        assert_eq!(stop_line(&deleted, &[], &installed), None);
+        assert!(needing(&deleted, "x.one").is_empty());
+
+        let missing = list_of("missing");
+        assert_eq!(play_line(&missing, &[], &installed), None);
+        assert_eq!(stop_line(&missing, &[], &installed), None);
+        assert!(needing(&missing, "x.one").is_empty());
+    }
+
+    #[test]
+    fn deleted_careers_do_not_record_addons() {
+        let installed = installed_of(&["x.one"]);
+        let mut list =
+            parse(r#"[{"career":"a","profile":"p","status":"deleted","last_saved":2000,"addons":[]}]"#);
+        let ids = ["x.one".to_owned()];
+        let ids: Vec<&String> = ids.iter().collect();
+        assert!(!record(&mut list, &|_| true, 0, &ids, "why", &installed));
+        assert!(list[0].addons.is_empty());
+    }
+
+    fn installed_of(ids: &[&str]) -> BTreeMap<String, AddonManifest> {
+        ids.iter()
+            .map(|id| ((*id).to_owned(), manifest(id, "1.0.0")))
+            .collect()
+    }
+
+    fn my_team(saved: i64) -> Vec<Career> {
+        parse(&format!(
+            r#"[{{"career":"mt-1","profile":"p","label":"My Team","mode":"my_team","last_saved":{saved},"addons":[]}},
+               {{"career":"mt-2","profile":"other","label":"Elsewhere","last_saved":{saved},"addons":[]}},
+               {{"career":"mt-3","profile":"p","label":"Old","status":"missing","last_saved":{saved},"addons":[]}}]"#
+        ))
+    }
+
+    #[test]
+    fn records_the_row_owning_addons_that_were_on_when_a_career_was_saved() {
+        let installed = installed_of(&["x.engines", "x.skin", "x.liveries"]);
+        let owners: BTreeSet<String> = ["x.engines".to_owned(), "x.liveries".to_owned()].into();
+        let on: Vec<String> = vec!["x.engines".into(), "x.skin".into()];
+        let mut list = my_team(2_000);
+        assert!(record_rows(
+            &mut list,
+            &|c| c.profile.as_deref() == Some("p"),
+            1_000,
+            &on,
+            &owners,
+            &installed
+        ));
+        assert_eq!(list[0].addons.len(), 1);
+        assert_eq!(list[0].addons[0].id, "x.engines");
+        assert_eq!(list[0].addons[0].version.as_deref(), Some("1.0.0"));
+        assert_eq!(list[0].addons[0].why.as_deref(), Some(ROWS_WHY));
+        assert!(list[1].addons.is_empty(), "another profile's career");
+        assert!(list[2].addons.is_empty(), "a career gone from the save");
+        assert!(!record_rows(
+            &mut list,
+            &|c| c.profile.as_deref() == Some("p"),
+            1_000,
+            &on,
+            &owners,
+            &installed
+        ));
+        let mut older = my_team(500);
+        assert!(!record_rows(
+            &mut older,
+            &|c| c.profile.as_deref() == Some("p"),
+            1_000,
+            &on,
+            &owners,
+            &installed
+        ));
+        assert!(older[0].addons.is_empty());
+    }
+
+    #[test]
+    fn a_profile_boots_only_the_careers_of_its_own_save() {
+        let root = std::env::temp_dir().join(format!("swofty-careers-scope-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        for (name, launcher_saves) in [("a", true), ("b", true), ("s1", false), ("s2", false)] {
+            let dir = root.join("profiles");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                format!(r#"{{"name":"{name}","launcher_saves":{launcher_saves}}}"#),
+            )
+            .ok();
+        }
+        let list = parse(
+            r#"[{"career":"1","profile":"a"},{"career":"2","profile":"b"},{"career":"3"},
+                {"career":"4","profile":"s1"},{"career":"5","profile":"s2"}]"#,
+        );
+        let ids = |p: &str| -> Vec<String> {
+            in_save_of(&list, &root, p)
+                .iter()
+                .map(|c| c.career.clone())
+                .collect()
+        };
+        assert_eq!(ids("a"), ["1", "3"]);
+        assert_eq!(ids("b"), ["2", "3"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stops_play_when_a_saved_rows_addon_is_off_or_gone_in_any_career() {
+        let installed = installed_of(&["x.engines"]);
+        let owners: BTreeSet<String> = ["x.engines".to_owned()].into();
+        let mut list = my_team(2_000);
+        let on: Vec<String> = vec!["x.engines".into()];
+        record_rows(
+            &mut list,
+            &|c| c.profile.as_deref() == Some("p"),
+            0,
+            &on,
+            &owners,
+            &installed,
+        );
+        assert_eq!(stop_line(&list, &on, &installed), None);
+        let stop = stop_line(&list, &[], &installed).unwrap();
+        assert!(stop.contains("N x.engines (off)"), "{stop}");
+        assert!(
+            stop.contains("1 career in your save use its database rows (My Team)"),
+            "{stop}"
+        );
+        assert!(stop.contains("Turn it back on"), "{stop}");
+        let gone = stop_line(&list, &on, &BTreeMap::new()).unwrap();
+        assert!(gone.contains("x.engines (not installed)"), "{gone}");
+        list[0]
+            .extra
+            .insert("status".into(), Value::String("missing".into()));
+        assert_eq!(stop_line(&list, &[], &installed), None);
+    }
+
+    #[test]
+    fn a_career_records_only_the_track_addons_its_sessions_loaded() {
+        let log = "[apply] facts: mode grand_prix, session race, track track.mza26/mza26\n\
+                   [apply] facts: mode grand_prix, session race, track game/Bahrain\n\
+                   [apply] facts: mode unknown, session none, track none\n";
+        assert_eq!(
+            session_tracks(log).into_iter().collect::<Vec<_>>(),
+            ["track.mza26"]
+        );
+        let installed = installed_of(&["track.mza26", "track.other"]);
+        let mut list = parse(
+            r#"[{"career":"gp-1","profile":"p","label":"Grand Prix","mode":"grand_prix","last_saved":2000,"addons":[]}]"#,
+        );
+        let tracks: Vec<String> = session_tracks(log).into_iter().collect();
+        let ids: Vec<&String> = tracks.iter().collect();
+        assert!(record(
+            &mut list,
+            &|c| c.profile.as_deref() == Some("p"),
+            0,
+            &ids,
+            TRACK_WHY,
+            &installed
+        ));
+        assert_eq!(list[0].addons.len(), 1);
+        assert_eq!(list[0].addons[0].id, "track.mza26");
+        let on: Vec<String> = vec!["track.mza26".into()];
+        assert_eq!(stop_line(&list, &on, &installed), None);
+        let unrelated: Vec<String> = vec!["track.mza26".into(), "track.other".into()];
+        assert_eq!(stop_line(&list, &unrelated, &installed), None);
+        let off = stop_line(&list, &["track.other".into()], &installed).unwrap();
+        assert!(off.contains("N track.mza26 (off)"), "{off}");
+        assert!(off.contains("(Grand Prix)"), "{off}");
+        let gone = stop_line(&list, &on, &BTreeMap::new()).unwrap();
+        assert!(gone.contains("track.mza26 (not installed)"), "{gone}");
+    }
+
+    #[test]
+    fn a_content_addon_is_not_a_play_stop_and_sync_keeps_the_recorded_rows() {
+        let list = parse(&format!("[{RECORD}]"));
+        assert_eq!(stop_line(&list, &[], &BTreeMap::new()), None);
+        let root = std::env::temp_dir().join(format!("swofty-careers-rows-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let (data, game) = (root.join("data"), root.join("game"));
+        let mut mine = my_team(2_000);
+        mine[0].addons.push(CareerAddon {
+            id: "x.engines".into(),
+            why: Some(ROWS_WHY.into()),
+            ..CareerAddon::default()
+        });
+        std::fs::create_dir_all(data.join("careers")).unwrap();
+        std::fs::write(
+            data_path(&data),
+            serde_json::json!({ "version": 1, "careers": mine }).to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(game.join("swofty/careers")).unwrap();
+        std::fs::write(
+            game.join(GAME_PATH),
+            r#"[{"career":"mt-1","profile":"p","label":"My Team","addons":[]}]"#,
+        )
+        .unwrap();
+        let merged = sync(&data, Some(&game), None).unwrap();
+        let kept = merged.iter().find(|c| c.career == "mt-1").unwrap();
+        assert_eq!(kept.addons.len(), 1);
+        assert_eq!(kept.addons[0].id, "x.engines");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::scale::px;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
@@ -25,6 +26,7 @@ const RESTART_DELAY: Duration = Duration::from_millis(1500);
 pub(crate) const BUILDING: &str =
     "Swofty is still building your mods. Update when it finishes, or cancel the build.";
 pub const BUTTON_WIDTH: f32 = 204.;
+const MOVE_DOCS: &str = "https://f1.swofty.net/guide/installation#moving-your-addons-and-saves";
 
 pub struct Updates {
     pub copy: Result<Install, String>,
@@ -264,6 +266,7 @@ impl Shell {
             PlayState::Running
                 | PlayState::Elsewhere(_)
                 | PlayState::Launching
+                | PlayState::Preparing
                 | PlayState::Restoring
                 | PlayState::Detecting
                 | PlayState::Checking
@@ -279,7 +282,7 @@ impl Shell {
         }
         if matches!(
             self.play_state(),
-            PlayState::Running | PlayState::Elsewhere(_) | PlayState::Launching
+            PlayState::Running | PlayState::Elsewhere(_) | PlayState::Launching | PlayState::Preparing
         ) {
             window.push_notification(Notification::error("Close F1 25 before updating."), cx);
             return;
@@ -527,7 +530,7 @@ impl Shell {
             Gate::Installing => (
                 IconName::LoaderCircle,
                 match progress {
-                    Some(done) => format!("Updating {:.0}%", done * 100.),
+                    Some(done) => format!("Updating {}", crate::format::percent(done)),
                     None => "Updating…".into(),
                 },
                 detail,
@@ -640,6 +643,7 @@ impl Shell {
             );
         };
         let notes = update::notes_url(&tag);
+        let fix = reason == update::DATA_IN_INSTALL;
         Some(
             bar.child(
                 Icon::new(IconName::CircleArrowUp)
@@ -651,11 +655,49 @@ impl Shell {
                 sentence(reason),
                 update::current_version()
             )))
+            .when(fix, |d| {
+                d.child(
+                    link("update-move-data", "Moving your addons and saves", p)
+                        .flex_shrink_0()
+                        .on_click(|_, _, cx| cx.open_url(MOVE_DOCS)),
+                )
+            })
             .child(
                 link("update-release", "Release page", p)
                     .flex_shrink_0()
                     .on_click(move |_, _, cx| cx.open_url(&notes)),
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    fn blocked() -> Updates {
+        let mut u = Updates::new();
+        u.copy = Err(update::DATA_IN_INSTALL.into());
+        u.launcher.tag = Some("v999.0.0".into());
+        u
+    }
+
+    #[test]
+    fn a_data_folder_inside_the_install_shows_one_notice_and_no_update() {
+        let u = blocked();
+        let (version, tag, reason) = u.blocked_notice().unwrap();
+        assert_eq!(version, Version::new(999, 0, 0));
+        assert_eq!(tag, "v999.0.0");
+        assert_eq!(reason, update::DATA_IN_INSTALL);
+        assert!(u.plan().is_empty());
+        assert_eq!(updater::gate(&u.phase, !u.plan().is_empty(), false), Gate::Play);
+    }
+
+    #[test]
+    fn no_notice_when_the_launcher_is_current() {
+        let mut u = blocked();
+        u.launcher.tag = Some("v0.0.1".into());
+        assert!(u.blocked_notice().is_none());
     }
 }

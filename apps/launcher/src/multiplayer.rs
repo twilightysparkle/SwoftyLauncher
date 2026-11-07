@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::scale::px;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -18,10 +19,12 @@ use swofty_core::multiplayer::diag;
 use swofty_core::multiplayer::game::{self as mp_game, Command, GameStatus, Screen};
 use swofty_core::multiplayer::progress::{self, MemberStage, Problem, Progress, Step};
 use swofty_core::multiplayer::rooms::{Api, RoomAddon, RoomSettings, RoomSummary};
-use swofty_core::multiplayer::session::{Local, MemberState, Phase, Session, SessionState, Setup};
+use swofty_core::multiplayer::session::{
+    Local, MemberState, Phase, RoomContent, Session, SessionState, Setup,
+};
 use swofty_core::store::Store;
+use swofty_i18n::trn;
 
-use crate::library::plural;
 use crate::pages::{GUTTER, badge, label, monogram, tag};
 use crate::shell::{Page, Shell};
 use crate::theme::{Palette, ScrollArea};
@@ -186,6 +189,14 @@ pub(crate) fn exit_leaves(seen: bool, running: bool, busy: bool) -> bool {
     seen && !running && !busy
 }
 
+/// The restart dialog's button: what pressing it does.
+fn restart_ok_text(start: &Start) -> &'static str {
+    match start {
+        Start::Create(_) => "Create room and join",
+        Start::Join(_) => "Join room",
+    }
+}
+
 pub(crate) fn exit_notice(host: bool) -> &'static str {
     if host {
         "F1 25 closed, so your room closed."
@@ -204,6 +215,30 @@ pub(crate) fn member_word(m: &MemberState) -> (&'static str, Tone) {
         Some(stage) => (stage.word(), Tone::Working),
         None => ("Joining\u{2026}", Tone::Working),
     }
+}
+
+/// A member's word when the host picked the F1 2026 cars and their game says it doesn't have that content.
+pub(crate) fn content_word(content: &RoomContent, m: &MemberState) -> Option<(&'static str, Tone)> {
+    (m.connected && content.needs_f1_2026() && content.owns_f1_2026.get(&m.id) == Some(&false))
+        .then_some(("No F1 2026 content", Tone::Blocked))
+}
+
+/// This player's row for the host's F1 2026 cars: whether their game has the content, `None` until the host
+/// picked them.
+pub(crate) fn content_check(state: &SessionState) -> Option<(Option<bool>, &'static str)> {
+    if !state.content.needs_f1_2026() {
+        return None;
+    }
+    let me = state.members.iter().find(|m| m.me)?;
+    let owns = state.content.owns_f1_2026.get(&me.id).copied();
+    Some((
+        owns,
+        match owns {
+            Some(true) => "You have the F1 2026 content",
+            Some(false) => "Your copy of F1 25 doesn't have the F1 2026 content",
+            None => "F1 25 hasn't said yet whether you have it",
+        },
+    ))
 }
 
 pub(crate) fn joined(state: &SessionState) -> usize {
@@ -486,6 +521,13 @@ impl Shell {
             window,
             cx,
         );
+        if !started {
+            self.mp_room_launch_result(false);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn mp_room_launch_result(&mut self, started: bool) {
         let Some(session) = &self.mp_page.session else {
             return;
         };
@@ -495,7 +537,6 @@ impl Shell {
             self.mp_page.room_launching = false;
             session.launch_failed("see the notice, finish what it asks, then try again");
         }
-        cx.notify();
     }
 
     /// The launch `mp_room_launch` started ended without the game: `why` says what stopped it.
@@ -581,18 +622,19 @@ impl Shell {
             return;
         }
         let shell = cx.entity().downgrade();
-        let start = std::cell::RefCell::new(Some(start));
+        let ok = restart_ok_text(&start);
+        // The dialog's builder runs on every frame it draws, so each run gets its own copy of the start.
         window.open_alert_dialog(cx, move |alert, _, _| {
-            let (shell, pending) = (shell.clone(), start.borrow_mut().take());
+            let (shell, start) = (shell.clone(), start.clone());
             alert
                 .title("Restart F1 25?")
-                .description("F1 25 will restart for this session. Unsaved progress is lost.")
-                .ok_text("Restart and play")
+                .description("F1 25 is open, so it restarts for this room. Unsaved progress is lost.")
+                .ok_text(ok)
                 .show_cancel(true)
                 .on_ok(move |_, window, cx| {
-                    if let Some(start) = pending.clone() {
-                        shell.update(cx, |s, cx| s.mp_begin(start, window, cx)).ok();
-                    }
+                    shell
+                        .update(cx, |s, cx| s.mp_begin(start.clone(), window, cx))
+                        .ok();
                     true
                 })
         });
@@ -1121,22 +1163,21 @@ impl Shell {
             .outline()
             .small()
             .w(px(160.))
-            .label(plural(usize::from(m.max), "player", "players"))
+            .label(trn(usize::from(m.max), "{count} player", "{count} players"))
             .dropdown_caret(true)
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
                 for n in MIN_PLAYERS..=MAX_PLAYERS {
                     let shell = shell.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(plural(usize::from(n), "player", "players")).on_click(
-                            move |_, _, cx| {
+                        PopupMenuItem::new(trn(usize::from(n), "{count} player", "{count} players"))
+                            .on_click(move |_, _, cx| {
                                 shell
                                     .update(cx, |s, cx| {
                                         s.mp_page.max = n;
                                         cx.notify();
                                     })
                                     .ok();
-                            },
-                        ),
+                            }),
                     );
                 }
                 menu
@@ -1284,7 +1325,7 @@ impl Shell {
             format!(
                 "You are missing or have off {} of {}.",
                 lacking,
-                plural(checks.len(), "addon", "addons")
+                trn(checks.len(), "{count} addon", "{count} addons")
             )
         };
         let rows: Vec<AnyElement> = checks
@@ -1562,8 +1603,45 @@ impl Shell {
             .members
             .iter()
             .enumerate()
-            .map(|(i, member)| self.member_row(member, i == 0, p))
+            .map(|(i, member)| self.member_row(member, &state.content, i == 0, p))
             .collect();
+        let cars = content_check(state).map(|(owns, text)| {
+            v_flex()
+                .gap(px(8.))
+                .child(self.section_head("CARS".to_owned(), p))
+                .child(
+                    h_flex()
+                        .px(px(16.))
+                        .py(px(10.))
+                        .gap(px(12.))
+                        .items_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(p.border)
+                        .child(
+                            Icon::new(match owns {
+                                Some(true) => IconName::Check,
+                                Some(false) => IconName::X,
+                                None => IconName::Info,
+                            })
+                            .size(px(16.))
+                            .text_color(match owns {
+                                Some(true) => p.success,
+                                Some(false) => p.error,
+                                None => p.text_muted,
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(14.))
+                                .child("F1 2026 cars"),
+                        )
+                        .child(div().text_size(px(13.)).text_color(p.text_muted).child(text)),
+                )
+        });
         v_flex()
             .size_full()
             .child(self.header(title, subtitle, actions, p))
@@ -1577,6 +1655,7 @@ impl Shell {
                     .pb(px(24.))
                     .gap(px(24.))
                     .child(status)
+                    .children(cars)
                     .child(
                         v_flex()
                             .gap(px(8.))
@@ -1601,8 +1680,8 @@ impl Shell {
             .into_any_element()
     }
 
-    fn member_row(&self, m: &MemberState, first: bool, p: Palette) -> AnyElement {
-        let (word, tone) = member_word(m);
+    fn member_row(&self, m: &MemberState, content: &RoomContent, first: bool, p: Palette) -> AnyElement {
+        let (word, tone) = content_word(content, m).unwrap_or_else(|| member_word(m));
         h_flex()
             .px(px(16.))
             .py(px(12.))
@@ -1648,8 +1727,9 @@ mod tests {
     use swofty_core::multiplayer::session::{MemberState, Phase, PrintMatch, RelayStatus, SessionState};
 
     use super::{
-        GameState, RoomStatus, Tone, addon_checks, card_addons, exit_leaves, exit_notice, joined,
-        member_word, missing, room_meta, room_status, step_number,
+        GameState, RoomContent, RoomStatus, Start, Tone, addon_checks, card_addons, content_check,
+        content_word, exit_leaves, exit_notice, joined, member_word, missing, restart_ok_text, room_meta,
+        room_status, step_number,
     };
 
     fn status(screen: Screen) -> GameStatus {
@@ -1662,6 +1742,7 @@ mod tests {
             base: 0,
             cover: None,
             room_failed: None,
+            content: None,
         }
     }
 
@@ -1713,6 +1794,7 @@ mod tests {
             game: None,
             last_error: None,
             launch: None,
+            content: RoomContent::default(),
         }
     }
 
@@ -1915,5 +1997,58 @@ mod tests {
         );
         assert_eq!(exit_notice(false), "F1 25 closed, so you left the room.");
         assert_eq!(exit_notice(true), "F1 25 closed, so your room closed.");
+    }
+
+    #[test]
+    fn the_restart_button_says_what_it_does() {
+        use swofty_core::multiplayer::rooms::RoomSettings;
+        assert_eq!(
+            restart_ok_text(&Start::Create(RoomSettings::default())),
+            "Create room and join"
+        );
+        assert_eq!(restart_ok_text(&Start::Join("F1-ABC123".into())), "Join room");
+    }
+
+    #[test]
+    fn a_member_without_the_f1_2026_content_is_marked_once_the_host_picked_it() {
+        let max = member(true, Some(MemberStage::InLobby));
+        let mut content = RoomContent::default();
+        content.owns_f1_2026.insert("u2".into(), false);
+        assert_eq!(
+            content_word(&content, &max),
+            None,
+            "nothing before the host picked the 2026 cars"
+        );
+        content.host = Some("f1_2026".into());
+        assert_eq!(
+            content_word(&content, &max),
+            Some(("No F1 2026 content", Tone::Blocked))
+        );
+        content.owns_f1_2026.insert("u2".into(), true);
+        assert_eq!(content_word(&content, &max), None);
+        content.owns_f1_2026.insert("u2".into(), false);
+        assert_eq!(
+            content_word(&content, &member(false, None)),
+            None,
+            "a disconnected member stays Disconnected"
+        );
+    }
+
+    #[test]
+    fn the_cars_row_shows_this_players_f1_2026_answer() {
+        let mut s = session(Phase::InLobby, false);
+        let mut me = member(true, Some(MemberStage::InLobby));
+        me.me = true;
+        s.members = vec![me];
+        assert_eq!(content_check(&s), None);
+        s.content.host = Some("f1_2025".into());
+        assert_eq!(content_check(&s), None, "the 2025 cars need no content");
+        s.content.host = Some("f1_2026".into());
+        assert_eq!(content_check(&s).map(|(owns, _)| owns), Some(None));
+        s.content.owns_f1_2026.insert("u2".into(), false);
+        assert_eq!(
+            content_check(&s),
+            Some((Some(false), "Your copy of F1 25 doesn't have the F1 2026 content"))
+        );
     }
 }

@@ -19,6 +19,58 @@ const MAP_FILES: &[&str] = &[
 ];
 const REG: &str = "WINE REGISTRY Version 2\n;; All keys relative to \\\\User\n\n[Software\\\\Wine] 1700000000\n\"Version\"=\"win10\"\n";
 
+#[test]
+fn sweep_rechecks_changed_cached_files_and_preserves_user_edits() {
+    use swofty_core::baseline::Hashes;
+    use swofty_core::placed::Placed;
+    let f = Fixture::new("sweep-cache-edits");
+    let mut placed = Placed::default();
+    let mut hashes = Hashes::load(&f.data);
+    for rel in ["addon/unchanged.bin", "addon/edited.bin"] {
+        write(&f.game.join(rel), "mod bytes");
+        let sha = hashes.sha256(&f.game.join(rel)).unwrap();
+        placed.insert(rel, sha, false);
+    }
+    placed.save(&f.data).unwrap();
+    hashes.save();
+    write(&f.game.join("addon/edited.bin"), "user changed these bytes");
+    let game = f.game("1");
+    Installer::new(&f.data, &game).sweep().unwrap();
+    assert!(!f.game.join("addon/unchanged.bin").exists());
+    assert_eq!(f.read("addon/edited.bin"), "user changed these bytes");
+}
+
+#[test]
+#[ignore = "manual large-profile sweep benchmark"]
+fn benchmark_large_profile_sweep_hash_cache() {
+    use swofty_core::baseline::Hashes;
+    use swofty_core::placed::Placed;
+    for warm in [false, true] {
+        let f = Fixture::new(if warm { "bench-warm" } else { "bench-cold" });
+        let bytes = vec![42u8; 256 * 1024];
+        let sha = sha256_bytes(&bytes);
+        let mut placed = Placed::default();
+        let mut hashes = Hashes::load(&f.data);
+        for i in 0..512 {
+            let rel = format!("mods/assets/{i}.bin");
+            let path = f.game.join(&rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            placed.insert(&rel, sha.clone(), false);
+            if warm {
+                hashes.wrote(&path, &sha);
+            }
+        }
+        placed.save(&f.data).unwrap();
+        hashes.save();
+        let game = f.game("1");
+        let start = std::time::Instant::now();
+        let removed = Installer::new(&f.data, &game).sweep().unwrap();
+        assert_eq!(removed.len(), 512);
+        println!("512 files / 128 MiB; cached={warm}: {:?}", start.elapsed());
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     game: PathBuf,
@@ -127,6 +179,7 @@ impl Fixture {
     fn snapshot(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
         walk(&self.game, &self.game, &mut out);
+        out.retain(|k, _| !k.starts_with("swofty-cache"));
         out.insert(
             "<user.reg>".into(),
             sha256_bytes(&std::fs::read(&self.reg).unwrap()),
@@ -433,6 +486,41 @@ fn drift_from_outside_is_reported_and_restored() {
 }
 
 #[test]
+fn a_restore_leaves_an_upscaler_drop_in_alone() {
+    let f = Fixture::new("upscaler");
+    write(&f.game.join("amd_fidelityfx_dx12.dll"), "steam's loader");
+    let game = f.game("1");
+    let inst = Installer::new(&f.data, &game);
+    inst.apply(&f.plan("a")).unwrap();
+    write(&f.game.join("amd_fidelityfx_dx12.dll"), "a drop-in fsr 4 loader");
+    assert_eq!(inst.restore().unwrap(), []);
+    assert_eq!(f.read("amd_fidelityfx_dx12.dll"), "a drop-in fsr 4 loader");
+    inst.apply(&f.plan("b")).unwrap();
+    inst.apply(&Plan::vanilla()).unwrap();
+    assert_eq!(f.read("amd_fidelityfx_dx12.dll"), "a drop-in fsr 4 loader");
+    assert_eq!(inst.verify().unwrap(), []);
+}
+
+#[test]
+fn a_plan_cannot_replace_an_upscaler_drop_in() {
+    let f = Fixture::new("upscaler-plan");
+    write(&f.game.join("amd_fidelityfx_dx12.dll"), "a drop-in fsr 4 loader");
+    let game = f.game("1");
+    let inst = Installer::new(&f.data, &game);
+    let mut plan = f.plan("a");
+    plan.data
+        .insert("amd_fidelityfx_dx12.dll".into(), f.src.join("dbB"));
+    let err = inst.apply(&plan).unwrap_err();
+    assert!(err.to_string().contains("upscaler drop-in"), "{err}");
+    assert_eq!(f.read("amd_fidelityfx_dx12.dll"), "a drop-in fsr 4 loader");
+    let mut plan = f.plan("a");
+    plan.added
+        .insert("AMD_FidelityFX_DX12.dll".into(), f.src.join("dbB"));
+    assert!(inst.apply(&plan).is_err());
+    assert_eq!(f.read("amd_fidelityfx_dx12.dll"), "a drop-in fsr 4 loader");
+}
+
+#[test]
 fn map_files_in_new_folders_are_removed_by_switches_and_restore() {
     let f = Fixture::new("maps");
     let original = f.snapshot();
@@ -525,11 +613,14 @@ fn build_outputs_on_the_game_volume_are_linked_and_the_rest_copied() {
     assert_eq!(inode(&f.game.join(GVDB)), inode(&plan.data[GVDB]));
     assert_eq!(inode(&f.game.join(UI)), inode(&plan.data[UI]));
     assert_ne!(inode(&f.game.join(CORE)), inode(&f.src.join("core")));
+    assert_eq!(
+        inode(&f.game.join(CORE)),
+        inode(&f.game.join("swofty-cache/overlay").join(CORE))
+    );
     assert!(
-        lines
-            .borrow()
-            .iter()
-            .any(|l| l == "installing: hard links; 2 file(s) linked, 4 copied"),
+        lines.borrow().iter().any(
+            |l| l == "installing: 6 linked (4 from the link cache: 4 copied into it, 0 reused), 0 copied"
+        ),
         "{:?}",
         lines.borrow()
     );
@@ -594,10 +685,9 @@ fn copy_only_and_sources_outside_the_build_cache_are_copied() {
     };
     elsewhere.apply(&f.plan("b")).unwrap();
     assert!(
-        lines
-            .borrow()
-            .iter()
-            .any(|l| l == "installing: copy (no build output to link); 0 file(s) linked, 6 copied"),
+        lines.borrow().iter().any(
+            |l| l == "installing: 6 linked (6 from the link cache: 6 copied into it, 0 reused), 0 copied"
+        ),
         "{:?}",
         lines.borrow()
     );
@@ -631,15 +721,145 @@ fn a_build_output_on_another_volume_than_the_game_is_copied() {
     applied.unwrap();
     assert_eq!(read, "db-B");
     assert!(
-        lines
-            .borrow()
-            .iter()
-            .any(|l| l.starts_with("installing: copy (hard link failed")
-                && l.ends_with("0 file(s) linked, 6 copied")),
+        lines.borrow().iter().any(
+            |l| l == "installing: 6 linked (6 from the link cache: 6 copied into it, 0 reused), 0 copied"
+        ),
         "{:?}",
         lines.borrow()
     );
     assert_eq!(std::fs::read_to_string(&plan.data[GVDB]).unwrap(), "db-B");
+}
+
+fn two_drives(p: &Path) -> Option<swofty_core::disk::Volume> {
+    let id = if p.components().any(|c| c.as_os_str() == "overlay") {
+        "data"
+    } else {
+        "game"
+    };
+    Some(swofty_core::disk::Volume {
+        id: id.into(),
+        name: id.into(),
+    })
+}
+
+#[cfg(unix)]
+fn one_drive(_: &Path) -> Option<swofty_core::disk::Volume> {
+    two_drives(Path::new("elsewhere"))
+}
+
+#[cfg(unix)]
+#[test]
+fn another_drive_links_the_game_folder_to_a_cache_that_survives_a_restore() {
+    let f = Fixture::new("cache-links");
+    let game = f.game("1");
+    let original = f.snapshot();
+    let mut plan = f.plan("b");
+    f.built(&mut plan);
+    let (lines,) = logged();
+    let out = |l: &str| lines.borrow_mut().push(l.to_owned());
+    let inst = Installer {
+        out: &out,
+        volume: two_drives,
+        ..Installer::new(&f.data, &game)
+    };
+    inst.apply(&plan).unwrap();
+    let cached = f.game.join("swofty-cache/overlay").join(GVDB);
+    assert_eq!(f.read(GVDB), "db-B");
+    assert_eq!(inode(&f.game.join(GVDB)), inode(&cached));
+    assert_ne!(inode(&f.game.join(GVDB)), inode(&plan.data[GVDB]));
+    assert!(
+        lines.borrow().iter().any(
+            |l| l == "installing: 6 linked (6 from the link cache: 6 copied into it, 0 reused), 0 copied"
+        ),
+        "{:?}",
+        lines.borrow()
+    );
+
+    inst.apply(&Plan::vanilla()).unwrap();
+    assert_eq!(f.snapshot(), original);
+    assert_eq!(f.read(GVDB), "db-v1");
+    assert_eq!(std::fs::read_to_string(&cached).unwrap(), "db-B");
+    assert_eq!(inst.verify().unwrap(), []);
+
+    inst.apply(&plan).unwrap();
+    assert_eq!(f.read(GVDB), "db-B");
+    assert!(
+        lines.borrow().iter().any(
+            |l| l == "installing: 6 linked (6 from the link cache: 1 copied into it, 5 reused), 0 copied"
+        ),
+        "{:?}",
+        lines.borrow()
+    );
+}
+
+#[test]
+fn a_game_drive_without_room_for_the_cache_gets_direct_copies() {
+    let f = Fixture::new("cache-space");
+    let game = f.game("1");
+    let mut plan = f.plan("b");
+    f.built(&mut plan);
+    let (lines,) = logged();
+    let out = |l: &str| lines.borrow_mut().push(l.to_owned());
+    let inst = Installer {
+        out: &out,
+        volume: two_drives,
+        free_space: |_| Some(1 << 20),
+        ..Installer::new(&f.data, &game)
+    };
+    inst.apply(&plan).unwrap();
+    assert_eq!(f.read(GVDB), "db-B");
+    assert!(
+        !f.game
+            .join("swofty-cache/overlay")
+            .join("0123456789abcdef")
+            .exists()
+    );
+    let lines = lines.borrow();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("installing: link cache unavailable (the game drive has")),
+        "{lines:?}"
+    );
+    assert!(!f.game.join("swofty-cache/overlay").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn loose_addon_files_go_through_the_cache_on_one_drive_and_a_second_play_reuses_them() {
+    let f = Fixture::new("cache-same");
+    let game = f.game("1");
+    let mut plan = f.plan("b");
+    f.built(&mut plan);
+    let (lines,) = logged();
+    let out = |l: &str| lines.borrow_mut().push(l.to_owned());
+    let inst = Installer {
+        out: &out,
+        volume: one_drive,
+        ..Installer::new(&f.data, &game)
+    };
+    inst.apply(&plan).unwrap();
+    assert_eq!(inode(&f.game.join(GVDB)), inode(&plan.data[GVDB]));
+    let cached = f.game.join("swofty-cache/overlay").join(CORE);
+    assert_eq!(inode(&f.game.join(CORE)), inode(&cached));
+    assert_ne!(inode(&f.game.join(CORE)), inode(&f.src.join("core")));
+    assert!(!f.game.join("swofty-cache/overlay").join(GVDB).exists());
+    inst.apply(&Plan::vanilla()).unwrap();
+    assert!(cached.is_file());
+    inst.apply(&plan).unwrap();
+    let lines = lines.borrow();
+    assert!(
+        lines.iter().any(
+            |l| l == "installing: 6 linked (4 from the link cache: 4 copied into it, 0 reused), 0 copied"
+        ),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(
+            |l| l == "installing: 6 linked (4 from the link cache: 1 copied into it, 3 reused), 0 copied"
+        ),
+        "{lines:?}"
+    );
 }
 
 #[cfg(unix)]

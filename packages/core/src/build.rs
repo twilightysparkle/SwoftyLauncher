@@ -389,16 +389,28 @@ fn unbuilt<'a>(ops: impl IntoIterator<Item = &'a AssetOp>) -> Option<&'static st
 }
 
 fn hash_sources(hasher: &mut Sha256, store: &Store, addon: &str, ops: &[AssetOp]) -> Result<()> {
+    // Many resource edits read the same archive or directory. Inspect each source
+    // once per batch, but feed every occurrence into the digest in its original order.
+    // Keep this local: a helper can change cache/data sources before the next batch.
+    let mut stamps = HashMap::<PathBuf, Vec<u8>>::new();
     for src in ops.iter().flat_map(AssetOp::sources) {
         let path = src.resolve(&source_dir(store, addon, src.root))?;
-        let meta = std::fs::metadata(&path).map_err(io_err(&path))?;
-        hasher.update(format!("{}|{}|{:?}", src.path, meta.len(), meta.modified().ok()));
-        if meta.is_dir() {
-            for (rel, p) in loader_files(&path)? {
-                let meta = std::fs::metadata(&p).map_err(io_err(&p))?;
-                hasher.update(format!("{rel}|{}|{:?}", meta.len(), meta.modified().ok()));
+        if !stamps.contains_key(&path) {
+            let meta = std::fs::metadata(&path).map_err(io_err(&path))?;
+            let mut stamp = format!("{}|{:?}", meta.len(), meta.modified().ok()).into_bytes();
+            if meta.is_dir() {
+                for (rel, p) in loader_files(&path)? {
+                    let meta = std::fs::metadata(&p).map_err(io_err(&p))?;
+                    stamp.extend_from_slice(
+                        format!("{rel}|{}|{:?}", meta.len(), meta.modified().ok()).as_bytes(),
+                    );
+                }
             }
+            stamps.insert(path.clone(), stamp);
         }
+        hasher.update(src.path.as_bytes());
+        hasher.update(b"|");
+        hasher.update(&stamps[&path]);
     }
     Ok(())
 }
@@ -827,6 +839,13 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
         .extend(deps.notes.iter().map(|n| format!("registry: {n}")));
     if !p.is_vanilla() {
         let careers = crate::stdlib::careers::read(&crate::stdlib::careers::data_path(&store.root));
+        let scoped: Vec<_> = crate::stdlib::careers::in_save_of(&careers, &store.root, profile)
+            .into_iter()
+            .cloned()
+            .collect();
+        if let Some(line) = crate::stdlib::careers::stop_line(&scoped, &resolved.order, &addons) {
+            built.warnings.push(line);
+        }
         if let Some(line) = crate::stdlib::careers::play_line(&careers, &resolved.order, &addons) {
             built.warnings.push(line);
         }
@@ -850,8 +869,16 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
     let mut hasher = Sha256::new();
     let packed = store.root.join("cache").join(crate::cache::PACKED_DIR);
     swofty_formats::erp::cache_compressed(Some(packed.clone()));
-    let features = loader_dir()
-        .map(|d| load_features(&d))
+    let loader = loader_dir();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf));
+    built
+        .lines
+        .push(loader_line(exe_dir.as_deref(), loader.as_deref()));
+    let features = loader
+        .as_deref()
+        .map(load_features)
         .transpose()?
         .unwrap_or_default();
     let config = store.config();
@@ -1288,6 +1315,9 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
         .collect();
     let natural = planner.route(Kind::Group) == Route::Runtime;
     if !natural && maps.len() > SLOTS.len() {
+        if loader.is_none() {
+            return Err(Error::Other(loader_missing(exe_dir.as_deref())));
+        }
         return Err(Error::Map(format!(
             "at most {} tracks can be enabled at once",
             SLOTS.len()
@@ -1342,7 +1372,7 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
     let record_ui = record_ui_lists(&ui_maps, &tracks, &recorded, &resolve, &mut built.warnings);
     let mut caches = Vec::new();
     let mut session = store.session_settings(profile)?;
-    session.set_maps(maps.iter().map(|(_, pkg)| pkg));
+    session.set_maps(tracks.iter().map(|(_, pkg, origin)| (pkg, origin.addon.as_str())));
     session.set_mods(mods.into_iter());
     hasher.update(serde_json::to_vec(&session).expect("serialisable"));
     let menus = loader_dir().is_some();
@@ -1972,8 +2002,21 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
                     }
                 }
                 AssetOp::Erp(erp) => {
-                    erps.apply_for(erp, &op.origin.to_string(), &resolve)
-                        .map_err(|e| Error::Other(format!("applying {}: {e}", op.origin)))?;
+                    match erps.apply_for(erp, &op.origin.to_string(), &resolve) {
+                        Ok(()) => {}
+                        Err(Error::ResourceMissing { erp, resource }) if puts.contains_key(&erp) => {
+                            built.warnings.push(missing_resource(
+                                &name(&op.origin.to_string()),
+                                &erp,
+                                &resource,
+                                &name(&puts[&erp].origin.to_string()),
+                            ));
+                            continue;
+                        }
+                        Err(e) => {
+                            return Err(Error::Other(format!("applying {}: {e}", op.origin)));
+                        }
+                    }
                     for m in erps.take_merges() {
                         record_merge(&mut built, &mut planner, &op.origin, m);
                     }
@@ -2684,6 +2727,18 @@ fn stage_erps(built: &mut Built, staged: &BTreeMap<String, PathBuf>, rels: Vec<S
     Ok(())
 }
 
+fn loader_line(exe_dir: Option<&Path>, loader: Option<&Path>) -> String {
+    let show = |p: Option<&Path>| p.map_or_else(|| "none".to_owned(), |p| p.display().to_string());
+    format!("loader: {}; swofty.exe in {}", show(loader), show(exe_dir))
+}
+
+fn loader_missing(exe_dir: Option<&Path>) -> String {
+    let at = exe_dir.map_or_else(|| "the launcher's folder".to_owned(), |d| d.display().to_string());
+    format!(
+        "Swofty Launcher's game files (version.dll, swofty_core.dll) are missing from {at}; your antivirus may have removed them. Restore them or run the installer again"
+    )
+}
+
 /// The warning for an addon's archive changes a build skips because the
 /// archives they change aren't in the game folder.
 fn missing_archives(name: &str, rels: &BTreeSet<String>) -> String {
@@ -2694,6 +2749,14 @@ fn missing_archives(name: &str, rels: &BTreeSet<String>) -> String {
     };
     format!(
         "{name}: archive changes skipped; {what}. Turn {name} off if it doesn't work, and tell its author"
+    )
+}
+
+/// The warning for an addon's change a build skips because the archive
+/// another addon provides has no such resource.
+fn missing_resource(name: &str, erp: &str, resource: &str, provider: &str) -> String {
+    format!(
+        "{name}: change skipped; {resource} is not in {erp}, which {provider} provides. Turn {name} off if it doesn't work, and tell its author"
     )
 }
 
@@ -3100,6 +3163,89 @@ mod tests {
     use crate::asset::{FileOp, Root, Source};
     use crate::baseline::Identity;
     use crate::launcher::{Addon, Builtin};
+
+    fn uncached_source_hash(hasher: &mut Sha256, store: &Store, ops: &[AssetOp]) {
+        for src in ops.iter().flat_map(AssetOp::sources) {
+            let path = src.resolve(&source_dir(store, "test.pack", src.root)).unwrap();
+            let meta = std::fs::metadata(&path).unwrap();
+            hasher.update(format!("{}|{}|{:?}", src.path, meta.len(), meta.modified().ok()));
+            if meta.is_dir() {
+                for (rel, p) in loader_files(&path).unwrap() {
+                    let meta = std::fs::metadata(&p).unwrap();
+                    hasher.update(format!("{rel}|{}|{:?}", meta.len(), meta.modified().ok()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_stamp_cache_preserves_digest_and_rechecks_each_batch() {
+        let root = std::env::temp_dir().join(format!("swofty-source-stamps-{}", std::process::id()));
+        let store = Store::new(&root);
+        let dir = store.addon_data_dir("test.pack").join("assets");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.bin"), b"a").unwrap();
+        let ops: Vec<_> = ["assets", "assets/a.bin", "assets"]
+            .into_iter()
+            .map(|path| {
+                AssetOp::File(FileOp::Put {
+                    source: Source {
+                        root: Root::Data,
+                        path: path.into(),
+                    },
+                    target: "out.bin".into(),
+                })
+            })
+            .collect();
+        let digest = || {
+            let mut cached = Sha256::new();
+            hash_sources(&mut cached, &store, "test.pack", &ops).unwrap();
+            let mut old = Sha256::new();
+            uncached_source_hash(&mut old, &store, &ops);
+            let cached = cached.finalize();
+            assert_eq!(cached, old.finalize());
+            cached
+        };
+        let before = digest();
+        std::fs::write(dir.join("a.bin"), b"changed by helper").unwrap();
+        assert_ne!(before, digest());
+        let before = digest();
+        std::fs::write(dir.join("new.bin"), b"new").unwrap();
+        assert_ne!(before, digest());
+        std::fs::remove_file(dir.join("a.bin")).unwrap();
+        assert!(hash_sources(&mut Sha256::new(), &store, "test.pack", &ops).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual repeated-source build fingerprint benchmark"]
+    fn benchmark_repeated_build_sources() {
+        let root = std::env::temp_dir().join(format!("swofty-source-bench-{}", std::process::id()));
+        let store = Store::new(&root);
+        let dir = store.addons_dir().join("test.pack/assets");
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..512 {
+            std::fs::write(dir.join(format!("{i}.bin")), b"asset").unwrap();
+        }
+        let ops: Vec<_> = (0..128)
+            .map(|i| {
+                AssetOp::File(FileOp::Put {
+                    source: Source::addon("assets"),
+                    target: format!("out/{i}"),
+                })
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let mut old = Sha256::new();
+        uncached_source_hash(&mut old, &store, &ops);
+        println!("128 references / 512 files, uncached: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let mut cached = Sha256::new();
+        hash_sources(&mut cached, &store, "test.pack", &ops).unwrap();
+        println!("128 references / 512 files, cached: {:?}", start.elapsed());
+        assert_eq!(cached.finalize(), old.finalize());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn only_a_core_with_the_rows_feature_takes_the_replaced_operations_of_addons_with_data_files() {
@@ -6762,6 +6908,142 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    fn missing_resource_game(tag: &str) -> (PathBuf, Game, Store, String, String) {
+        let root = std::env::temp_dir().join(format!("swofty-build-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let dir = root.join("game");
+        std::fs::create_dir_all(dir.join("game_package/gamedatabases")).unwrap();
+        std::fs::create_dir_all(dir.join("2025_asset_groups")).unwrap();
+        std::fs::write(dir.join(crate::GAME_EXE), "exe").unwrap();
+        std::fs::write(dir.join(GVDB), Gvdb::default().to_bytes()).unwrap();
+        let provided = "2025_asset_groups/p.erp".to_owned();
+        let stock = "2025_asset_groups/s.erp".to_owned();
+        std::fs::write(dir.join(&stock), archive(&["eaid://s/a.idf"], 0)).unwrap();
+        let game = Game {
+            identity: Identity::detect(&dir, Some(1)).unwrap(),
+            dir,
+            user_reg: None,
+        };
+        let store = Store::new(root.join("data"));
+        (root, game, store, provided, stock)
+    }
+
+    fn install_ops(store: &Store, root: &Path, id: &str, name: &str, ops: &str, files: &[(&str, Vec<u8>)]) {
+        let src = root.join("src").join(id);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("swofty.json"),
+            format!(
+                r#"{{ "schema_version": 1, "id": "{id}", "name": "{name}", "version": "1.0.0", "author": "t",
+                     "compat": {{ "game": "f1_25" }}, "operations": {{ "assets": ["ops.json"] }} }}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("ops.json"),
+            format!(r#"{{ "schema_version": 1, "ops": [{ops}] }}"#),
+        )
+        .unwrap();
+        for (file, bytes) in files {
+            std::fs::write(src.join(file), bytes).unwrap();
+        }
+        store.install_addon(&src).unwrap();
+        store
+            .update_profile("default", |p| p.set_enabled(id, true))
+            .unwrap();
+    }
+
+    #[test]
+    fn an_edit_of_a_resource_another_addons_archive_lacks_is_skipped() {
+        if loader_dir().is_some() {
+            return;
+        }
+        let (root, game, store, provided, _) = missing_resource_game("missing-resource");
+        let have = "eaid://p/have.idf";
+        let lack = "eaid://p/lack.idf";
+        install_ops(
+            &store,
+            &root,
+            "t.base",
+            "Base",
+            &format!(r#"{{"op":"file.put","source":"p.erp","target":"{provided}"}}"#),
+            &[("p.erp", archive_of("Material", &[have], 1))],
+        );
+        install_ops(
+            &store,
+            &root,
+            "t.edit",
+            "Edit",
+            &format!(
+                r#"{{"op":"erp.replace-resource","erp":"{provided}","resource":"{lack}","fragment":0,"source":"x.bin"}},
+                   {{"op":"erp.replace-resource","erp":"{provided}","resource":"{have}","fragment":0,"source":"x.bin"}}"#
+            ),
+            &[("x.bin", vec![9; 4])],
+        );
+        let built = build(&store, "default", &game).unwrap();
+        let warning = format!(
+            "Edit: change skipped; {lack} is not in {provided}, which Base provides. Turn Edit off if it doesn't work, and tell its author"
+        );
+        assert!(built.warnings.contains(&warning), "{:?}", built.warnings);
+        let file = swofty_formats::erp::ErpFile::open(&built.plan.added[&provided]).unwrap();
+        let res = file.erp.find(have).unwrap();
+        assert_eq!(file.load(res).unwrap().fragments[0].data().unwrap(), vec![9; 4]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_edit_of_a_resource_a_stock_archive_lacks_still_fails() {
+        if loader_dir().is_some() {
+            return;
+        }
+        let (root, game, store, provided, stock) = missing_resource_game("missing-resource-stock");
+        install_ops(
+            &store,
+            &root,
+            "t.base",
+            "Base",
+            &format!(r#"{{"op":"file.put","source":"p.erp","target":"{provided}"}}"#),
+            &[("p.erp", archive(&["eaid://p/have.idf"], 1))],
+        );
+        install_ops(
+            &store,
+            &root,
+            "t.edit",
+            "Edit",
+            &format!(
+                r#"{{"op":"erp.replace-resource","erp":"{stock}","resource":"eaid://s/lack.idf","fragment":0,"source":"x.bin"}}"#
+            ),
+            &[("x.bin", vec![9; 4])],
+        );
+        let err = build(&store, "default", &game).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("applying t.edit: {stock}: eaid://s/lack.idf: not found")),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_loader_is_named_instead_of_a_track_limit() {
+        assert_eq!(
+            loader_missing(Some(Path::new("/apps/swofty"))),
+            "Swofty Launcher's game files (version.dll, swofty_core.dll) are missing from /apps/swofty; your antivirus may have removed them. Restore them or run the installer again"
+        );
+        assert!(loader_missing(None).contains("missing from the launcher's folder;"));
+    }
+
+    #[test]
+    fn the_build_log_names_the_exe_folder_and_the_loader() {
+        assert_eq!(
+            loader_line(Some(Path::new("/apps/swofty")), None),
+            "loader: none; swofty.exe in /apps/swofty"
+        );
+        assert_eq!(
+            loader_line(Some(Path::new("/apps/swofty")), Some(Path::new("/apps/loader"))),
+            "loader: /apps/loader; swofty.exe in /apps/swofty"
+        );
+    }
+
     #[test]
     fn missing_archive_warnings_count_the_files() {
         let rels: BTreeSet<String> = ["b/x.erp", "a/x.erp"].map(str::to_owned).into();
@@ -7196,6 +7478,58 @@ mod tests {
             "{:?}",
             on.lines
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn telemetry_is_on_only_for_an_addon_that_lists_it() {
+        if loader_dir().is_some() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("swofty-build-telemetry-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let dir = root.join("game");
+        std::fs::create_dir_all(dir.join("game_package/gamedatabases")).unwrap();
+        std::fs::write(dir.join(crate::GAME_EXE), "exe").unwrap();
+        std::fs::write(dir.join(GVDB), Gvdb { records: Vec::new() }.to_bytes()).unwrap();
+        let game = Game {
+            identity: Identity::detect(&dir, Some(1)).unwrap(),
+            dir,
+            user_reg: None,
+        };
+        let store = Store::new(root.join("data"));
+        for (id, extra) in [
+            ("t.timing", r#", "experimental_features": ["telemetry"]"#),
+            ("t.plain", ""),
+        ] {
+            let src = root.join(id);
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(
+                src.join("swofty.json"),
+                format!(
+                    r#"{{ "schema_version": 1, "id": "{id}", "name": "{id}", "version": "1.0.0", "author": "t",
+                         "compat": {{ "game": "f1_25" }}{extra} }}"#
+                ),
+            )
+            .unwrap();
+            store.install_addon(&src).unwrap();
+        }
+        let assets = |built: &Built| {
+            built
+                .plan
+                .loader
+                .get("swofty/assets.json")
+                .map(|p| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).unwrap()).unwrap())
+        };
+        store
+            .update_profile("default", |p| p.set_enabled("t.plain", true))
+            .unwrap();
+        assert_eq!(assets(&build(&store, "default", &game).unwrap()), None);
+        store
+            .update_profile("default", |p| p.set_enabled("t.timing", true))
+            .unwrap();
+        let on = build(&store, "default", &game).unwrap();
+        assert_eq!(assets(&on).unwrap()["features"], serde_json::json!(["telemetry"]));
         std::fs::remove_dir_all(&root).ok();
     }
 

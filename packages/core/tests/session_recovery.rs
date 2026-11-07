@@ -133,6 +133,7 @@ impl Fixture {
     fn snapshot(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
         walk(&self.game, &self.game, &mut out);
+        out.retain(|k, _| !k.starts_with("swofty-cache"));
         out.insert(
             "<user.reg>".into(),
             sha256_bytes(&std::fs::read(&self.reg).unwrap()),
@@ -159,6 +160,7 @@ impl Fixture {
     fn snapshot_of(&self, game: &Path) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
         walk(game, game, &mut out);
+        out.retain(|k, _| !k.starts_with("swofty-cache"));
         out.insert(
             "<user.reg>".into(),
             sha256_bytes(&std::fs::read(&self.reg).unwrap()),
@@ -506,8 +508,9 @@ fn a_build_cancelled_mid_copy_leaves_the_game_folder_as_it_was() {
     let wrapper = SessionLock::try_acquire(&f.data).unwrap().unwrap();
     let seen = std::cell::RefCell::new(Vec::new());
     let progress = |done: usize, total: usize| {
+        let cached = seen.borrow().iter().any(|&(d, t)| d == t);
         seen.borrow_mut().push((done, total));
-        if done == 2 {
+        if done == 2 && cached {
             busy::request_cancel(&f.data).unwrap();
         }
     };

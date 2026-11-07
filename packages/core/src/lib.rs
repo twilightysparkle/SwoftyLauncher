@@ -14,6 +14,8 @@ pub mod conflicts;
 pub mod copies;
 pub mod crash;
 pub mod crash_report;
+pub mod data_move;
+pub mod data_usage;
 pub mod dbedit;
 pub mod disk;
 pub mod ea_app;
@@ -31,6 +33,7 @@ pub mod journal;
 pub mod known_problems;
 pub mod launch;
 pub mod launcher_saves;
+pub mod link_cache;
 pub mod loader_check;
 pub mod managed;
 pub mod map;
@@ -78,6 +81,7 @@ pub mod updater;
 pub mod usage;
 pub mod vault;
 pub mod vdf;
+pub mod version;
 
 pub const STEAM_APP_ID: u32 = 3_059_520;
 pub const GAME_EXE: &str = "F1_25.exe";
@@ -107,6 +111,8 @@ pub enum Error {
     Map(String),
     #[error("{0}")]
     Resolve(String),
+    #[error("{erp}: {resource}: not found")]
+    ResourceMissing { erp: String, resource: String },
     #[error("{}", leftovers(.0))]
     Leftovers(Vec<install::Conflict>),
     #[error(

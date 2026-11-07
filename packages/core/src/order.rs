@@ -123,7 +123,7 @@ pub fn problems(
                 (None, Some(_)) => push(&r.id, Kind::Off),
                 (None, None) => push(&r.id, Kind::Missing),
                 (Some(_), None) => push(&r.id, Kind::Missing),
-                (Some(_), Some(dep)) if !r.version.matches(&dep.version) => push(
+                (Some(_), Some(dep)) if !crate::version::satisfies(&r.version, &dep.version) => push(
                     &r.id,
                     Kind::Version {
                         wanted: r.version.to_string(),
@@ -202,7 +202,7 @@ pub fn careers(
     }
     let order: Vec<String> = profile.enabled().map(str::to_owned).collect();
     let mut out = Vec::new();
-    for c in list.iter().filter(|c| c.status() != "missing") {
+    for c in list.iter().filter(|c| !c.is_gone()) {
         if c.profile.as_deref().is_some_and(|p| p != profile.name) {
             continue;
         }

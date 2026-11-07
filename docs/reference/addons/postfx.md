@@ -263,13 +263,19 @@ A pass includes `swofty/postfx.hlsli`. The header is in the SDK at `packages/sdk
 float4 scene(float2 uv);           // at uv (0 to 1), filtered
 float4 scene_at(int2 pixel);       // at a pixel, clamped to the edges
 float  scene_depth(float2 uv);     // the game's depth buffer as stored: 1 at the camera, falling towards 0 with distance
-bool   has_depth();                // whether the depth buffer was readable this frame
+bool   has_depth();                // whether the game drew depth this frame; false in a 2D menu
 
 // inputs
 float4 input(uint i, float2 uv);
 float4 input_at(uint i, int2 pixel);
 uint2  input_size(uint i);
 bool   has_previous();
+
+// data from the addon's code (see Data from the addon's code)
+uint   data_size();                // the bytes the code gave this pass, 0 for none
+uint   data_uint(uint byte_offset);   // 4 bytes at byte_offset, a multiple of 4; 0 past the end
+float  data_float(uint byte_offset);
+float4 data_float4(uint byte_offset); // 16 bytes
 
 // values
 float  option(uint i);             // the pass's options[i], 0 when not set; i from 0 to 31 (0 to 15 for a manifest pass)
@@ -301,6 +307,51 @@ float3 srgb_to_linear(float3 c), linear_to_srgb(float3 c), pq_to_linear(float3 c
 - A pass that works in `to_linear` and `from_linear` looks the same in SDR and HDR.
 - The header runs the pass's function from an 8×8 `main` compute shader, once per pixel of `swofty_size`.
 - Where the function returns NaN or infinity, the header writes the pixel it was given instead: the picture's pixel in a pass that writes the picture, black in an addon texture.
+- The depth buffer is the game's own where the passes run inside its list. In the HUD's list, which never touches depth (on track and while paused), the passes read a copy the core makes each time the game stops writing depth, so `has_depth()` holds there too: `[postfx] the core copies the game's depth buffer (1920x1080, format 19) where the game stops writing it, for passes that run where it isn't readable`. Without a 3D picture this frame, as in a 2D menu, `has_depth()` is false.
+
+## Data from the addon's code
+
+An addon with native code can give its passes bytes every frame: values a manifest option can't carry, such as a camera, positions or lines to draw. `swofty/postfx.hpp` has the call, and the pass reads the bytes with `data_size()` and `data_uint()`:
+
+```cpp
+#include <swofty/postfx.hpp>
+
+struct Marker {
+    float x, y, radius, pad; // uv centre, radius in picture heights
+    float rgba[4];
+};
+
+void show_marker(float x, float y)
+{
+    swofty::postfx::set_data("example.marker", "marker", Marker{x, y, 0.03f, 0, {1, 0.75f, 0, 1}});
+}
+```
+
+```hlsl
+#include "swofty/postfx.hlsli"
+
+float4 effect(float2 uv, uint2 pixel)
+{
+    float4 c = scene_at(int2(pixel));
+    if (data_size() < 32)
+        return c;
+    float2 d = (uv - float2(data_float(0), data_float(4))) * float2(float(swofty_size.x) / float(swofty_size.y), 1);
+    float r = data_float(8);
+    return dot(d, d) < r * r ? data_float4(16) : c;
+}
+```
+
+- `set_data(addon_id, pass, data, size)` gives the addon's pass with that `name` up to 64 KB (`swofty::postfx::data_max`). The pass reads them from the next frame on, until the code gives others; size 0, or `clear_data`, takes them away.
+- The core copies the bytes, so the caller's buffer can go at once. Any thread of the addon's own DLL can call it.
+- An addon gives data only to its own passes: the call must come from the DLL under `swofty\addons\<addon_id>\`, and the pass must be one its manifest lists. Otherwise it returns `denied` or `unknown_pass` and keeps nothing, so one addon can't feed another addon's passes, and the core holds at most 64 KB a pass.
+- `unknown_pass` also means the profile's build left the pass out, as it does when the shader doesn't compile or dxc isn't found (`warning: <addon>: pass <name> is skipped: ...` in the build's output).
+- It returns `Result::ok` when the pass is running, and `no_pass` when the bytes are kept but the pass isn't: switched off by its option, its addon's key or a rule, or over its GPU budget. Code that would otherwise draw the same thing itself can go on doing so until it gets `ok`.
+- From an addon's on-load it can also be `no_pass`: in a profile without the early stage, addons load before the core reads the profile's passes. The bytes wait for the passes (16 passes an addon at most), and those of a pass the profile hasn't go then.
+- It returns `unavailable` with a core that predates it (`available()` is false), `invalid` without an addon id, a pass name or bytes, and `too_big` above 64 KB.
+- A pass should treat the bytes as untrusted: bound its loops by its own limits, not by counts read from the data, so a bad buffer makes a wrong picture rather than a GPU hang.
+- A pass reads the bytes as they were when the frame's passes were recorded, 4 at a time at offsets that are multiples of 4; reads past `data_size()` return 0. The bytes are in t10.
+- The launcher's preview has no data: `data_size()` is 0 there.
+- `swofty/loader.log` says when passes first get data: `[postfx] passes read data from their addons' code (t10): 1 pass(es), 32 byte(s)`.
 
 ## Build
 

@@ -10,7 +10,7 @@ use crate::manifest::{AddonManifest, MANIFEST_FILE};
 use crate::profile::{self, Profile};
 use crate::session::Config;
 use crate::settings::{self, Merge, Requests, SessionSettings};
-use crate::{Error, Result, io_err};
+use crate::{Error, Result, io_err, with_retry};
 
 pub const DEFAULT_PROFILE: &str = "default";
 pub const DATA_VERSION: u32 = 4;
@@ -150,6 +150,17 @@ fn delete_addon_dir(dir: &Path, name: &str, rename: Rename, delete: Delete) -> R
 
 fn profile_write() -> MutexGuard<'static, ()> {
     PROFILE_WRITE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Where an addon being installed came from, which decides what it may be.
+#[derive(Debug, Clone, Copy)]
+enum InstallFrom<'a> {
+    /// A file the player chose, or one a helper asked to install.
+    Other,
+    /// A download the catalog lists as this id and version.
+    Catalog(&'a str, &'a semver::Version),
+    /// A release of the addon the launcher manages.
+    ManagedRelease,
 }
 
 #[derive(Debug, Clone)]
@@ -562,12 +573,57 @@ impl Store {
     }
 
     pub fn install_addon_for(&self, src: &Path, launcher: &semver::Version) -> Result<AddonManifest> {
+        self.install_addon_target(src, launcher, None, InstallFrom::Other)
+    }
+
+    /// Install into a specific existing profile rather than whichever profile is active later.
+    pub fn install_addon_in_profile(&self, src: &Path, profile: &str) -> Result<AddonManifest> {
+        self.install_addon_target(
+            src,
+            &crate::update::current_version(),
+            Some(profile),
+            InstallFrom::Other,
+        )
+    }
+
+    /// Install what the catalog lists as `id` at `version`, into `profile` when one is named.
+    pub(crate) fn install_listed(
+        &self,
+        src: &Path,
+        profile: Option<&str>,
+        id: &str,
+        version: &semver::Version,
+    ) -> Result<AddonManifest> {
+        self.install_addon_target(
+            src,
+            &crate::update::current_version(),
+            profile,
+            InstallFrom::Catalog(id, version),
+        )
+    }
+
+    /// Install a release of the addon the launcher manages.
+    pub(crate) fn install_managed_release(
+        &self,
+        src: &Path,
+        launcher: &semver::Version,
+    ) -> Result<AddonManifest> {
+        self.install_addon_target(src, launcher, None, InstallFrom::ManagedRelease)
+    }
+
+    fn install_addon_target(
+        &self,
+        src: &Path,
+        launcher: &semver::Version,
+        profile: Option<&str>,
+        from: InstallFrom,
+    ) -> Result<AddonManifest> {
         if src.is_file() {
             let scratch = self.scratch_dir();
             let result = self
                 .unpacked_addons(src, &scratch)
                 .and_then(|found| match found.as_slice() {
-                    [one] => self.install_addon_for(one, launcher),
+                    [one] => self.install_addon_target(one, launcher, profile, from),
                     many => Err(Error::Other(format!(
                         "{} holds {} addons; drop it on the launcher to install them all",
                         src.display(),
@@ -581,7 +637,7 @@ impl Store {
         if src.join(crate::dbedit::package::MARKER).is_file() {
             return crate::dbedit::package::install(self, src).map(|(p, _)| {
                 std::fs::remove_file(self.registry_install_path(&p.manifest.id)).ok();
-                self.add_to_active_profile(&p.manifest.id);
+                self.add_to_install_profile(&p.manifest.id, profile);
                 p.manifest
             });
         }
@@ -595,6 +651,20 @@ impl Store {
         })?;
         if self.is_builtin(&m.id) {
             return Err(Error::Other(format!("{} is built in", m.id)));
+        }
+        if let InstallFrom::Catalog(id, version) = from
+            && (m.id != id || m.version != *version)
+        {
+            return Err(Error::Other(format!(
+                "the registry lists {id} {version}, the download holds {} {}",
+                m.id, m.version
+            )));
+        }
+        if crate::managed::is_managed(&m.id) && !matches!(from, InstallFrom::ManagedRelease) {
+            return Err(Error::Other(format!(
+                "{} is managed by the launcher, which installs and updates it itself",
+                m.id
+            )));
         }
         let prefix = crate::dbedit::package::ID_PREFIX;
         if crate::dbedit::package::is_package(self, &m.id) {
@@ -634,7 +704,7 @@ impl Store {
         )?;
         std::fs::remove_file(self.registry_install_path(&m.id)).ok();
         if fresh {
-            self.add_to_active_profile(&m.id);
+            self.add_to_install_profile(&m.id, profile);
         }
         Ok(m)
     }
@@ -642,12 +712,34 @@ impl Store {
     /// A new addon goes into the profile it was installed from, off, rather than
     /// every profile; the others add it from their own Addons page. A failure
     /// only leaves it out of the profile, so it doesn't fail the install.
-    fn add_to_active_profile(&self, id: &str) {
-        let name = self.active_profile();
+    fn add_to_install_profile(&self, id: &str, target: Option<&str>) {
+        let name = target.map(str::to_owned).unwrap_or_else(|| self.active_profile());
         if name == profile::VANILLA {
             return;
         }
-        if let Err(e) = self.update_profile(&name, |p| p.add_addon(id)) {
+        if target.is_some() {
+            // Check and write under the same lock as profile deletion, so a
+            // queued install cannot recreate a profile that was just deleted.
+            let _write = profile_write();
+            match self.profile_names() {
+                Ok(names) if !names.contains(&name) => {
+                    warn(format!("couldn't add {id}: profile {name} no longer exists"));
+                    return;
+                }
+                Err(e) => {
+                    warn(format!("couldn't check profile {name} for {id}: {e}"));
+                    return;
+                }
+                _ => {}
+            }
+            let result = self.profile(&name).and_then(|mut profile| {
+                profile.add_addon(id)?;
+                self.save_profile(&profile)
+            });
+            if let Err(e) = result {
+                warn(format!("couldn't add {id} to the {name} profile: {e}"));
+            }
+        } else if let Err(e) = self.update_profile(&name, |p| p.add_addon(id)) {
             warn(format!("couldn't add {id} to the {name} profile: {e}"));
         }
     }
@@ -789,15 +881,26 @@ impl Store {
         Ok(names)
     }
 
-    pub fn create_profile(&self, name: &str, from: Option<&str>) -> Result<Profile> {
+    /// Refuses a name that isn't valid, or that another profile holds. Windows ignores
+    /// capitals in file names, so `Grid` and `grid` would be one profile's files.
+    fn check_new_profile_name(&self, name: &str) -> Result<()> {
         if !profile::valid_name(name) {
             return Err(Error::Other(format!(
                 "{name:?} is not a valid profile name (letters, digits, - and _)"
             )));
         }
-        if self.profile_names()?.iter().any(|n| n == name) {
-            return Err(Error::Other(format!("a profile named {name} already exists")));
+        if let Some(taken) = self
+            .profile_names()?
+            .iter()
+            .find(|n| n.eq_ignore_ascii_case(name))
+        {
+            return Err(Error::Other(format!("a profile named {taken} already exists")));
         }
+        Ok(())
+    }
+
+    pub fn create_profile(&self, name: &str, from: Option<&str>) -> Result<Profile> {
+        self.check_new_profile_name(name)?;
         let mut p = match from {
             Some(src) => self.profile(src)?,
             None => Profile::new(name),
@@ -814,14 +917,53 @@ impl Store {
         if from == profile::VANILLA {
             return Err(Error::Other("the vanilla profile cannot be renamed".into()));
         }
-        let p = self.create_profile(to, Some(from))?;
-        let old = self.profiles_dir().join(format!("{from}.json"));
-        if old.is_file() {
-            std::fs::remove_file(&old).map_err(io_err(&old))?;
+        // The running game keeps writing to the saves folder this would move.
+        if let Some(j) = crate::journal::Journal::open(&self.root)?
+            .into_iter()
+            .find(|j| j.profile == from)
+        {
+            return Err(Error::Other(format!(
+                "{from} is installed in the game folder (journal {}); close F1 25 or run \
+                 swofty restore, then rename it",
+                j.id
+            )));
         }
+        if from != to && from.eq_ignore_ascii_case(to) {
+            return self.rename_profile_capitals(from, to);
+        }
+        self.check_new_profile_name(to)?;
         let saves = self.saves_dir(from);
-        if saves.is_dir() {
-            std::fs::rename(&saves, self.saves_dir(to)).map_err(io_err(&saves))?;
+        let saves_to = self.saves_dir(to);
+        let has_saves = saves.is_dir();
+        if has_saves {
+            if std::fs::read_dir(&saves_to).is_ok_and(|mut rd| rd.next().is_some()) {
+                return Err(Error::Other(format!(
+                    "{} already holds saves; move them away, then rename {from}",
+                    saves_to.display()
+                )));
+            }
+            std::fs::remove_dir(&saves_to).ok();
+        }
+        let p = self.create_profile(to, Some(from))?;
+        // The saves move first: they fail most often, and until the old profile is
+        // gone everything can still go back to how it was.
+        let undo = || {
+            std::fs::remove_file(self.profiles_dir().join(format!("{to}.json"))).ok();
+            crate::addon_storage::profile_deleted(&self.root, to).ok();
+        };
+        if has_saves && let Err(e) = with_retry(&saves, || std::fs::rename(&saves, &saves_to)) {
+            undo();
+            return Err(e);
+        }
+        let old = self.profiles_dir().join(format!("{from}.json"));
+        if old.is_file()
+            && let Err(e) = with_retry(&old, || std::fs::remove_file(&old))
+        {
+            if has_saves {
+                std::fs::rename(&saves_to, &saves).ok();
+            }
+            undo();
+            return Err(e);
         }
         crate::launcher_saves::rename_vaults(&self.root, from, to)?;
         crate::launcher_saves::rename_in_marker(&self.root, from, to)?;
@@ -836,6 +978,25 @@ impl Store {
             self.save_config(&config)?;
         }
         Ok(p)
+    }
+
+    /// `from` and `to` differ only in capitals. On Windows they name the same files, so going
+    /// straight across would write over the profile and then delete it: it goes by way of
+    /// another name.
+    fn rename_profile_capitals(&self, from: &str, to: &str) -> Result<Profile> {
+        if !profile::valid_name(to) {
+            return Err(Error::Other(format!(
+                "{to:?} is not a valid profile name (letters, digits, - and _)"
+            )));
+        }
+        if self.profile_names()?.iter().any(|n| n == to) {
+            return Err(Error::Other(format!("a profile named {to} already exists")));
+        }
+        let between = format!("renaming-{}", std::process::id());
+        self.rename_profile(from, &between)?;
+        self.rename_profile(&between, to).inspect_err(|_| {
+            self.rename_profile(&between, from).ok();
+        })
     }
 
     pub fn plan_profile_deletion(&self, name: &str) -> Result<ProfileDeletion> {
@@ -989,7 +1150,20 @@ impl Store {
     pub fn session_settings(&self, profile: &str) -> Result<SessionSettings> {
         let requests = crate::paths::game_folder_view(&self.requests_path(profile));
         let p = self.profile(profile)?;
-        let mut s = SessionSettings::build(&p, &self.addons()?, Some(requests))?;
+        let installed = self.addons()?;
+        let mut s = SessionSettings::build(&p, &installed, Some(requests))?;
+        // Each addon's folder and track flag, as the launcher's Addons page has them.
+        let folders = self.folders();
+        for a in &mut s.addons {
+            let Some(m) = installed.get(&a.id) else { continue };
+            let builtin = self.is_builtin(&a.id) || a.id == crate::managed::ID;
+            a.track |=
+                !self.is_builtin(&a.id) && crate::tracks::is_track_addon(&self.addons_dir().join(&a.id), m);
+            let category = m
+                .category
+                .or(a.track.then_some(swofty_addon::manifest::Category::Tracks));
+            a.folder = folders.place(&a.id, builtin, category).map(|k| folders.name(&k));
+        }
         let redirect = p.launcher_saves && !crate::launcher_saves::steam_save_pending(&self.root, &p.name);
         s.launcher_saves = redirect.then(|| settings::SessionSaves {
             profile: p.name.clone(),
@@ -1533,6 +1707,58 @@ mod tests {
     }
 
     #[test]
+    fn only_a_managed_release_installs_under_the_managed_id() {
+        let root = tmp("managed-claimed");
+        let store = Store::new(root.join("data"));
+        let fake = root.join("fake");
+        write_addon(&fake, crate::managed::ID);
+
+        for err in [
+            store.install_addon(&fake).unwrap_err(),
+            store.install_addons(&fake).remove(0).unwrap_err(),
+            store.install_addon_in_profile(&fake, "default").unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("managed by the launcher"), "{err}");
+        }
+        assert!(!store.addons_dir().join(crate::managed::ID).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_listed_install_refuses_anything_else_before_replacing_an_addon() {
+        let root = tmp("listed");
+        let store = Store::new(root.join("data"));
+        let one = root.join("one");
+        write_addon(&one, "t.one");
+        store.install_addon(&one).unwrap();
+        let v1 = semver::Version::new(1, 0, 0);
+
+        let other = root.join("other");
+        write_addon(&other, "t.other");
+        let err = store.install_listed(&other, None, "t.one", &v1).unwrap_err();
+        assert!(
+            err.to_string().contains("the registry lists t.one 1.0.0"),
+            "{err}"
+        );
+        assert!(!store.addons_dir().join("t.other").exists());
+
+        // A listed id that isn't what the download holds can't replace the addon it names, either.
+        let err = store
+            .install_listed(&one, None, "t.one", &semver::Version::new(2, 0, 0))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("the download holds t.one 1.0.0"),
+            "{err}"
+        );
+
+        assert_eq!(
+            store.install_listed(&one, None, "t.one", &v1).unwrap().id,
+            "t.one"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn manages_the_team_simplified_addon() {
         let root = tmp("managed-addon");
         let store = Store::new(root.join("data"));
@@ -1545,7 +1771,9 @@ mod tests {
         z.start_file("bin/helper", opts).unwrap();
         z.finish().unwrap();
 
-        let m = store.install_addon(&pkg).unwrap();
+        let m = store
+            .install_managed_release(&pkg, &crate::update::current_version())
+            .unwrap();
         assert_eq!(m.id, crate::managed::ID);
         assert!(store.addons().unwrap().contains_key(crate::managed::ID));
 
@@ -1817,6 +2045,9 @@ mod tests {
             )),
         )
         .unwrap();
+        for a in &mut expected.addons {
+            a.folder = plain.is_builtin(&a.id).then(|| "Built In".to_owned());
+        }
         expected.launcher_saves = Some(settings::SessionSaves {
             profile: DEFAULT_PROFILE.into(),
             remote: crate::paths::game_folder_view(&crate::launcher_saves::remote_dir(
@@ -2082,6 +2313,124 @@ mod tests {
 
         assert_eq!(store.delete_profile("zeta").unwrap().switch_to, None);
         assert_eq!(store.active_profile(), "alpha");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_name_that_differs_only_in_capitals_is_taken() {
+        let root = tmp("create-capitals");
+        let store = Store::new(&root);
+        store.create_profile("grid", None).unwrap();
+        for name in ["Grid", "GRID", "Vanilla"] {
+            let err = store.create_profile(name, None).unwrap_err();
+            assert!(err.to_string().contains("already exists"), "{name}: {err}");
+        }
+        assert!(!store.profile_names().unwrap().contains(&"Grid".to_owned()));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn renames_a_profile_to_other_capitals() {
+        let root = tmp("rename-capitals");
+        let store = Store::new(&root);
+        store.create_profile("grid", None).unwrap();
+        store.set_active_profile("grid").unwrap();
+        touch(&store.saves_dir("grid").join("remote/save"));
+
+        assert_eq!(store.rename_profile("grid", "Grid").unwrap().name, "Grid");
+
+        let names = store.profile_names().unwrap();
+        assert!(names.contains(&"Grid".to_owned()), "{names:?}");
+        assert!(!names.contains(&"grid".to_owned()), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("renaming")), "{names:?}");
+        assert_eq!(store.profile("Grid").unwrap().name, "Grid");
+        assert_eq!(store.active_profile(), "Grid");
+        assert!(store.saves_dir("Grid").join("remote/save").is_file());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Both names can only exist where file names are case-sensitive.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_rename_to_the_capitals_of_a_profile_that_exists_changes_nothing() {
+        let root = tmp("rename-both");
+        let store = Store::new(&root);
+        store.create_profile("grid", None).unwrap();
+        // Only a case-sensitive folder from before names were compared this way holds both.
+        store.save_profile(&Profile::new("Grid")).unwrap();
+
+        let err = store.rename_profile("grid", "Grid").unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        let names = store.profile_names().unwrap();
+        assert!(names.contains(&"grid".to_owned()) && names.contains(&"Grid".to_owned()));
+        assert!(!names.iter().any(|n| n.starts_with("renaming")), "{names:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn refuses_renaming_a_profile_installed_in_the_game_folder() {
+        let root = tmp("rename-applied");
+        let store = Store::new(&root);
+        store.create_profile("grid", None).unwrap();
+        store.set_active_profile("grid").unwrap();
+        touch(&store.saves_dir("grid").join("remote/save"));
+        let j = crate::journal::Journal::create(&root, "grid", "build-1", true).unwrap();
+
+        let err = store.rename_profile("grid", "main").unwrap_err();
+        assert!(err.to_string().contains("installed in the game folder"), "{err}");
+        assert!(err.to_string().contains(&j.id), "{err}");
+        assert!(store.profiles_dir().join("grid.json").is_file());
+        assert!(!store.profiles_dir().join("main.json").exists());
+        assert!(store.saves_dir("grid").join("remote/save").is_file());
+        assert_eq!(store.active_profile(), "grid");
+
+        j.close().unwrap();
+        store.rename_profile("grid", "main").unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_rename_onto_saves_left_behind_changes_nothing() {
+        let root = tmp("rename-orphan");
+        let store = Store::new(&root);
+        store.create_profile("grid", None).unwrap();
+        store.set_active_profile("grid").unwrap();
+        touch(&store.saves_dir("grid").join("remote/save"));
+        touch(&store.saves_dir("main").join("remote/old"));
+
+        let err = store.rename_profile("grid", "main").unwrap_err();
+        assert!(err.to_string().contains("already holds saves"), "{err}");
+        assert!(store.profiles_dir().join("grid.json").is_file());
+        assert!(!store.profiles_dir().join("main.json").exists());
+        assert!(store.saves_dir("grid").join("remote/save").is_file());
+        assert!(store.saves_dir("main").join("remote/old").is_file());
+        assert_eq!(store.active_profile(), "grid");
+
+        // An empty folder holds nothing to lose, and doesn't stop the rename.
+        std::fs::remove_dir_all(store.saves_dir("main")).unwrap();
+        std::fs::create_dir_all(store.saves_dir("main")).unwrap();
+        store.rename_profile("grid", "main").unwrap();
+        assert!(store.saves_dir("main").join("remote/save").is_file());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // A file in the saves' way makes the move fail here; Windows may not fail the same way.
+    #[cfg(unix)]
+    #[test]
+    fn a_rename_that_cannot_move_the_saves_puts_the_profile_back() {
+        let root = tmp("rename-undo");
+        let store = Store::new(&root);
+        store.create_profile("grid", None).unwrap();
+        store.set_active_profile("grid").unwrap();
+        touch(&store.saves_dir("grid").join("remote/save"));
+        touch(&store.saves_dir("main"));
+
+        assert!(store.rename_profile("grid", "main").is_err());
+
+        assert!(store.profiles_dir().join("grid.json").is_file());
+        assert!(!store.profiles_dir().join("main.json").exists());
+        assert!(store.saves_dir("grid").join("remote/save").is_file());
+        assert_eq!(store.active_profile(), "grid");
         std::fs::remove_dir_all(&root).ok();
     }
 

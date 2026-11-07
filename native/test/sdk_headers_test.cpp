@@ -641,6 +641,7 @@ static int fake_set_control(uint32_t car, uint32_t mode)
     g_mode = mode;
     return SWOFTY_ASSET_OK;
 }
+static int fake_disqualify(uint32_t car) { return car == 6 ? SWOFTY_ASSET_LATE : car == 2 ? SWOFTY_ASSET_OK : SWOFTY_ASSET_INVALID; }
 static int fake_active(int on) { return g_on = on, SWOFTY_ASSET_OK; }
 static int fake_follow(uint32_t car) { return g_follow = int(car), SWOFTY_ASSET_OK; }
 static int fake_camera(int32_t c) { return g_camera = c, c == 1 || c == 2 ? SWOFTY_ASSET_OK : SWOFTY_ASSET_INVALID; }
@@ -654,6 +655,25 @@ static int fake_current(int32_t *car, int32_t *camera)
 }
 static int fake_available() { return g_active; }
 
+static int fake_owned(const char *name)
+{
+    return std::string(name) == "f1_2026" ? SWOFTY_OWNERSHIP_OWNED : std::string(name) == "f1_2025" ? SWOFTY_OWNERSHIP_NOT_OWNED : SWOFTY_OWNERSHIP_UNKNOWN;
+}
+
+static void content_ownership()
+{
+    using swofty::content::Ownership;
+    CHECK(swofty::content::owned("f1_2026") == Ownership::unknown);
+    SwoftyContentOps ops{SWOFTY_CONTENT_OPS_VERSION, fake_owned};
+    swofty::detail::set_content_ops_table(&ops);
+    CHECK(swofty::content::owned("f1_2026") == Ownership::owned);
+    CHECK(swofty::content::owned("f1_2025") == Ownership::not_owned);
+    CHECK(swofty::content::owned("other") == Ownership::unknown);
+    ops.version = 0;
+    CHECK(swofty::content::owned("f1_2026") == Ownership::unknown);
+    swofty::detail::set_content_ops_table(nullptr);
+}
+
 static void session_operations()
 {
     cars::live::Car car(3);
@@ -661,8 +681,15 @@ static void session_operations()
     CHECK(!car.control());
     CHECK(spectator::set_active(true) == Result::unavailable && !spectator::current());
     SwoftySessionOps ops{SWOFTY_SESSION_OPS_VERSION, fake_available, fake_control, fake_set_control, fake_active,
-                         fake_follow, fake_camera, fake_current};
+                         fake_follow, fake_camera, fake_current, fake_disqualify};
+    CHECK(sessions::disqualify(car) == sessions::Result::unavailable);
     swofty::detail::set_session_ops_table(&ops);
+    CHECK(sessions::disqualify(cars::live::Car(2)) == sessions::Result::ok);
+    CHECK(sessions::disqualify(cars::live::Car(6)) == sessions::Result::late);
+    CHECK(sessions::disqualify(cars::live::Car(9)) == sessions::Result::invalid);
+    ops.version = 1;
+    CHECK(sessions::disqualify(cars::live::Car(2)) == sessions::Result::unavailable);
+    ops.version = SWOFTY_SESSION_OPS_VERSION;
     CHECK(sessions::set_control(car, sessions::Control::ai) == sessions::Result::ok && g_mode == 1);
     g_flags = 1;
     auto st = car.control();
@@ -687,6 +714,7 @@ int main()
 {
     unavailable_without_core();
     session_operations();
+    content_ownership();
     liveries_records();
     payload_accessors();
     round_trip();

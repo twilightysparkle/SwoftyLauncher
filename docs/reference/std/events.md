@@ -150,7 +150,7 @@ swofty::events::on_frame(tick, nullptr, &token);
 // ok and fills token; unavailable once the setup found no frame tick on this build
 ```
 
-`on_frame` callbacks run on the first flow-thread update after each rendered frame, and at least every 33 ms when no frame is rendered, as on loading screens. Only one thread runs them at a time. The core logs the first two ticks:
+`on_frame` callbacks run on the first flow-thread update after each rendered frame, and at least every 33 ms when no frame is rendered, as on loading screens. Only one thread runs them at a time. They keep running in the pause menu, with the real seconds since the last frame, so an addon that counts game time needs its own [pause check](/std/systems/failures#pausing). The core logs the first two ticks:
 
 ```text
 [events] flow tick 1 observed, dt 0.000000; onFrame is live
@@ -225,6 +225,9 @@ Choose the event with a `SWOFTY_EVENT_*` constant from `swofty_api.h`:
 | `SWOFTY_EVENT_CAREER_HUB` | `career.hub` |
 | `SWOFTY_EVENT_CAREER_STARTING` | `career.starting` |
 | `SWOFTY_EVENT_CAREER_CONTENT_PRESSED` | `career.content.pressed` ([career contents](./career-content)) |
+| `SWOFTY_EVENT_TELEMETRY_OVERTAKE` | `telemetry.overtake` ([telemetry](./telemetry#events)) |
+| `SWOFTY_EVENT_TELEMETRY_COLLISION` | `telemetry.collision` ([telemetry](./telemetry#events)) |
+| `SWOFTY_EVENT_TELEMETRY_RETIREMENT` | `telemetry.retirement` ([telemetry](./telemetry#events)) |
 
 `session.start` fires when the game enters a session (`Game_GameModule_OnSessionEnter`), `race.start` when the formation lap component reports the race started. Both pass `a = b = 0` and no `data`.
 
@@ -317,7 +320,7 @@ The `blocked` flag comes from [blocking a career mode](./career#blocking-a-caree
 
 ## Availability
 
-The core implements `on_frame`, `session.start`, `race.start` and, from core 0.2.11 (API version 6), the four flow and career events above, and from core 0.2.12 (API version 7) `career.starting`. `career.content.pressed` fires on cores with [career contents](./career-content). The other names (`session.end`, `lap`, `flag`, `state`, `screen`, `pause`, `resume`, `results`) are accepted but do not fire yet.
+The core implements `on_frame`, `session.start`, `race.start` and, from core 0.2.11 (API version 6), the four flow and career events above, and from core 0.2.12 (API version 7) `career.starting`. `career.content.pressed` fires on cores with [career contents](./career-content). `telemetry.overtake`, `telemetry.collision` and `telemetry.retirement` fire on cores with the [telemetry](./telemetry#events) feature on. The other names (`session.end`, `lap`, `flag`, `state`, `screen`, `pause`, `resume`, `results`) are accepted but do not fire yet.
 
 A build where a hook does not resolve leaves only that event silent. The `[events] setup:` and `[career] setup:` lines say which:
 

@@ -161671,6 +161671,433 @@
    "used_by": [
     "native/src/core/ai_line_set_guard.cpp"
    ]
+  },
+  {
+   "id": "career.sponsors_discover",
+   "section": ".xtls",
+   "pattern": "41 57 41 56 41 54 56 57 55 53 48 81 EC B0 01 00 00 44 89 C3",
+   "match": "0x1410f43f0",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x1410f43f0",
+   "kind": "func_start",
+   "names": [
+    "Career_Sponsors_Discover"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "career.sponsors_count_paid_decals",
+   "section": ".xtls",
+   "pattern": "41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 48 48 89 CB 48 8B 81 78 02 00 00",
+   "match": "0x141104190",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141104190",
+   "kind": "func_start",
+   "names": [
+    "Career_Sponsors_CountPaidDecals"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.customisation_decals_write_back_editor_decals",
+   "section": ".xtls",
+   "pattern": "41 57 41 56 41 55 41 54 56 57 55 53 B8 98 4A 00 00 E8 ?? ?? ?? ?? 48 29 C4 88 54 24 2F",
+   "match": "0x14142d800",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x14142d800",
+   "kind": "func_start",
+   "names": [
+    "Game_CustomisationDecals_WriteBackEditorDecals"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_editor_build_decal_type_carousel",
+   "section": ".xtls",
+   "pattern": "41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC C8 01 00 00 C5 F8 29 B4 24 B0 01 00 00 4D 89 CC 4C 89 C5",
+   "match": "0x1416d2790",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x1416d2790",
+   "kind": "func_start",
+   "names": [
+    "Game_DecalEditor_BuildDecalTypeCarousel"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_catalogue_vm_build_tiles",
+   "section": ".xtls",
+   "pattern": "41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC D8 01 00 00 C5 F8 29 B4 24 C0 01 00 00 48 89 CE 48 8B 89 20 03 00 00",
+   "match": "0x141fe5a10",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141fe5a10",
+   "kind": "func_start",
+   "names": [
+    "Game_DecalCatalogueVM_BuildTiles"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_editor_build_slot_action_menu",
+   "section": ".xtls",
+   "pattern": "41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC B8 00 00 00 C5 F8 29 B4 24 A0 00 00 00 80 B9 20 04 00 00 00",
+   "match": "0x141ff79b0",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141ff79b0",
+   "kind": "func_start",
+   "names": [
+    "Game_DecalEditor_BuildSlotActionMenu"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "career.decal_income_count",
+   "section": ".xtls",
+   "pattern": "48 C1 EE 04 48 8B 93 98 02 00 00 4C 8B 83 A0 02 00 00",
+   "match": "0x14110448d",
+   "anchor": "0x4",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141104491",
+   "kind": "mid",
+   "expect": "48 8B 93 98 02 00 00",
+   "names": [
+    "site_Career_DecalIncome_Count"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_type_carousel_entry",
+   "section": ".xtls",
+   "pattern": "0F 84 ?? ?? ?? ?? 48 8B B0 C8 00 00 00",
+   "match": "0x1416d2f7d",
+   "anchor": "0x6",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x1416d2f83",
+   "kind": "mid",
+   "expect": "48 8B B0 C8 00 00 00",
+   "names": [
+    "site_Game_DecalTypeCarousel_Entry"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_catalogue_design_entry",
+   "section": ".xtls",
+   "pattern": "48 8B A8 C8 00 00 00 48 85 ED 0F 84",
+   "match": "0x141fe637a",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141fe637a",
+   "kind": "mid",
+   "expect": "48 8B A8 C8 00 00 00",
+   "names": [
+    "site_Game_DecalCatalogue_DesignEntry"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_catalogue_tile_search",
+   "section": ".xtls",
+   "pattern": "74 15 48 8B 98 C8 00 00 00 48 85 DB",
+   "match": "0x141fe6e8c",
+   "anchor": "0x2",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141fe6e8e",
+   "kind": "mid",
+   "expect": "48 8B 98 C8 00 00 00",
+   "names": [
+    "site_Game_DecalCatalogue_TileSearch"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_menu_duplicate_free_slot_check",
+   "section": ".xtls",
+   "pattern": "E8 ?? ?? ?? ?? 89 C2 80 F2 01 4C 8D 3D",
+   "match": "0x141ff7dd3",
+   "anchor": "0x5",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141ff7dd8",
+   "kind": "mid",
+   "expect": "89 C2 80 F2 01",
+   "names": [
+    "site_Game_DecalMenu_DuplicateFreeSlotCheck"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_menu_mirror_check",
+   "section": ".xtls",
+   "pattern": "83 78 40 FF 0F 85 ?? ?? ?? ?? 48 89 F1 48 89 DA",
+   "match": "0x141ff7ed7",
+   "anchor": "0xa",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141ff7ee1",
+   "kind": "mid",
+   "expect": "48 89 F1 48 89 DA",
+   "names": [
+    "site_Game_DecalMenu_MirrorCheck"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_menu_swap_reserved_check",
+   "section": ".xtls",
+   "pattern": "74 04 44 8B 60 08 83 FB 02 0F 95 C0",
+   "match": "0x141ff80aa",
+   "anchor": "0x6",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141ff80b0",
+   "kind": "mid",
+   "expect": "83 FB 02 0F 95 C0",
+   "names": [
+    "site_Game_DecalMenu_SwapReservedCheck"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_menu_delete_reserved_check",
+   "section": ".xtls",
+   "pattern": "74 04 44 8B 78 08 83 FB 02 0F 95 C0",
+   "match": "0x141ff81e5",
+   "anchor": "0x6",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141ff81eb",
+   "kind": "mid",
+   "expect": "83 FB 02 0F 95 C0",
+   "names": [
+    "site_Game_DecalMenu_DeleteReservedCheck"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "game.decal_menu_mirror_disabled_branch",
+   "section": ".xtls",
+   "pattern": "EB 21 48 8B 8E 30 05 00 00 48 85 C9",
+   "match": "0x141ff7f79",
+   "anchor": "0x2",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x141ff7f7b",
+   "kind": "mid",
+   "expect": "48 8B 8E 30 05 00 00",
+   "names": [
+    "site_Game_DecalMenu_MirrorDisabledBranch"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-05",
+     "by": "sponsor-studio",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "jonniedesigns.sponsor-base"
+   ]
+  },
+  {
+   "id": "fe_tiles.ctx",
+   "section": ".xtls",
+   "pattern": "48 89 86 D8 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8D 15",
+   "match": "0x14077b3f7",
+   "anchor": "0xa",
+   "resolve": {
+    "kind": "riprel",
+    "insn": "0x7",
+    "len": 7
+   },
+   "target": "0x14604bbf0",
+   "kind": "data",
+   "names": [
+    "g_FeTile_Ctx"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-07",
+     "by": "std-ent",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/entitlements.cpp"
+   ]
   }
  ]
 }

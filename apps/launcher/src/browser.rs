@@ -2,6 +2,7 @@
 //! sort, filter, star, read about, and install or update in one click.
 
 mod authors;
+mod rows;
 
 pub(crate) use authors::View;
 
@@ -11,6 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::scale::px;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -48,14 +50,21 @@ const CARD_W: f32 = 300.;
 const GAP: f32 = 14.;
 const SIDE_W: f32 = 340.;
 const AUTHORS_SHOWN: usize = 8;
-const TILE_MIN: f32 = 220.;
-const TILE_ART: f32 = 96.;
-const TILE_FACES: usize = 4;
-const FACE: f32 = 40.;
 const HELMET: &[u8] = include_bytes!("../assets/helmet.svg");
 const NATIVE: &str = "Runs code in the game";
 const VERIFYING: u8 = 1;
 const INSTALLING: u8 = 2;
+
+/// How many of `versions`, newest first, the Addons page shows before its older-versions toggle.
+fn shown_versions(versions: &[&catalog::Version], installed: &semver::Version) -> usize {
+    let through = versions
+        .iter()
+        .position(|v| v.version <= *installed)
+        .map_or(versions.len(), |i| {
+            i + usize::from(versions[i].version == *installed)
+        });
+    through.max(2).min(versions.len())
+}
 
 /// The updates for addons in `on` that haven't failed at the version offered in `held`.
 fn due_updates<'a>(
@@ -120,6 +129,25 @@ fn took_text(d: Duration) -> String {
     }
 }
 
+fn card_border(failed: bool, updating: bool, p: Palette) -> Hsla {
+    if failed {
+        p.error.opacity(0.6)
+    } else if updating {
+        p.accent.opacity(0.6)
+    } else {
+        p.border
+    }
+}
+
+fn progress_bar(fraction: f32, p: Palette) -> Div {
+    div()
+        .h(px(3.))
+        .w_full()
+        .rounded(px(2.))
+        .bg(p.border_variant)
+        .child(div().h_full().rounded(px(2.)).bg(p.accent).w(relative(fraction)))
+}
+
 fn native_badge(id: String, p: Palette) -> Stateful<Div> {
     h_flex()
         .id(SharedString::from(id))
@@ -173,12 +201,16 @@ impl Progress {
                     Some(item) => format!("Downloading {item} · "),
                     None => "Downloading ".to_owned(),
                 };
-                text.push_str(&format!(
-                    "{} of {} · {:.0}%",
-                    size_text(done),
-                    size_text(size),
-                    self.fraction() * 100.
-                ));
+                if size == 0 {
+                    text.push_str(&size_text(done));
+                } else {
+                    text.push_str(&format!(
+                        "{} of {} · {:.0}%",
+                        size_text(done),
+                        size_text(size),
+                        self.fraction() * 100.
+                    ));
+                }
                 if rate > 0. {
                     text.push_str(&format!(" · {}/s", size_text(rate as u64)));
                 }
@@ -196,6 +228,79 @@ impl Progress {
     }
 }
 
+fn install_failure_title(name: &str, verb: &str, refused: bool) -> String {
+    if refused {
+        format!("Can't {verb} {name}: missing requirements")
+    } else {
+        format!("Could not {verb} {name}")
+    }
+}
+
+fn install_failure_toast(name: &str, verb: &str, refused: bool, error: String) -> Notification {
+    Notification::error(error).title(install_failure_title(name, verb, refused))
+}
+
+fn requested_version_available(addon: Option<&Addon>, requested: &catalog::Version) -> bool {
+    addon.is_some_and(|addon| {
+        addon.listed().iter().any(|version| {
+            version.version == requested.version
+                && version.accepts(&current_version())
+                && version.sha256 == requested.sha256
+                && version.size == requested.size
+                && version.url == requested.url
+        })
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryAction {
+    Retry,
+    RequestCurrent,
+    Unavailable,
+}
+
+fn retry_action(addon: Option<&Addon>, requested: &catalog::Version) -> RetryAction {
+    if requested_version_available(addon, requested) {
+        RetryAction::Retry
+    } else if addon.and_then(|a| a.offered(&current_version())).is_some() {
+        RetryAction::RequestCurrent
+    } else {
+        RetryAction::Unavailable
+    }
+}
+
+/// Minimal identity for an update that disappeared from the current catalog.
+fn update_identity(update: &Update) -> Addon {
+    Addon {
+        id: update.id.clone(),
+        name: update.name.clone(),
+        author: String::new(),
+        summary: String::new(),
+        description: String::new(),
+        category: None,
+        kind: Vec::new(),
+        homepage: None,
+        repository: None,
+        icon: None,
+        publisher: None,
+        publishers: Vec::new(),
+        downloads: 0,
+        downloads_30d: 0,
+        stars: 0,
+        trend: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        latest: None,
+        versions: Vec::new(),
+    }
+}
+
+/// Whether a held update represents a real failure rather than a successful
+/// install waiting for the asynchronous catalog refresh.
+fn held_failure(error: &str) -> bool {
+    !error.is_empty()
+}
+
 /// An install's downloads so far: every addon it fetches, requirements included.
 #[derive(Default)]
 struct Tally {
@@ -205,6 +310,7 @@ struct Tally {
     stage: u8,
     item: Option<String>,
     also: Vec<String>,
+    installed: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -238,7 +344,7 @@ impl Job {
                 let secs = self.started.elapsed().as_secs_f64();
                 Progress::Downloading {
                     done,
-                    size: t.size.max(done),
+                    size: t.size,
                     rate: if secs > 0.3 { done as f64 / secs } else { 0. },
                 }
             }
@@ -253,6 +359,15 @@ impl Job {
     /// The other addons it installs, once they're known.
     fn also(&self) -> Vec<String> {
         self.tally().also.clone()
+    }
+
+    fn failure(&self, error: &str) -> String {
+        let installed = self.tally().installed.clone();
+        if installed.is_empty() {
+            error.to_owned()
+        } else {
+            format!("{error} · Already installed: {}", installed.join(", "))
+        }
     }
 
     fn track(&self, root: &str, e: Event) {
@@ -271,6 +386,8 @@ impl Job {
             Event::Stage(Stage::Downloading(n)) => t.current = n,
             Event::Stage(Stage::Verifying) => t.stage = VERIFYING,
             Event::Stage(Stage::Installing) => t.stage = INSTALLING,
+            Event::Installed(m) if m.id != root => t.installed.push(format!("{} {}", m.name, m.version)),
+            Event::Installed(_) => {}
         }
     }
 }
@@ -283,6 +400,7 @@ enum Offer {
     Elsewhere,
     Update(semver::Version, semver::Version),
     TooOld,
+    Queued,
     Working(Progress),
     Failed,
     /// Not installed, and its requirements can't all be met.
@@ -398,7 +516,7 @@ fn tab_label(tab: Tab) -> &'static str {
     }
 }
 
-/// The categories the landing shows a tile for, Other last.
+/// The categories, Other last.
 fn shelves() -> impl Iterator<Item = Tab> {
     Category::ALL
         .into_iter()
@@ -456,34 +574,6 @@ fn shelf_glyph(tab: Tab, size: f32, color: Hsla) -> AnyElement {
         .size(px(size))
         .text_color(color)
         .into_any_element()
-}
-
-/// How many tiles a landing row of `width` holds: 5, 2 or 1, so the rows come out even.
-fn shelf_columns(width: f32) -> usize {
-    [5, 2]
-        .into_iter()
-        .find(|&n| n as f32 * TILE_MIN + (n - 1) as f32 * GAP <= width)
-        .unwrap_or(1)
-}
-
-/// How many icons fit on a tile `width` wide, beside its glyph and a count of the rest.
-fn tile_faces(width: f32) -> usize {
-    let room = width - 28. - 64. - 40.;
-    (1 + ((room - FACE) / (FACE - 8.)).floor().max(0.) as usize).min(TILE_FACES)
-}
-
-/// The addons in `tab`, most starred first.
-fn shelved(addons: &[Addon], tab: Tab, stars: impl Fn(&Addon) -> u64) -> Vec<&Addon> {
-    let mut found: Vec<&Addon> = addons
-        .iter()
-        .filter(|a| tab.is_none_or(|t| a.category() == t))
-        .collect();
-    found.sort_by(|a, b| {
-        stars(b)
-            .cmp(&stars(a))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    found
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -631,6 +721,7 @@ pub(crate) struct Browser {
     scroll: ScrollHandle,
     grid_scroll: ListState,
     grid_cache: Option<GridCache>,
+    rows: rows::Rows,
     catalog_revision: u64,
     facet_counts: RefCell<HashMap<Facet, usize>>,
     needs_cache: RefCell<HashMap<String, AddonNeeds>>,
@@ -638,7 +729,10 @@ pub(crate) struct Browser {
     pub(crate) smooth: crate::scroll::SmoothScroll,
     details: HashMap<String, Addon>,
     loading: BTreeSet<String>,
+    asked: HashSet<String>,
+    history: HashSet<String>,
     working: HashMap<String, Job>,
+    queue: crate::download_queue::Queue<(Addon, catalog::Version, String)>,
     failed: HashMap<String, String>,
     refused: BTreeSet<String>,
     batch: Option<Batch>,
@@ -650,7 +744,6 @@ pub(crate) struct Browser {
     star_gen: u64,
     sort: Sort,
     search_sort: Option<Sort>,
-    landing: bool,
     tab: Tab,
     facets: BTreeSet<Facet>,
     hide_code: bool,
@@ -693,6 +786,7 @@ impl Browser {
             scroll: ScrollHandle::new(),
             grid_scroll: ListState::new(0, ListAlignment::Top, px(200.)),
             grid_layout: Default::default(),
+            rows: Default::default(),
             grid_cache: None,
             catalog_revision: 0,
             facet_counts: RefCell::default(),
@@ -700,7 +794,14 @@ impl Browser {
             smooth: Default::default(),
             details: HashMap::new(),
             loading: BTreeSet::new(),
+            asked: HashSet::new(),
+            history: HashSet::new(),
             working: HashMap::new(),
+            queue: {
+                let mut queue = crate::download_queue::Queue::default();
+                queue.set_limit(swofty_core::store::Store::new(root).config().download_jobs());
+                queue
+            },
             failed: HashMap::new(),
             refused: BTreeSet::new(),
             batch: None,
@@ -712,7 +813,6 @@ impl Browser {
             star_gen: 0,
             sort: Sort::Stars,
             search_sort: None,
-            landing: true,
             tab: None,
             facets: BTreeSet::new(),
             hide_code: false,
@@ -775,11 +875,6 @@ impl Browser {
                 })
                 .ok();
         });
-    }
-
-    /// Whether the category tiles show: nothing chosen, searched or filtered.
-    fn on_landing(&self, searching: bool) -> bool {
-        self.landing && self.tab.is_none() && !searching && self.facets.is_empty() && !self.hide_code
     }
 }
 
@@ -1041,6 +1136,15 @@ impl Shell {
         if let Some(job) = self.browser.working.get(&a.id) {
             return Offer::Working(job.progress());
         }
+        if self
+            .browser
+            .queue
+            .jobs()
+            .iter()
+            .any(|job| job.id == a.id && job.state == crate::download_queue::State::Queued)
+        {
+            return Offer::Queued;
+        }
         if self.browser.failed.contains_key(&a.id) {
             return Offer::Failed;
         }
@@ -1123,21 +1227,378 @@ impl Shell {
     }
 
     pub(crate) fn install_from_catalog(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.browser.working.contains_key(id) {
-            return;
+        self.enqueue_catalog(id, cx);
+    }
+
+    /// True when a job was queued or an existing pending job will handle it.
+    fn enqueue_catalog(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        if self.data_move_locked() {
+            return false;
         }
         let Some(addon) = self.browser.find(id).cloned() else {
-            return;
+            return false;
         };
         let Some(version) = addon.offered(&current_version()).cloned() else {
-            return;
+            return false;
         };
         if self.build.as_ref().is_some_and(|b| b.holds(id)) {
             self.browser
                 .toasts
                 .push(Notification::warning(crate::update::BUILDING));
+            return false;
+        }
+        if let Some(existing) = self.browser.queue.jobs().iter().find(|job| {
+            job.id == id
+                && matches!(
+                    job.state,
+                    crate::download_queue::State::Queued | crate::download_queue::State::Active
+                )
+        }) {
+            return existing.request.1 == version;
+        }
+        let claims = match self.requirements(&addon) {
+            Some(Ok(plan)) => plan.also().iter().map(|s| s.addon.id.clone()).collect(),
+            _ => BTreeSet::new(),
+        };
+        if self.browser.queue.enqueue(
+            id.to_owned(),
+            (addon, version, self.library.profile.name.clone()),
+            claims,
+        ) {
+            self.start_queued_downloads(cx);
+        }
+        true
+    }
+
+    pub(crate) fn download_pending(&self) -> usize {
+        self.browser.queue.pending()
+    }
+
+    pub(crate) fn dock_input(&self) -> crate::download_dock::Input {
+        crate::download_dock::Input {
+            pending: self.browser.queue.pending(),
+            failed: self
+                .browser
+                .queue
+                .jobs()
+                .iter()
+                .filter(|job| matches!(job.state, crate::download_queue::State::Failed(_)))
+                .count(),
+            on_downloads: self.page == Page::Downloads,
+        }
+    }
+
+    pub(crate) fn dock_line(&self) -> Option<crate::download_dock::Line> {
+        use crate::download_queue::State;
+        let jobs = self.browser.queue.jobs();
+        let pending = self.browser.queue.pending();
+        if pending > 0 {
+            let job = jobs
+                .iter()
+                .find(|job| job.state == State::Active)
+                .or_else(|| jobs.iter().find(|job| job.state == State::Queued))?;
+            let working = self.browser.working.get(&job.id);
+            return Some(crate::download_dock::Line {
+                name: job.request.0.name.clone(),
+                status: match (&job.state, working) {
+                    (State::Active, Some(w)) => w.progress().short(),
+                    (State::Active, None) => "Starting…".to_owned(),
+                    _ => "Queued".to_owned(),
+                },
+                fraction: working.map(|w| w.progress().fraction()),
+                more: pending - 1,
+                failed: false,
+            });
+        }
+        let failed = jobs
+            .iter()
+            .rev()
+            .find(|job| matches!(job.state, State::Failed(_)));
+        let (Some(job), true) = (failed, self.dock.failure_shown(self.dock_input().failed)) else {
+            let job = jobs.iter().rev().find(|job| job.state == State::Completed)?;
+            return Some(crate::download_dock::Line {
+                name: job.request.0.name.clone(),
+                status: "Installed".to_owned(),
+                fraction: Some(1.),
+                more: 0,
+                failed: false,
+            });
+        };
+        let State::Failed(error) = &job.state else {
+            return None;
+        };
+        Some(crate::download_dock::Line {
+            name: job.request.0.name.clone(),
+            status: format!("Failed: {error}"),
+            fraction: None,
+            more: 0,
+            failed: true,
+        })
+    }
+
+    pub(crate) fn downloads_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        use crate::download_queue::State;
+        let rows = self
+            .browser
+            .queue
+            .jobs()
+            .iter()
+            .enumerate()
+            .map(|(index, job)| {
+                let id = job.id.clone();
+                let status = match &job.state {
+                    State::Queued => "Queued".to_owned(),
+                    State::Active => self.browser.working.get(&id).map_or_else(
+                        || "Starting…".to_owned(),
+                        |progress| progress.progress().long(progress.item().as_deref()),
+                    ),
+                    State::Completed => "Completed".to_owned(),
+                    State::Failed(error) => format!("Failed: {error}"),
+                };
+                let status = if matches!(job.state, State::Completed | State::Failed(_))
+                    && self
+                        .store
+                        .profile_names()
+                        .is_ok_and(|names| !names.contains(&job.request.2))
+                {
+                    format!(
+                        "{status} · Profile {} no longer exists; nothing was added to another profile.",
+                        job.request.2
+                    )
+                } else {
+                    status
+                };
+                let action = match &job.state {
+                    State::Queued => {
+                        let target = id.clone();
+                        Some(
+                            Button::new(SharedString::from(format!("remove-{id}-{index}")))
+                                .label("Remove")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.browser.queue.remove_queued(&target) {
+                                        if let Some(batch) = &mut this.browser.batch {
+                                            batch.left.remove(&target);
+                                        }
+                                        if this.browser.batch.as_ref().is_some_and(|b| b.left.is_empty()) {
+                                            this.finish_addon_updates();
+                                        }
+                                        this.start_queued_downloads(cx);
+                                    }
+                                })),
+                        )
+                    }
+                    State::Failed(_) => {
+                        let target = id.clone();
+                        let action = retry_action(self.browser.find(&id), &job.request.1);
+                        let pending = self.browser.queue.jobs().iter().any(|other| {
+                            other.id == id && matches!(other.state, State::Queued | State::Active)
+                        });
+                        Some(
+                            Button::new(SharedString::from(format!("retry-{id}-{index}")))
+                                .label(if pending {
+                                    "Already queued"
+                                } else {
+                                    match action {
+                                        RetryAction::Retry => "Retry",
+                                        RetryAction::RequestCurrent => "Request current version",
+                                        RetryAction::Unavailable => "Version unavailable",
+                                    }
+                                })
+                                .disabled(pending || action == RetryAction::Unavailable)
+                                .on_click(cx.listener(move |this, _, _, cx| match action {
+                                    RetryAction::Retry => {
+                                        if this.browser.queue.retry_at(index, &target) {
+                                            this.start_queued_downloads(cx);
+                                        }
+                                    }
+                                    RetryAction::RequestCurrent => {
+                                        this.enqueue_catalog(&target, cx);
+                                    }
+                                    RetryAction::Unavailable => {}
+                                })),
+                        )
+                    }
+                    _ => None,
+                };
+                v_flex()
+                    .gap(px(4.))
+                    .p(px(12.))
+                    .bg(p.surface)
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(format!("{} {}", job.request.0.name, job.request.1.version))
+                            .children(action),
+                    )
+                    .child(div().text_color(p.text_muted).child(status))
+            })
+            .collect::<Vec<_>>();
+        v_flex()
+            .size_full()
+            .p(px(24.))
+            .gap(px(12.))
+            .child(
+                h_flex().justify_between().child("Downloads").child(
+                    Button::new("clear-downloads")
+                        .label("Clear finished")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let finished: Vec<_> = this
+                                .browser
+                                .queue
+                                .jobs()
+                                .iter()
+                                .filter(|job| matches!(job.state, crate::download_queue::State::Failed(_)))
+                                .map(|job| job.id.clone())
+                                .collect();
+                            this.browser.queue.clear_finished();
+                            for id in finished {
+                                if !this.browser.queue.jobs().iter().any(|job| job.id == id) {
+                                    this.browser.failed.remove(&id);
+                                    this.browser.refused.remove(&id);
+                                }
+                            }
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child("Concurrent jobs")
+                    .child(
+                        Button::new("download-limit-minus")
+                            .label("−")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_download_limit(this.browser.queue.limit().saturating_sub(1), cx);
+                            })),
+                    )
+                    .child(self.browser.queue.limit().to_string())
+                    .child(
+                        Button::new("download-limit-plus")
+                            .label("+")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_download_limit(this.browser.queue.limit() + 1, cx);
+                            })),
+                    ),
+            )
+            .children(rows.is_empty().then(|| {
+                v_flex().gap(px(8.)).child("No downloads yet").child(
+                    Button::new("open-addon-browser")
+                        .label("Browse addons")
+                        .on_click(cx.listener(|this, _, _, cx| this.open_page(Page::Browser, cx))),
+                )
+            }))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .scroll_y("downloads-list")
+                    .gap(px(8.))
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn retry_download(&mut self, id: &str, cx: &mut Context<Self>) {
+        let index =
+            self.browser.queue.jobs().iter().rposition(|job| {
+                job.id == id && matches!(job.state, crate::download_queue::State::Failed(_))
+            });
+        if let Some(index) = index {
+            let action = retry_action(self.browser.find(id), &self.browser.queue.jobs()[index].request.1);
+            if action == RetryAction::RequestCurrent {
+                self.enqueue_catalog(id, cx);
+            } else if action == RetryAction::Retry && self.browser.queue.retry_at(index, id) {
+                self.browser.failed.remove(id);
+                self.browser.refused.remove(id);
+                self.start_queued_downloads(cx);
+            }
+        } else {
+            self.install_from_catalog(id, cx);
+        }
+    }
+
+    fn change_download_limit(&mut self, limit: usize, cx: &mut Context<Self>) {
+        let mut config = self.store.config();
+        config.set_download_jobs(limit);
+        if let Err(error) = self.store.save_config(&config) {
+            crate::app_log::action("save download limit").failed(&error);
             return;
         }
+        self.browser.queue.set_limit(config.download_jobs());
+        self.start_queued_downloads(cx);
+    }
+
+    fn start_queued_downloads(&mut self, cx: &mut Context<Self>) {
+        let queued: Vec<_> = self
+            .browser
+            .queue
+            .jobs()
+            .iter()
+            .filter(|job| job.state == crate::download_queue::State::Queued)
+            .map(|job| (job.id.clone(), job.request.0.clone()))
+            .collect();
+        for (id, addon) in queued {
+            if let Some(Ok(plan)) = self.requirements(&addon) {
+                self.browser
+                    .queue
+                    .update_claims(&id, plan.also().iter().map(|s| s.addon.id.clone()).collect());
+            }
+        }
+        while let Some(id) = self.browser.queue.start_next() {
+            let (addon, version, profile) = self
+                .browser
+                .queue
+                .jobs()
+                .iter()
+                .find(|job| job.id == id && job.state == crate::download_queue::State::Active)
+                .expect("the scheduler just activated this job")
+                .request
+                .clone();
+            if !requested_version_available(self.browser.find(&id), &version) {
+                let error = format!(
+                    "{} {} is no longer available or compatible; request it again.",
+                    addon.name, version.version
+                );
+                self.browser.queue.finish(&id, Err(error.clone()));
+                self.browser.failed.insert(id.clone(), error.clone());
+                if let Some(batch) = &mut self.browser.batch
+                    && batch.left.remove(&id)
+                {
+                    batch.failed.push((addon.name.clone(), error));
+                } else {
+                    let verb = if self.installed_version(&id).is_some() {
+                        "update"
+                    } else {
+                        "install"
+                    };
+                    self.browser
+                        .toasts
+                        .push(install_failure_toast(&addon.name, verb, false, error));
+                }
+                if self
+                    .browser
+                    .batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.left.is_empty())
+                {
+                    self.finish_addon_updates();
+                }
+                continue;
+            }
+            self.start_catalog_install(addon, version, profile, cx);
+        }
+        cx.notify();
+    }
+
+    fn start_catalog_install(
+        &mut self,
+        addon: Addon,
+        version: catalog::Version,
+        profile: String,
+        cx: &mut Context<Self>,
+    ) {
+        let id = addon.id.as_str();
         let updating = self.installed_version(id).is_some();
         self.browser.failed.remove(id);
         self.browser.refused.remove(id);
@@ -1171,12 +1632,13 @@ impl Shell {
         let store = self.store.clone();
         let catalog_now = self.browser.addons.clone();
         let started = Instant::now();
+        let tracked = job.clone();
         cx.spawn(async move |this, cx| {
             let (target, v) = (addon.clone(), version.clone());
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    catalog::requires::install(&store, &catalog_now, &target, &v, &|e| {
+                    catalog::requires::install_in_profile(&store, &catalog_now, &target, &v, &profile, &|e| {
                         job.track(&target.id, e)
                     })
                 })
@@ -1187,6 +1649,13 @@ impl Shell {
                     s.browser.working.remove(d);
                 }
                 let took = started.elapsed();
+                s.browser.queue.finish(
+                    &addon.id,
+                    result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|error| tracked.failure(&error.to_string())),
+                );
                 let in_batch = s.browser.batch.as_mut().is_some_and(|b| b.left.remove(&addon.id));
                 let verb = if updating { "update" } else { "install" };
                 match result {
@@ -1210,18 +1679,11 @@ impl Shell {
                             if let Some(b) = s.browser.batch.as_mut() {
                                 b.updated.push(format!("{} {}", m.name, m.version));
                             }
-                        } else {
-                            if s.page == Page::Browser {
-                                s.show_installed(&m.id, cx);
-                            }
-                            if !also.is_empty() {
-                                s.browser.toasts.push(
-                                    Notification::success(format!("Also installed {}", also.join(", ")))
-                                        .title(title),
-                                );
-                            } else if s.page != Page::Browser {
-                                s.browser.toasts.push(Notification::success(title));
-                            }
+                        } else if !also.is_empty() {
+                            s.browser.toasts.push(
+                                Notification::success(format!("Also installed {}", also.join(", ")))
+                                    .title(title),
+                            );
                         }
                     }
                     Err(e) => {
@@ -1246,22 +1708,21 @@ impl Shell {
                         } else {
                             s.browser
                                 .toasts
-                                .push(Notification::error(error).title(if refused {
-                                    format!("Can't {verb} {}: missing requirements", addon.name)
-                                } else {
-                                    format!("Could not {verb} {}", addon.name)
-                                }));
+                                .push(install_failure_toast(&addon.name, verb, refused, error));
                         }
                         s.reload(cx);
                     }
                 }
-                if in_batch && let Some(to) = s.catalog_update(&addon.id).map(|u| u.to.version.clone()) {
+                if in_batch {
                     let error = s.browser.failed.get(&addon.id).cloned().unwrap_or_default();
-                    s.browser.held.insert(addon.id.clone(), (to, error));
+                    s.browser
+                        .held
+                        .insert(addon.id.clone(), (version.version.clone(), error));
                 }
                 if in_batch && s.browser.batch.as_ref().is_some_and(|b| b.left.is_empty()) {
                     s.finish_addon_updates();
                 }
+                s.start_queued_downloads(cx);
                 cx.notify();
             })
             .ok();
@@ -1269,15 +1730,6 @@ impl Shell {
         .detach();
         self.tick_browser(cx);
         cx.notify();
-    }
-
-    /// Opens where `id` now lists, highlighting it: Addons, or Tracks for a track addon.
-    fn show_installed(&mut self, id: &str, cx: &mut Context<Self>) {
-        let track = self.library.addons.iter().any(|a| a.manifest.id == id && a.track);
-        match self.library.tracks_page.filter(|_| track) {
-            Some(i) => self.open_page(Page::Section(i), cx),
-            None => self.show_addon(id, cx),
-        }
     }
 
     /// The addon updates the play bar offers: every outdated registry addon that's on in the active
@@ -1308,31 +1760,56 @@ impl Shell {
     fn update_addons(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
             self.play_state(),
-            PlayState::Running | PlayState::Elsewhere(_) | PlayState::Launching
+            PlayState::Running | PlayState::Elsewhere(_) | PlayState::Launching | PlayState::Preparing
         ) {
             window.push_notification(Notification::error("Close F1 25 before updating addons."), cx);
             return;
         }
         let building = self.build.clone();
-        let (held, ids): (Vec<String>, Vec<String>) = self
+        let (held, updates): (Vec<Update>, Vec<Update>) = self
             .addon_updates()
             .into_iter()
-            .map(|u| u.id.clone())
-            .filter(|id| !self.browser.working.contains_key(id))
-            .partition(|id| building.as_ref().is_some_and(|b| b.holds(id)));
+            .cloned()
+            .partition(|u| building.as_ref().is_some_and(|b| b.holds(&u.id)));
         if !held.is_empty() {
             window.push_notification(Notification::warning(crate::update::BUILDING), cx);
         }
-        if ids.is_empty() || self.updating_addons() {
+        if updates.is_empty() || self.updating_addons() {
             return;
         }
+        let ids: Vec<_> = updates.iter().map(|u| u.id.clone()).collect();
         catalog::log(&self.store.root, &format!("updating addons: {}", ids.join(", ")));
         self.browser.batch = Some(Batch {
-            left: ids.iter().cloned().collect(),
+            left: ids.into_iter().collect(),
             ..Batch::default()
         });
-        for id in ids {
-            self.install_from_catalog(&id, cx);
+        for update in updates {
+            if !self.enqueue_catalog(&update.id, cx) {
+                let error =
+                    "This update is no longer available or another version is already queued.".to_owned();
+                let addon = self
+                    .browser
+                    .find(&update.id)
+                    .cloned()
+                    .unwrap_or_else(|| update_identity(&update));
+                self.browser.queue.record_failure(
+                    update.id.clone(),
+                    (addon, update.to.clone(), self.library.profile.name.clone()),
+                    error.clone(),
+                );
+                if let Some(batch) = &mut self.browser.batch {
+                    batch.left.remove(&update.id);
+                    batch.failed.push((update.name, error));
+                }
+            }
+        }
+        if self
+            .browser
+            .batch
+            .as_ref()
+            .is_some_and(|batch| batch.left.is_empty())
+        {
+            self.finish_addon_updates();
         }
     }
 
@@ -1493,7 +1970,9 @@ impl Shell {
             .browser
             .held
             .iter()
-            .filter(|(id, (v, _))| self.catalog_update(id).is_some_and(|u| u.to.version == *v))
+            .filter(|(id, (v, error))| {
+                held_failure(error) && self.catalog_update(id).is_some_and(|u| u.to.version == *v)
+            })
             .map(|(id, (_, e))| {
                 let name = self.browser.find(id).map_or(id.as_str(), |a| a.name.as_str());
                 format!("{name}: {e}")
@@ -1609,7 +2088,16 @@ impl Shell {
                     .label(format!("Installed v{from} · v{to} in the play bar"))
                     .disabled(true);
             }
-            Offer::Failed => button.danger().icon(IconName::RotateCw).label("Failed – Retry"),
+            Offer::Failed => {
+                return button
+                    .danger()
+                    .icon(IconName::RotateCw)
+                    .label("Failed – Retry")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.retry_download(&target, cx);
+                    }));
+            }
             Offer::Installed(v) => {
                 return button
                     .outline()
@@ -1637,6 +2125,15 @@ impl Shell {
                     .icon(IconName::TriangleAlert)
                     .label("Missing requirements")
                     .disabled(true);
+            }
+            Offer::Queued => {
+                return button
+                    .outline()
+                    .label("Queued · View downloads")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_page(Page::Downloads, cx);
+                    }));
             }
             Offer::Working(progress) => {
                 return button
@@ -1767,28 +2264,17 @@ impl Shell {
 
     fn shelve(&mut self, tab: Tab, cx: &mut Context<Self>) {
         let b = &mut self.browser;
-        if b.landing || b.tab != tab {
+        if b.tab != tab {
             b.smooth.cancel();
             b.scroll.set_offset(Point::default());
             b.grid_scroll.scroll_to(ListOffset::default());
         }
-        b.landing = false;
         b.tab = tab;
         cx.notify();
     }
 
     pub(crate) fn show_shader_addons(&mut self, cx: &mut Context<Self>) {
         self.shelve(Some(Some(Category::Shaders)), cx);
-    }
-
-    fn show_categories(&mut self, cx: &mut Context<Self>) {
-        let b = &mut self.browser;
-        b.landing = true;
-        b.tab = None;
-        b.smooth.cancel();
-        b.scroll.set_offset(Point::default());
-        b.grid_scroll.scroll_to(ListOffset::default());
-        self.clear_filters(cx);
     }
 
     pub(crate) fn browser_page(&mut self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -2240,36 +2726,7 @@ impl Shell {
                     .into_any_element()
             })
             .collect();
-        let back = h_flex()
-            .id("browser-categories")
-            .h(px(28.))
-            .px(px(8.))
-            .ml(px(-8.))
-            .gap(px(6.))
-            .flex_shrink_0()
-            .rounded(px(5.))
-            .cursor_pointer()
-            .text_size(px(13.))
-            .text_color(p.text_muted)
-            .hover(move |s| s.bg(p.hover).text_color(p.text))
-            .child(Icon::new(IconName::ArrowLeft).size(px(14.)))
-            .child("Categories")
-            .tooltip(|window, cx| Tooltip::new("Back to the category tiles").build(window, cx))
-            .on_click(cx.listener(|this, _, _, cx| this.show_categories(cx)));
-        h_flex()
-            .gap(px(6.))
-            .flex_wrap()
-            .child(back)
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(1.))
-                    .h(px(14.))
-                    .mx(px(4.))
-                    .my(px(7.))
-                    .bg(p.border),
-            )
-            .children(pills)
+        h_flex().gap(px(6.)).flex_wrap().children(pills)
     }
 
     fn sort_button(&self, sort: Sort, searching: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -2415,13 +2872,8 @@ impl Shell {
         } else {
             plural(shown.len(), "addon", "addons")
         };
-        let landing = !self.browser.addons.is_empty() && self.browser.on_landing(!query.is_empty());
         let width = self.content_width - FILTERS_W - 20.;
-        if landing {
-            let filters = self.filter_column(p, cx);
-            let body = self.virtual_cards(shown, query, width, true, count, sort, p, cx);
-            return self.browser_columns(filters, div(), body);
-        }
+        let rows = !self.browser.addons.is_empty() && !filtering;
         let bar = h_flex()
             .pb(px(14.))
             .gap(px(12.))
@@ -2466,6 +2918,8 @@ impl Shell {
             .into_any_element()
         } else if shown.is_empty() && bare && !self.browser.addons.is_empty() && self.browser.tab.is_some() {
             self.empty_shelf(self.browser.tab, p, cx)
+        } else if rows && !shown.is_empty() {
+            self.category_rows(shown, width, p, cx)
         } else if shown.is_empty() {
             let (title, body, action) = if self.browser.addons.is_empty() {
                 (
@@ -2497,7 +2951,7 @@ impl Shell {
             };
             self.empty(IconName::PackageSearch, title, body, action, p)
         } else {
-            self.virtual_cards(shown, query, width, false, count, sort, p, cx)
+            self.virtual_cards(shown, query, width, p, cx)
         };
         self.browser_columns(filters, bar, body)
     }
@@ -2522,215 +2976,8 @@ impl Shell {
             .into_any_element()
     }
 
-    fn landing_bar(&self) -> Div {
-        h_flex()
-            .h(px(28.))
-            .flex_shrink_0()
-            .items_center()
-            .text_size(px(15.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .child("Browse by category")
-    }
-
-    fn all_heading(&self, count: String, sort: Sort, width: f32, p: Palette, cx: &mut Context<Self>) -> Div {
-        h_flex()
-            .w(px(width - 1.))
-            .pt(px(10.))
-            .gap(px(12.))
-            .flex_shrink_0()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("All addons"),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(p.text_placeholder)
-                    .child(count.clone()),
-            )
-            .child(self.sort_button(sort, false, cx))
-    }
-
-    fn landing_row(&self, row: usize, width: f32, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        if row == 0 {
-            return self.landing_bar().pb(px(GAP)).into_any_element();
-        }
-        let columns = shelf_columns(width);
-        let tile_w = ((width - GAP * (columns - 1) as f32) / columns as f32).floor() - 1.;
-        h_flex()
-            .pb(px(GAP))
-            .gap(px(GAP))
-            .children(
-                shelves()
-                    .skip((row - 1) * columns)
-                    .take(columns)
-                    .map(|tab| self.shelf_tile(tab, tile_w, p, cx)),
-            )
-            .into_any_element()
-    }
-
-    fn has_icon(&self, a: &Addon) -> bool {
-        a.icon
-            .as_ref()
-            .is_some_and(|u| self.browser.icons.contains_key(u))
-    }
-
     /// Up to `n` of `addons`' icons, overlapping, ringed in `ring`; the ones with
     /// an icon of their own first, then a count of the rest.
-    fn faces(&self, addons: &[&Addon], n: usize, ring: Hsla, p: Palette) -> Div {
-        let mut picked: Vec<&Addon> = addons.to_vec();
-        picked.sort_by_key(|a| !self.has_icon(a));
-        let rest = addons.len().saturating_sub(n);
-        h_flex()
-            .flex_shrink_0()
-            .items_center()
-            .children(picked.into_iter().take(n).enumerate().map(|(i, a)| {
-                div()
-                    .p(px(2.))
-                    .rounded(px(FACE * 0.22 + 2.))
-                    .bg(ring)
-                    .when(i > 0, |d| d.ml(px(-12.)))
-                    .child(self.catalog_icon(a, FACE, p))
-            }))
-            .when(rest > 0, |d| {
-                d.child(
-                    div()
-                        .ml(px(6.))
-                        .h(px(24.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .rounded(px(12.))
-                        .bg(ring.blend(p.text.opacity(0.07)))
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(p.text_muted)
-                        .child(format!("+{rest}")),
-                )
-            })
-    }
-
-    fn shelf_tile(&self, tab: Tab, width: f32, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let addons = shelved(&self.browser.addons, tab, |a| self.browser.stars_of(a));
-        let n = addons.len();
-        let empty = n == 0;
-        let tint = shelf_tint(tab, p);
-        let band = if empty {
-            p.surface
-        } else {
-            p.surface.blend(tint.opacity(0.13))
-        };
-        let slot = div()
-            .size(px(FACE + 4.))
-            .rounded(px(10.))
-            .border_1()
-            .border_dashed()
-            .border_color(p.border)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(shelf_glyph(tab, 20., p.text_placeholder));
-        let art = h_flex()
-            .relative()
-            .h(px(TILE_ART))
-            .w_full()
-            .px(px(14.))
-            .flex_shrink_0()
-            .items_center()
-            .overflow_hidden()
-            .rounded_t(px(11.))
-            .bg(band)
-            .border_b_1()
-            .border_color(if empty {
-                p.border_variant
-            } else {
-                tint.opacity(0.18)
-            })
-            .child(
-                div()
-                    .absolute()
-                    .right(px(-10.))
-                    .bottom(px(-18.))
-                    .child(shelf_glyph(
-                        tab,
-                        TILE_ART + 8.,
-                        if empty {
-                            p.text_placeholder.opacity(0.1)
-                        } else {
-                            tint.opacity(0.22)
-                        },
-                    )),
-            )
-            .map(|d| {
-                if empty {
-                    d.child(slot)
-                } else {
-                    d.child(self.faces(&addons, tile_faces(width), band, p))
-                }
-            });
-        v_flex()
-            .id(SharedString::from(format!("browser-shelf-{}", tab_label(tab))))
-            .w(px(width))
-            .flex_none()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(if empty { p.border_variant } else { p.border })
-            .bg(p.surface)
-            .cursor_pointer()
-            .hover(move |s| {
-                if empty {
-                    s.bg(p.hover)
-                } else {
-                    s.bg(p.hover).border_color(tint.opacity(0.75))
-                }
-            })
-            .child(art)
-            .child(
-                h_flex()
-                    .px(px(14.))
-                    .py(px(12.))
-                    .gap(px(10.))
-                    .items_center()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(if empty { p.text_muted } else { p.text })
-                                    .truncate()
-                                    .child(tab_label(tab)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(p.text_placeholder)
-                                    .truncate()
-                                    .child(if empty {
-                                        "No addons yet".to_owned()
-                                    } else {
-                                        plural(n, "addon", "addons")
-                                    }),
-                            ),
-                    )
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .size(px(16.))
-                            .text_color(p.text_placeholder),
-                    ),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.shelve(tab, cx)))
-            .into_any_element()
-    }
-
     fn empty_shelf(&self, tab: Tab, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .flex_1()
@@ -2756,25 +3003,14 @@ impl Shell {
                     .child("Addons published in this category show here."),
             )
             .child(
-                h_flex()
-                    .pt(px(8.))
-                    .gap(px(8.))
-                    .child(
-                        Button::new("browser-shelf-empty-all")
-                            .outline()
-                            .small()
-                            .icon(IconName::LayoutGrid)
-                            .label("All addons")
-                            .on_click(cx.listener(|this, _, _, cx| this.shelve(None, cx))),
-                    )
-                    .child(
-                        Button::new("browser-shelf-empty-back")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ArrowLeft)
-                            .label("Categories")
-                            .on_click(cx.listener(|this, _, _, cx| this.show_categories(cx))),
-                    ),
+                h_flex().pt(px(8.)).gap(px(8.)).child(
+                    Button::new("browser-shelf-empty-all")
+                        .outline()
+                        .small()
+                        .icon(IconName::LayoutGrid)
+                        .label("All addons")
+                        .on_click(cx.listener(|this, _, _, cx| this.shelve(None, cx))),
+                ),
             )
             .into_any_element()
     }
@@ -2802,27 +3038,19 @@ impl Shell {
             .collect()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn virtual_cards(
         &mut self,
         indices: Arc<[usize]>,
         query: Arc<Query>,
         width: f32,
-        landing: bool,
-        count: String,
-        sort: Sort,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let columns = ((width + GAP) / (CARD_W + GAP)).floor().max(1.) as usize;
         let card_w = ((width - GAP * (columns - 1) as f32) / columns as f32).floor() - 1.;
         let rows = indices.len().div_ceil(columns);
-        let header_rows = if landing {
-            shelves().count().div_ceil(shelf_columns(width)) + 2
-        } else {
-            1
-        };
-        let layout = (indices.clone(), columns, landing, width.to_bits());
+        let header_rows = 1;
+        let layout = (indices.clone(), columns, false, width.to_bits());
         if self.browser.grid_layout != layout {
             let offset = self.browser.grid_scroll.logical_scroll_top();
             // Give unvisited rows height so scrolling is not clamped to only the measured content.
@@ -2836,19 +3064,9 @@ impl Shell {
             self.browser.grid_scroll.clone(),
             cx.processor(move |this, row: usize, _, cx| {
                 if row < header_rows {
-                    return if landing {
-                        if row + 1 == header_rows {
-                            this.all_heading(count.clone(), sort, width, p, cx)
-                                .pb(px(GAP))
-                                .into_any_element()
-                        } else {
-                            this.landing_row(row, width, p, cx)
-                        }
-                    } else {
-                        v_flex()
-                            .children(this.creators_found(&query, p, cx))
-                            .into_any_element()
-                    };
+                    return v_flex()
+                        .children(this.creators_found(&query, p, cx))
+                        .into_any_element();
                 }
                 let start = (row - header_rows) * columns;
                 let end = (start + columns).min(indices.len());
@@ -2969,13 +3187,7 @@ impl Shell {
             .gap(px(10.))
             .rounded(px(10.))
             .border_1()
-            .border_color(if failed.is_some() {
-                p.error.opacity(0.6)
-            } else if updating {
-                p.accent.opacity(0.6)
-            } else {
-                p.border
-            })
+            .border_color(card_border(failed.is_some(), updating, p))
             .bg(p.surface)
             .cursor_pointer()
             .hover(move |s| s.border_color(p.accent).bg(p.hover))
@@ -3045,22 +3257,7 @@ impl Shell {
                     })
                     .child(self.offer_button(a, format!("browser-offer-{}", a.id), cx)),
             )
-            .when_some(progress, |d, pr| {
-                d.child(
-                    div()
-                        .h(px(3.))
-                        .w_full()
-                        .rounded(px(2.))
-                        .bg(p.border_variant)
-                        .child(
-                            div()
-                                .h_full()
-                                .rounded(px(2.))
-                                .bg(p.accent)
-                                .w(relative(pr.fraction())),
-                        ),
-                )
-            })
+            .when_some(progress, |d, pr| d.child(progress_bar(pr.fraction(), p)))
             .when_some(failed, |d, e| {
                 let tip = e.clone();
                 d.child(
@@ -3156,6 +3353,186 @@ impl Shell {
         )
     }
 
+    /// One registry version and its changelog, for the Addon Browser and the Addons page.
+    #[allow(clippy::too_many_arguments)]
+    fn release_row(
+        &self,
+        key: &str,
+        v: &catalog::Version,
+        first: bool,
+        installed: Option<&semver::Version>,
+        newer: bool,
+        inset: f32,
+        mono: &SharedString,
+        p: Palette,
+    ) -> AnyElement {
+        let launcher = current_version();
+        let fits = v.accepts(&launcher);
+        let current = installed == Some(&v.version);
+        v_flex()
+            .px(px(inset))
+            .py(px(12.))
+            .gap(px(6.))
+            .when(!first, |d| d.border_t_1().border_color(p.border_variant))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("v{}", v.version)),
+                    )
+                    .when(current, |d| d.child(tag("Installed", p).text_color(p.success)))
+                    .when(newer, |d| d.child(tag("New", p).text_color(p.accent)))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(p.text_placeholder)
+                            .child(format!("{} · {}", day(&v.published_at), size_text(v.size))),
+                    ),
+            )
+            .when(!fits, |d| {
+                d.child(div().text_size(px(12.)).text_color(p.warning).child(format!(
+                    "Needs launcher {}",
+                    v.launcher.as_ref().map_or_else(String::new, |r| r.to_string())
+                )))
+            })
+            .when_some(
+                v.requires
+                    .as_ref()
+                    .filter(|r| !r.is_empty())
+                    .map(|r| self.requires_text(r)),
+                |d, text| d.child(div().text_size(px(12.)).text_color(p.text_muted).child(text)),
+            )
+            .child(
+                v_flex()
+                    .text_size(px(13.))
+                    .line_height(px(19.))
+                    .when(v.changelog.trim().is_empty(), |d| {
+                        d.child(div().text_color(p.text_placeholder).child("No changelog"))
+                    })
+                    .when(!v.changelog.trim().is_empty(), |d| {
+                        d.children(crate::news::render_markdown(
+                            &format!("{key}-{}", v.version),
+                            &v.changelog,
+                            p,
+                            mono,
+                        ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The registry's changelog of an installed addon, for its panel on the Addons page.
+    pub(crate) fn changelog_section(
+        &mut self,
+        id: &str,
+        installed: &semver::Version,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.browser.has(id) {
+            return None;
+        }
+        if !self.browser.details.contains_key(id) && self.browser.asked.insert(id.to_owned()) {
+            let id = id.to_owned();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |s, cx| s.fetch_details(&id, cx)).ok();
+            })
+            .detach();
+        }
+        let listed = self.browser.find(id)?;
+        let full = self.browser.details.get(id);
+        let mut versions: Vec<&catalog::Version> = full.map(Addon::listed).unwrap_or_default();
+        for v in listed.listed() {
+            if !versions.iter().any(|o| o.version == v.version) {
+                versions.push(v);
+            }
+        }
+        versions.sort_by(|a, b| b.version.cmp(&a.version));
+        let loading = full.is_none() && self.browser.loading.contains(id);
+        if versions.is_empty() && !loading {
+            return None;
+        }
+        let newer = versions.iter().filter(|v| v.version > *installed).count();
+        let shown = shown_versions(&versions, installed);
+        let older = versions.len() - shown;
+        let open = self.browser.history.contains(id);
+        let mono = cx.theme().mono_font_family.clone();
+        let key = format!("addon-changelog-{id}");
+        let rows: Vec<AnyElement> = versions
+            .iter()
+            .take(if open { versions.len() } else { shown })
+            .enumerate()
+            .map(|(i, v)| {
+                self.release_row(
+                    &key,
+                    v,
+                    i == 0,
+                    Some(installed),
+                    v.version > *installed,
+                    0.,
+                    &mono,
+                    p,
+                )
+            })
+            .collect();
+        let summary = if loading {
+            "Loading…".to_owned()
+        } else if newer > 0 {
+            format!("{} since yours", plural(newer, "new version", "new versions"))
+        } else {
+            plural(versions.len(), "version", "versions")
+        };
+        let toggle = (older > 0).then(|| {
+            let target = id.to_owned();
+            h_flex()
+                .id("addon-changelog-older")
+                .pt(px(10.))
+                .gap(px(6.))
+                .items_center()
+                .border_t_1()
+                .border_color(p.border_variant)
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(p.text_placeholder)
+                .hover(move |s| s.text_color(p.text_muted))
+                .child(crate::pages::chevron(open, p))
+                .child(if open {
+                    "Hide older versions".to_owned()
+                } else {
+                    format!("Show {}", plural(older, "older version", "older versions"))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.browser.history.remove(&target) {
+                        this.browser.history.insert(target.clone());
+                    }
+                    cx.notify();
+                }))
+        });
+        Some(
+            v_flex()
+                .child(
+                    h_flex()
+                        .pb(px(2.))
+                        .items_center()
+                        .child(div().flex_1().child(label("CHANGELOG", p)))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(p.text_placeholder)
+                                .child(summary),
+                        ),
+                )
+                .children(rows)
+                .children(toggle)
+                .into_any_element(),
+        )
+    }
+
     fn browser_detail(&self, id: &str, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(listed) = self.browser.find(id) else {
             return div().into_any_element();
@@ -3179,6 +3556,14 @@ impl Shell {
                     .label("Homepage")
                     .on_click(move |_, _, cx| cx.open_url(&url))
             });
+        let source_code = a.source_url().map(str::to_owned).map(|url| {
+            Button::new("browser-source-code")
+                .ghost()
+                .small()
+                .icon(IconName::ExternalLink)
+                .label("Source code")
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        });
         let hero = h_flex()
             .gap(px(16.))
             .items_start()
@@ -3217,6 +3602,7 @@ impl Shell {
                     .flex_shrink_0()
                     .child(self.star_button(listed, "browser-detail-star".into(), true, p, cx))
                     .children(homepage)
+                    .children(source_code)
                     .child(self.offer_button(listed, "browser-detail-offer".into(), cx)),
             );
         let working = self.browser.working.get(&a.id).map(|job| {
@@ -3428,68 +3814,12 @@ impl Shell {
         let people = self.published_by(listed, p, cx);
         let more = self.more_from(listed, p, cx);
         let listed_versions = a.listed();
+        let key = format!("browser-{}", a.id);
         let count = listed_versions.len();
         let versions: Vec<AnyElement> = listed_versions
             .into_iter()
             .enumerate()
-            .map(|(i, v)| {
-                let fits = v.accepts(&launcher);
-                let current = installed.as_ref() == Some(&v.version);
-                v_flex()
-                    .px(px(16.))
-                    .py(px(12.))
-                    .gap(px(6.))
-                    .when(i > 0, |d| d.border_t_1().border_color(p.border_variant))
-                    .child(
-                        h_flex()
-                            .gap(px(8.))
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("v{}", v.version)),
-                            )
-                            .when(current, |d| d.child(tag("Installed", p).text_color(p.success)))
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(p.text_placeholder)
-                                    .child(format!("{} · {}", day(&v.published_at), size_text(v.size))),
-                            ),
-                    )
-                    .when(!fits, |d| {
-                        d.child(div().text_size(px(12.)).text_color(p.warning).child(format!(
-                            "Needs launcher {}",
-                            v.launcher.as_ref().map_or_else(String::new, |r| r.to_string())
-                        )))
-                    })
-                    .when_some(
-                        v.requires
-                            .as_ref()
-                            .filter(|r| !r.is_empty())
-                            .map(|r| self.requires_text(r)),
-                        |d, text| d.child(div().text_size(px(12.)).text_color(p.text_muted).child(text)),
-                    )
-                    .child(
-                        v_flex()
-                            .text_size(px(13.))
-                            .line_height(px(19.))
-                            .when(v.changelog.trim().is_empty(), |d| {
-                                d.child(div().text_color(p.text_placeholder).child("No changelog"))
-                            })
-                            .when(!v.changelog.trim().is_empty(), |d| {
-                                d.children(crate::news::render_markdown(
-                                    &format!("browser-{}-{}", a.id, v.version),
-                                    &v.changelog,
-                                    p,
-                                    &mono,
-                                ))
-                            }),
-                    )
-                    .into_any_element()
-            })
+            .map(|(i, v)| self.release_row(&key, v, i == 0, installed.as_ref(), false, 16., &mono, p))
             .collect();
         let changelog = v_flex()
             .rounded(px(10.))
@@ -3559,14 +3889,45 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Event, Job, Progress, Stage, compact, due_updates, host, shelf_columns, shelved, shelves, size_text,
-        tile_faces,
-    };
+    fn versions(list: &[&str]) -> Vec<Version> {
+        list.iter()
+            .map(|v| {
+                serde_json::from_value(serde_json::json!({
+                    "version": v, "size": 0, "sha256": "", "url": ""
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn shown(list: &[&str], installed: &str) -> usize {
+        let all = versions(list);
+        let refs: Vec<&Version> = all.iter().collect();
+        shown_versions(&refs, &semver::Version::parse(installed).unwrap())
+    }
+
+    #[test]
+    fn shows_the_newer_versions_and_the_installed_one() {
+        assert_eq!(shown(&["1.3.0", "1.2.0", "1.1.0", "1.0.0"], "1.1.0"), 3);
+    }
+
+    #[test]
+    fn shows_two_when_up_to_date() {
+        assert_eq!(shown(&["1.2.0", "1.1.0", "1.0.0"], "1.2.0"), 2);
+        assert_eq!(shown(&["1.2.0"], "1.2.0"), 1);
+    }
+
+    #[test]
+    fn an_unlisted_install_stops_at_the_versions_above_it() {
+        assert_eq!(shown(&["1.3.0", "1.2.0", "1.0.0"], "1.1.0"), 2);
+        assert_eq!(shown(&["1.3.0", "1.2.5", "1.2.0", "1.0.0"], "1.1.0"), 3);
+        assert_eq!(shown(&["1.3.0", "1.2.0"], "2.0.0"), 2);
+    }
+
+    use super::{Event, Job, Progress, Stage, compact, due_updates, host, shown_versions, size_text};
     use std::collections::{BTreeMap, HashSet};
     use swofty_core::catalog::requires::{Plan, Step};
     use swofty_core::catalog::{Addon, Version};
-    use swofty_core::manifest::Category;
 
     fn step(id: &str, size: u64) -> Step {
         let addon: Addon =
@@ -3580,6 +3941,87 @@ mod tests {
             version,
             replaces: None,
         }
+    }
+
+    #[test]
+    fn queued_install_reports_partial_failure_and_retries_without_duplication() {
+        use crate::download_queue::{Queue, State};
+        use std::collections::BTreeSet;
+        let mut queue = Queue::default();
+        assert!(queue.enqueue("root".into(), "1.0.0", BTreeSet::new()));
+        assert!(!queue.enqueue("root".into(), "2.0.0", BTreeSet::new()));
+        assert_eq!(queue.start_next().as_deref(), Some("root"));
+        let job = Job::new(100);
+        let dependency: swofty_core::manifest::AddonManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "id": "dep", "name": "Dependency", "version": "1.0.0",
+            "author": "test", "compat": {"game": "f1_25"}
+        }))
+        .unwrap();
+        job.track("root", Event::Installed(&dependency));
+        assert!(queue.finish("root", Err(job.failure("root failed"))));
+        assert!(matches!(&queue.jobs()[0].state, State::Failed(message)
+            if message.contains("root failed") && message.contains("Dependency 1.0.0")));
+        assert!(queue.retry_at(0, "root"));
+        assert_eq!(queue.jobs()[0].request, "1.0.0");
+        assert!(matches!(queue.jobs()[0].state, State::Queued));
+        assert_eq!(queue.start_next().as_deref(), Some("root"));
+        assert!(queue.finish("root", Ok(())));
+        assert_eq!(queue.pending(), 0);
+        assert!(matches!(queue.jobs()[0].state, State::Completed));
+    }
+
+    #[test]
+    fn retry_action_distinguishes_original_and_current_versions() {
+        use super::RetryAction;
+        let old = step("test.addon", 100);
+        let mut addon = old.addon.clone();
+        addon.versions = vec![old.version.clone()];
+        assert_eq!(
+            super::retry_action(Some(&addon), &old.version),
+            RetryAction::Retry
+        );
+        addon.versions[0].yanked = true;
+        assert_eq!(
+            super::retry_action(Some(&addon), &old.version),
+            RetryAction::Unavailable
+        );
+        let mut newer = old.version.clone();
+        newer.version = "2.0.0".parse().unwrap();
+        addon.versions.push(newer);
+        assert_eq!(
+            super::retry_action(Some(&addon), &old.version),
+            RetryAction::RequestCurrent
+        );
+        assert_eq!(super::retry_action(None, &old.version), RetryAction::Unavailable);
+    }
+
+    #[test]
+    fn queued_version_must_remain_available_and_unchanged() {
+        let requested = step("test.addon", 100);
+        let mut addon = requested.addon.clone();
+        addon.versions = vec![requested.version.clone()];
+        assert!(super::requested_version_available(
+            Some(&addon),
+            &requested.version
+        ));
+        assert!(!super::requested_version_available(None, &requested.version));
+        addon.versions[0].yanked = true;
+        assert!(!super::requested_version_available(
+            Some(&addon),
+            &requested.version
+        ));
+        addon.versions[0].yanked = false;
+        addon.versions[0].sha256 = "changed".into();
+        assert!(!super::requested_version_available(
+            Some(&addon),
+            &requested.version
+        ));
+        addon.versions[0] = requested.version.clone();
+        addon.versions[0].launcher = Some(">=999.0.0".parse().unwrap());
+        assert!(!super::requested_version_available(
+            Some(&addon),
+            &requested.version
+        ));
     }
 
     #[test]
@@ -3612,52 +4054,6 @@ mod tests {
     }
 
     #[test]
-    fn shelves_addons_by_category_most_starred_first() {
-        let addon = |id: &str, category: Option<&str>, stars: u64| -> Addon {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "name": id, "category": category, "stars": stars
-            }))
-            .unwrap()
-        };
-        let addons = [
-            addon("a", Some("seasons"), 1),
-            addon("b", Some("seasons"), 9),
-            addon("c", None, 3),
-            addon("d", Some("gameplay"), 5),
-            addon("e", Some("liveries"), 0),
-        ];
-        let ids = |tab| -> Vec<String> {
-            shelved(&addons, tab, |a| a.stars)
-                .into_iter()
-                .map(|a| a.id.clone())
-                .collect()
-        };
-        assert_eq!(ids(Some(Some(Category::Seasons))), ["b", "a"]);
-        assert_eq!(ids(Some(Some(Category::Cars))), ["e"]);
-        assert_eq!(ids(Some(None)), ["d", "c"]);
-        assert!(ids(Some(Some(Category::Tracks))).is_empty());
-        assert_eq!(ids(None), ["b", "d", "c", "a", "e"]);
-    }
-
-    #[test]
-    fn lays_out_even_rows_of_tiles() {
-        assert_eq!(shelf_columns(2000.), 5);
-        assert_eq!(shelf_columns(1156.), 5);
-        assert_eq!(shelf_columns(1155.), 2);
-        assert_eq!(shelf_columns(454.), 2);
-        assert_eq!(shelf_columns(453.), 1);
-        let tiles = shelves().count();
-        assert_eq!(tiles, 10);
-        for columns in [5, 2, 1] {
-            assert_eq!(tiles % columns, 0, "{columns}");
-        }
-        assert_eq!(tile_faces(329.), 4);
-        assert_eq!(tile_faces(299.), 4);
-        assert_eq!(tile_faces(247.), 3);
-        assert_eq!(tile_faces(120.), 1);
-    }
-
-    #[test]
     fn names_sizes_counts_and_hosts() {
         assert_eq!(host("https://api.f1.swofty.net"), "api.f1.swofty.net");
         assert_eq!(host("http://localhost:8471"), "localhost:8471");
@@ -3687,6 +4083,24 @@ mod tests {
         let due = due_updates(&updates, &on, &BTreeMap::new());
         assert_eq!(due.iter().map(|u| u.id.as_str()).collect::<Vec<_>>(), ["on"]);
         assert!(due_updates(&updates, &HashSet::new(), &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn a_successfully_updated_addon_is_not_reported_as_failed_during_refresh() {
+        assert!(!super::held_failure(""));
+        assert!(super::held_failure("network error"));
+    }
+
+    #[test]
+    fn failed_install_toast_title_names_the_addon() {
+        assert_eq!(
+            super::install_failure_title("Foo", "install", false),
+            "Could not install Foo"
+        );
+        assert_eq!(
+            super::install_failure_title("Foo", "update", true),
+            "Can't update Foo: missing requirements"
+        );
     }
 
     #[test]

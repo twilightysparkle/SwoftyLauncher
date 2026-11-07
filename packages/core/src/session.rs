@@ -83,8 +83,24 @@ pub struct Config {
     pub console: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub developer: bool,
+    /// Opt-in: clear old game session logs each time the launcher starts (see
+    /// `data_usage::prune_sessions`). Off unless the player turns it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_old_session_logs: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sidebar_list: bool,
+    /// The layout the player chose on first run; `None` until they choose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_mode: Option<UiMode>,
+    /// The code of the language the launcher shows; `None` is English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// The version of the welcome wizard the player last finished or skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<u32>,
+    /// Set by "Don't ask again" on the prompt that offers addons and saves found in another folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_find_prompt: bool,
     #[serde(default)]
     pub data_version: u32,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -102,6 +118,40 @@ pub struct Config {
     /// The career vault's size cap in MB; 500 when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_cap_mb: Option<u64>,
+    /// Maximum simultaneous Addon Browser install jobs; two when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_jobs: Option<usize>,
+}
+
+/// The launcher's two layouts: the desktop one, and TV mode for handhelds and
+/// couch play, which scales the interface up and widens the scrollbars.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UiMode {
+    #[default]
+    Pc,
+    Tv,
+}
+
+impl UiMode {
+    pub fn is_tv(self) -> bool {
+        self == Self::Tv
+    }
+}
+
+/// The version of the welcome wizard. Raise it to show the wizard once more to everyone.
+pub const ONBOARDING_VERSION: u32 = 1;
+
+impl Config {
+    /// Whether the welcome wizard is due: never seen, or an older version.
+    pub fn needs_onboarding(&self) -> bool {
+        self.onboarding.is_none_or(|seen| seen < ONBOARDING_VERSION)
+    }
+
+    /// The layout in use: what the player chose, PC until they do.
+    pub fn ui_mode_or_default(&self) -> UiMode {
+        self.ui_mode.unwrap_or_default()
+    }
 }
 
 /// The copies of F1 25 the player added by folder, and the one Play uses.
@@ -126,6 +176,15 @@ impl Games {
 }
 
 impl Config {
+    /// Return a valid limit even if a config was edited by hand.
+    pub fn download_jobs(&self) -> usize {
+        self.download_jobs.unwrap_or(2).clamp(1, 10)
+    }
+
+    pub fn set_download_jobs(&mut self, limit: usize) {
+        self.download_jobs = Some(limit.clamp(1, 10));
+    }
+
     pub fn migrate_games(&mut self) {
         if let Some(dir) = self.game_dir.take() {
             self.games.active.get_or_insert_with(|| dir.clone());
@@ -829,12 +888,103 @@ mod tests {
     }
 
     #[test]
+    fn config_remembers_and_clamps_download_job_limit() {
+        let mut config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.download_jobs(), 2);
+        assert!(!serde_json::to_string(&config).unwrap().contains("download_jobs"));
+        config.set_download_jobs(8);
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(serde_json::from_str::<Config>(&json).unwrap().download_jobs(), 8);
+        config.set_download_jobs(0);
+        assert_eq!(config.download_jobs(), 1);
+        config.set_download_jobs(100);
+        assert_eq!(config.download_jobs(), 10);
+        let edited: Config = serde_json::from_str(r#"{"download_jobs":100}"#).unwrap();
+        assert_eq!(edited.download_jobs(), 10);
+    }
+
+    #[test]
+    fn ui_mode_is_unchosen_until_the_player_picks() {
+        let config = Config::default();
+        assert_eq!(config.ui_mode, None);
+        assert_eq!(config.ui_mode_or_default(), UiMode::Pc);
+        assert!(!serde_json::to_string(&config).unwrap().contains("ui_mode"));
+        let old: Config = serde_json::from_str(r#"{ "developer": true }"#).unwrap();
+        assert_eq!(old.ui_mode, None);
+    }
+
+    #[test]
+    fn onboarding_is_due_until_the_current_version_is_seen() {
+        let mut config = Config::default();
+        assert!(config.needs_onboarding());
+        assert!(!serde_json::to_string(&config).unwrap().contains("onboarding"));
+        config.onboarding = Some(ONBOARDING_VERSION - 1);
+        assert!(config.needs_onboarding());
+        config.onboarding = Some(ONBOARDING_VERSION);
+        assert!(!config.needs_onboarding());
+        let back: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(back.onboarding, Some(ONBOARDING_VERSION));
+        let old: Config = serde_json::from_str(r#"{ "ui_mode": "tv" }"#).unwrap();
+        assert!(old.needs_onboarding());
+    }
+
+    #[test]
+    fn ui_mode_round_trips() {
+        for mode in [UiMode::Pc, UiMode::Tv] {
+            let config = Config {
+                ui_mode: Some(mode),
+                ..Config::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            let back: Config = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.ui_mode, Some(mode));
+            assert_eq!(back.ui_mode_or_default(), mode);
+        }
+        let tv: Config = serde_json::from_str(r#"{ "ui_mode": "tv" }"#).unwrap();
+        assert!(tv.ui_mode_or_default().is_tv());
+        assert!(!UiMode::Pc.is_tv());
+    }
+
+    #[test]
+    fn config_remembers_the_language() {
+        let mut config = Config::default();
+        assert!(!serde_json::to_string(&config).unwrap().contains("language"));
+        config.language = Some("ru".into());
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded = serde_json::from_str::<Config>(&json).unwrap();
+        assert_eq!(loaded.language.as_deref(), Some("ru"));
+    }
+
+    #[test]
     fn config_keeps_console_flag() {
         let mut config = Config::default();
         assert!(!serde_json::to_string(&config).unwrap().contains("console"));
         config.console = true;
         let json = serde_json::to_string(&config).unwrap();
         assert!(serde_json::from_str::<Config>(&json).unwrap().console);
+    }
+
+    #[test]
+    fn old_session_logs_are_kept_unless_clearing_is_turned_on() {
+        assert!(!Config::default().clear_old_session_logs);
+        let old: Config = serde_json::from_str(r#"{ "developer": true }"#).unwrap();
+        assert!(!old.clear_old_session_logs);
+        assert!(
+            !serde_json::to_string(&old)
+                .unwrap()
+                .contains("clear_old_session_logs")
+        );
+        let on = Config {
+            clear_old_session_logs: true,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""clear_old_session_logs":true"#), "{json}");
+        assert!(
+            serde_json::from_str::<Config>(&json)
+                .unwrap()
+                .clear_old_session_logs
+        );
     }
 
     #[test]

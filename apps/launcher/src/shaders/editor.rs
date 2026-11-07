@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::scale::px;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{TextDecoration, TextDecorationCollection};
 use gpui_kit::component::button::Button;
@@ -18,6 +19,7 @@ use lsp_types::{
     CodeAction, CodeActionKind, CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse,
     CompletionTextEdit, Documentation, HoverContents, MarkupContent, MarkupKind, TextEdit,
 };
+use swofty_i18n::trn;
 use swofty_shaders::{ActiveInstance, Catalog, CompletionKind, Config, Severity, TokenKind};
 
 use super::{Mode, ShadersView};
@@ -568,7 +570,10 @@ impl ShadersView {
             ("Checking".to_owned(), p.text_muted, IconName::LoaderCircle)
         } else if errors > 0 {
             (
-                format!("{} · not applied", plural(errors, "problem")),
+                format!(
+                    "{} · not applied",
+                    trn(errors, "{count} problem", "{count} problems")
+                ),
                 p.error,
                 IconName::CircleAlert,
             )
@@ -580,7 +585,7 @@ impl ShadersView {
             )
         } else if warnings > 0 {
             (
-                format!("Valid · {}", plural(warnings, "warning")),
+                format!("Valid · {}", trn(warnings, "{count} warning", "{count} warnings")),
                 p.warning,
                 IconName::TriangleAlert,
             )
@@ -888,8 +893,4 @@ fn icon_of(s: Severity) -> IconName {
         Severity::Warning => IconName::TriangleAlert,
         Severity::Info | Severity::Hint => IconName::Info,
     }
-}
-
-fn plural(n: usize, word: &str) -> String {
-    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }

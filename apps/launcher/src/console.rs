@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::scale::px;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::notification::Notification;
@@ -13,6 +14,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use swofty_core::session::{LOADER_LOG, SessionRecord};
 use swofty_core::store::Store;
+use swofty_i18n::trn;
 
 use crate::pages::badge;
 use crate::play_bar::link;
@@ -338,10 +340,7 @@ impl Console {
         let count = lines.len();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         window.push_notification(
-            Notification::success(format!(
-                "Copied {}",
-                crate::library::plural(count, "line", "lines")
-            )),
+            Notification::success(format!("Copied {}", trn(count, "{count} line", "{count} lines"))),
             cx,
         );
     }
@@ -536,7 +535,7 @@ impl Console {
                     },
                 )))
             })
-            .child(crate::library::plural(feed.lines.len(), "line", "lines"))
+            .child(trn(feed.lines.len(), "{count} line", "{count} lines"))
     }
 }
 

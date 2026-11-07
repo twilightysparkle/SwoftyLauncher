@@ -104,6 +104,9 @@ typedef struct SwoftyAssets {
 #define SWOFTY_EVENT_CAREER_UNLOADED "career.unloaded"
 #define SWOFTY_EVENT_CAREER_HUB "career.hub"
 #define SWOFTY_EVENT_CAREER_STARTING "career.starting"
+#define SWOFTY_EVENT_TELEMETRY_OVERTAKE "telemetry.overtake"
+#define SWOFTY_EVENT_TELEMETRY_COLLISION "telemetry.collision"
+#define SWOFTY_EVENT_TELEMETRY_RETIREMENT "telemetry.retirement"
 
 typedef struct SwoftyEvent {
     const char *name;
@@ -256,7 +259,25 @@ typedef struct SwoftyOverlay {
     int (*focus)(int on);
 } SwoftyOverlay;
 
-#define SWOFTY_TELEMETRY_VERSION 1
+#define SWOFTY_TELEMETRY_VERSION 2
+
+/* SwoftyCarState.flags. Bits 0 and 1 say which UDP packets have filled the car. */
+#define SWOFTY_CAR_FLAG_LAP_DATA (1u << 0)
+#define SWOFTY_CAR_FLAG_STATUS (1u << 1)
+#define SWOFTY_CAR_FLAG_IN_PIT_LANE (1u << 2)
+#define SWOFTY_CAR_FLAG_RETIRED (1u << 3)
+#define SWOFTY_CAR_FLAG_DISQUALIFIED (1u << 4)
+#define SWOFTY_CAR_FLAG_FINISHED (1u << 5)
+#define SWOFTY_CAR_FLAG_IN_GARAGE (1u << 6)
+#define SWOFTY_CAR_FLAG_DRS_ALLOWED (1u << 7)
+#define SWOFTY_CAR_FLAG_LAP_INVALID (1u << 8)
+
+/* SwoftySessionState.flag. */
+#define SWOFTY_FLAG_NONE 0u
+#define SWOFTY_FLAG_GREEN 1u
+#define SWOFTY_FLAG_BLUE 2u
+#define SWOFTY_FLAG_YELLOW 3u
+#define SWOFTY_FLAG_RED 4u
 
 typedef struct SwoftyCarState {
     uint32_t version;
@@ -279,7 +300,15 @@ typedef struct SwoftyCarState {
     float lap_distance;
     float world_pos[3];
     float world_vel[3];
-    float reserved[8];
+    /* version 2 */
+    uint8_t tyre_compound, tyre_visual, tyre_age_laps, pit_status;
+    uint8_t result_status, driver_status, pit_stops, warnings;
+    uint8_t penalty_seconds, drs, grid_position, ai_controlled;
+    uint8_t drive_through_pens, stop_go_pens, corner_cut_warnings;
+    int8_t fia_flag;
+    uint32_t gap_front_ms, gap_leader_ms;
+    float ers_store;
+    float reserved;
 } SwoftyCarState;
 
 typedef struct SwoftySessionState {
@@ -294,7 +323,14 @@ typedef struct SwoftySessionState {
     float session_time;
     float session_time_left;
     float track_temp, air_temp;
-    float reserved[8];
+    /* version 2 */
+    uint32_t safety_car_status;
+    uint32_t track_length;
+    uint32_t udp_format;
+    uint32_t packets_seen;
+    uint32_t pit_speed_limit;
+    uint32_t red_flag;
+    uint32_t reserved[2];
 } SwoftySessionState;
 
 typedef struct SwoftyParticipant {
@@ -306,7 +342,10 @@ typedef struct SwoftyParticipant {
     uint32_t lap;
     float lap_distance;
     float best_lap_time;
-    float reserved[4];
+    /* version 2 */
+    uint32_t driver_id;
+    uint8_t race_number, ai_controlled, nationality, my_team;
+    float reserved[2];
 } SwoftyParticipant;
 
 typedef struct SwoftyTelemetryFeed {
@@ -921,8 +960,12 @@ typedef struct SwoftyCareerSaves {
    work on the session's spectator director: spectator_set_active turns the director and its HUD on or
    off; spectator_follow moves it to the car; spectator_set_camera takes 1 (TV pod) or 2 (broadcast);
    spectator_current reads the car (index, or -1 for none) and the camera (-1 for none) while the director
-   is active, else SWOFTY_ASSET_LATE. */
-#define SWOFTY_SESSION_OPS_VERSION 1
+   is active, else SWOFTY_ASSET_LATE. Version 2 adds disqualify: it calls the game's Sess_Rules_Disqualify for the
+   car on the session's rules object, which the core captures when the game initialises its rule manager; the
+   car goes to the AI with the DISQUALIFIED reason. SWOFTY_ASSET_LATE before the session has a rule manager or
+   while the car has no controller set, SWOFTY_ASSET_UNAVAILABLE when the binding does not resolve; queued to the
+   next frame like set_control. Version 1 is the members before it and keeps its layout. */
+#define SWOFTY_SESSION_OPS_VERSION 2
 
 typedef struct SwoftySessionOps {
     uint32_t version;
@@ -933,7 +976,24 @@ typedef struct SwoftySessionOps {
     int (*spectator_follow)(uint32_t car);
     int (*spectator_set_camera)(int32_t camera);
     int (*spectator_current)(int32_t *car, int32_t *camera);
+    int (*disqualify)(uint32_t car);
 } SwoftySessionOps;
+
+/* Content ownership (standard library 1.8, experimental), from the core export SwoftyCoreContentOps; not a
+   SwoftyApi member. owned reads whether the player owns the content behind an entitlement name such as
+   "f1_2026" (the F1 2026 season content): SWOFTY_OWNERSHIP_OWNED, SWOFTY_OWNERSHIP_NOT_OWNED, or
+   SWOFTY_OWNERSHIP_UNKNOWN before the game has the answer, for a name the core does not track, or on a build
+   where the game binding does not resolve. The core reads the game's own answer on the flow thread and
+   caches it; the call is a cache read and is safe from any thread. */
+#define SWOFTY_CONTENT_OPS_VERSION 1
+#define SWOFTY_OWNERSHIP_UNKNOWN 0
+#define SWOFTY_OWNERSHIP_OWNED 1
+#define SWOFTY_OWNERSHIP_NOT_OWNED 2
+
+typedef struct SwoftyContentOps {
+    uint32_t version;
+    int (*owned)(const char *entitlement);
+} SwoftyContentOps;
 
 /* Live car operations (standard library 1.6, experimental), from the core export SwoftyCoreCarOps; not a SwoftyApi
    field. Table version 2; version 1 is the first six members and keeps its layout. A car is the game's vehicle id
@@ -1178,6 +1238,7 @@ typedef const SwoftyCareerOps *(*SwoftyCoreCareerOpsFn)(void);
 typedef const SwoftyCareerSaves *(*SwoftyCoreCareerSavesFn)(void);
 typedef const SwoftySessionOps *(*SwoftyCoreSessionOpsFn)(void);
 typedef const SwoftyCarOps *(*SwoftyCoreCarOpsFn)(void);
+typedef const SwoftyContentOps *(*SwoftyCoreContentOpsFn)(void);
 
 #define SWOFTY_STAGE_WINDOW 1
 
@@ -1197,6 +1258,7 @@ SWOFTY_EXPORT const SwoftyCareerOps *SwoftyCoreCareerOps(void);
 SWOFTY_EXPORT const SwoftyCareerSaves *SwoftyCoreCareerSaves(void);
 SWOFTY_EXPORT const SwoftySessionOps *SwoftyCoreSessionOps(void);
 SWOFTY_EXPORT const SwoftyCarOps *SwoftyCoreCarOps(void);
+SWOFTY_EXPORT const SwoftyContentOps *SwoftyCoreContentOps(void);
 
 #ifdef __cplusplus
 }

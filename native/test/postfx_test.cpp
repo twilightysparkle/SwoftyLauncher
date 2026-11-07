@@ -58,6 +58,14 @@ int main()
     Size fixed = texture_size(0.5, 256, 128, 1920, 1080);
     CHECK(fixed.w == 256 && fixed.h == 128);
 
+    CHECK(mip_levels(4, 4, 3) == 3 && mip_levels(4, 4, 9) == 3 && mip_levels(4, 4, 0) == 1 && mip_levels(4, 4, 1) == 1);
+    CHECK(mip_levels(1920, 1080, 12) == 11 && mip_levels(2048, 1, 99) == 12 && mip_levels(1 << 20, 1, 99) == 12);
+    CHECK(mip_levels(1, 1, 5) == 1 && mip_levels(5, 3, 9) == 3 && mip_levels(64, 32, 7) == 7 && mip_levels(64, 32, 8) == 7);
+    Size l1 = mip_size(5, 3, 1), l2 = mip_size(5, 3, 2), l9 = mip_size(5, 3, 9), l0 = mip_size(5, 3, 0);
+    CHECK(l0.w == 5 && l0.h == 3 && l1.w == 2 && l1.h == 1 && l2.w == 1 && l2.h == 1 && l9.w == 1 && l9.h == 1);
+    Size big = mip_size(1920, 1080, 5);
+    CHECK(big.w == 60 && big.h == 33);
+
     float v = -1;
     CHECK(option_value("true", v) && v == 1);
     CHECK(option_value("false", v) && v == 0);
@@ -160,6 +168,13 @@ int main()
     CHECK(effects[0].textures[0].scale == 0.5 && effects[0].textures[0].format == 10);
     CHECK(effects[0].textures[1].persistent && effects[0].textures[1].width == 1);
     CHECK(effects[0].textures[2].format == 28 && effects[0].textures[2].file == "shaders/tex/ambient_light-dirt.tex");
+    std::vector<EffectDecl> chained = parse_effects(
+        R"({"effects":[{"id":"m","slots":1,"textures":[{"name":"a","width":64,"height":32,"mips":7},{"name":"b","mips":99},{"name":"c","mips":0},{"name":"d"}],
+        "passes":[{"name":"p","dxil":"p.dxil","output":"a"}]}]})");
+    CHECK(chained.size() == 1 && chained[0].textures.size() == 4);
+    CHECK(chained[0].textures[0].mips == 7 && chained[0].textures[1].mips == MAX_MIPS && chained[0].textures[2].mips == 1 &&
+          chained[0].textures[3].mips == 1);
+    CHECK(effects[0].textures[0].mips == 1 && !(chained[0].textures[0] == effects[0].textures[0]));
     CHECK(effects[0].passes[1].inputs.size() == 5 && effects[0].passes[1].threads[0] == 8);
     CHECK(parse_effects("not json").empty() && parse_effects("{}").empty());
 
@@ -243,6 +258,40 @@ int main()
     uint8_t grad[3 * 1 * 3] = {0, 0, 0, 90, 90, 90, 255, 255, 255}, two[2 * 1 * 3];
     box_scale_rgb(grad, 3, 1, two, 2, 1);
     CHECK(two[0] == 30 && two[3] == 200);
+
+    // Data from an addon's code: the addon a DLL belongs to is the folder under the game's swofty\addons\ holding it.
+    const std::wstring exe = L"D:\\SteamLibrary\\steamapps\\common\\F1 25\\F1_25.exe";
+    const std::wstring addons = L"D:\\SteamLibrary\\steamapps\\common\\F1 25\\swofty\\addons\\";
+    CHECK(addon_of_module(addons + L"xsoul.cinematic-replay\\native\\cinecam.dll", exe) == "xsoul.cinematic-replay");
+    CHECK(addon_of_module(L"d:\\steamlibrary\\STEAMAPPS\\common\\f1 25\\Swofty\\Addons\\Example.Marker\\x.dll", exe) ==
+          "example.marker");
+    CHECK(addon_of_module(L"D:/SteamLibrary/steamapps/common/F1 25/swofty/addons/a.b/native/x.dll", exe) == "a.b");
+    // a DLL in a deeper folder named like another addon is still its own addon's
+    CHECK(addon_of_module(addons + L"evil\\native\\swofty\\addons\\xsoul.cinematic-replay\\x.dll", exe) == "evil");
+    // anywhere else, nobody's, whatever the path says
+    CHECK(addon_of_module(L"C:\\Games\\swofty\\addons\\xsoul.cinematic-replay\\x.dll", exe).empty());
+    CHECK(addon_of_module(L"D:\\SteamLibrary\\steamapps\\common\\F1 25\\swofty\\mods\\a.b\\x.dll", exe).empty());
+    CHECK(addon_of_module(addons + L"loose.dll", exe).empty());
+    CHECK(addon_of_module(addons + L"\\x.dll", exe).empty());
+    CHECK(addon_of_module(L"C:\\Windows\\System32\\kernel32.dll", exe).empty());
+    CHECK(addon_of_module(addons + L"a.b\\x.dll", L"F1_25.exe").empty());
+    // a game folder inside some other addons folder: only the game's own counts
+    CHECK(addon_of_module(L"D:\\addons\\F1 25\\swofty\\addons\\a.b\\x.dll", L"D:\\addons\\F1 25\\F1_25.exe") == "a.b");
+    CHECK(addon_of_module(L"D:\\addons\\a.b\\x.dll", L"D:\\addons\\F1 25\\F1_25.exe").empty());
+
+    // The bytes wait for the pass list: any pass's before it (EARLY_PASSES an addon), only the listed passes' after.
+    DataStore store;
+    const std::string mine = DataStore::key("a.b", "lines"), typo = DataStore::key("a.b", "lnes");
+    CHECK(!store.is_listed() && store.set_early(mine, "abcd", 4) && store.set_early(typo, "xy", 2));
+    for (size_t i = 2; i < DataStore::EARLY_PASSES; i++)
+        CHECK(store.set_early(DataStore::key("a.b", "p" + std::to_string(i)), "z", 1));
+    CHECK(!store.set_early(DataStore::key("a.b", "one_more"), "z", 1) && store.size() == DataStore::EARLY_PASSES);
+    CHECK(store.set_early(mine, "efgh", 4) && store.set_early(DataStore::key("c.d", "fx"), "z", 1));
+    CHECK(store.set_early(typo, nullptr, 0) && !store.find(typo));
+    store.listed([&](const std::string &k) { return k == mine; });
+    CHECK(store.is_listed() && store.size() == 1 && store.find(mine) && *store.find(mine) == "efgh");
+    store.set(mine, nullptr, 0);
+    CHECK(store.empty() && !store.find(mine));
 
     if (failed)
         return 1;

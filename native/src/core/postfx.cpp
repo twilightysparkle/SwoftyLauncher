@@ -9,6 +9,7 @@
 #include <swofty/mixin.hpp>
 
 #include <d3d12.h>
+#include <d3dcompiler.h>
 
 #include <algorithm>
 #include <array>
@@ -62,7 +63,11 @@ constexpr wchar_t BACKBUFFER_NAME[] = L"BackBuffer";
 constexpr wchar_t HUDLESS_NAME[] = L"eaid://ego_package/hudless_backbuffer.image";
 constexpr wchar_t DEPTH_NAME[] = L"eaid://ego_package/gbuffer_depth_stencil.image";
 constexpr wchar_t UI_PREFIX[] = L"eaid://ui_package/";
-constexpr UINT FRAMES = 8, MAX_PASSES = 64, CONSTANTS = postfx::CONSTANT_COUNT, BUDGET_FRAMES = 120, INPUTS = 8, TABLE = 2 + INPUTS + 1;
+constexpr UINT MIP_STEPS = 512;
+// A pass's descriptor table: t0 the picture, t1 depth, t2..t9 its inputs, t10 its data (DATA_AT), u0 its
+// output (TABLE - 1). DATA_MAX bytes of data at most a pass, DATA_ALIGN apart in a slot's upload buffer.
+constexpr UINT FRAMES = 8, MAX_PASSES = 64, CONSTANTS = postfx::CONSTANT_COUNT, BUDGET_FRAMES = 120, INPUTS = 8,
+               DATA_AT = 2 + INPUTS, TABLE = DATA_AT + 2, DATA_MAX = 64 * 1024, DATA_ALIGN = 256;
 constexpr D3D12_RESOURCE_STATES HOME = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 constexpr D3D12_RESOURCE_STATES READ_STATES =
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -101,6 +106,7 @@ struct Tex {
     UINT width = 0, height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     bool persistent = false;
+    uint32_t mips = 1;
     ID3D12Resource *res = nullptr, *upload = nullptr;
     UINT w = 0, h = 0;
     std::string pixels;
@@ -135,6 +141,10 @@ struct Slot {
     ID3D12Resource *depth = nullptr;
     postfx::Written<ID3D12Resource, DXGI_FORMAT> views[MAX_PASSES * TABLE];
     unsigned views_made = 0;
+    // The passes' data this slot ran with: an upload buffer, mapped while it lives.
+    ID3D12Resource *data = nullptr;
+    uint8_t *data_at = nullptr;
+    UINT data_cap = 0;
 };
 
 // The core's textures for one picture size: each slot's working set, last frame's result, and the
@@ -399,6 +409,9 @@ std::wstring off_file, trace_file, swofty_root_dir;
 
 ID3D12Device *device;
 ID3D12RootSignature *root;
+ID3D12PipelineState *mip_pso;
+UINT levels_of(const Tex &t);
+bool make_mip_pso();
 Slot slots[FRAMES];
 // Counts the times the core made its heap or textures, so slots know their descriptor tables are old.
 unsigned textures_made;
@@ -508,14 +521,14 @@ ID3D12Resource *buffer(D3D12_HEAP_TYPE type, UINT64 size, D3D12_RESOURCE_STATES 
                : nullptr;
 }
 
-ID3D12Resource *texture(UINT w, UINT h, DXGI_FORMAT f, bool uav)
+ID3D12Resource *texture(UINT w, UINT h, DXGI_FORMAT f, bool uav, UINT mips = 1)
 {
     D3D12_RESOURCE_DESC td{};
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = w;
     td.Height = h;
     td.DepthOrArraySize = 1;
-    td.MipLevels = 1;
+    td.MipLevels = UINT16(mips);
     td.Format = f;
     td.SampleDesc = {1, 0};
     td.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
@@ -549,11 +562,11 @@ bool make_root()
         return false;
     D3D12_DESCRIPTOR_RANGE ranges[3]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 2 + INPUTS;
+    ranges[0].NumDescriptors = DATA_AT + 1;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[1].NumDescriptors = 1;
-    ranges[1].OffsetInDescriptorsFromTableStart = 2 + INPUTS;
+    ranges[1].OffsetInDescriptorsFromTableStart = TABLE - 1;
     D3D12_ROOT_PARAMETER params[2]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.Num32BitValues = CONSTANTS;
@@ -595,6 +608,7 @@ bool init(ID3D12Resource *res)
         swofty::log("[postfx] could not make the passes' root signature; post-processing is off");
         return false;
     }
+    make_mip_pso();
     for (auto &s : slots) {
         if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s.fence))) ||
             FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc))) ||
@@ -669,11 +683,16 @@ bool read_tex_file(Tex &t)
     return true;
 }
 
+UINT mip_base()
+{
+    return FRAMES * MAX_PASSES * TABLE + UINT(textures.size()) * (FRAMES + 1) + 1;
+}
+
 bool make_heaps()
 {
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = FRAMES * MAX_PASSES * TABLE + UINT(textures.size()) * (FRAMES + 1) + 1;
+    hd.NumDescriptors = mip_base() + FRAMES * MIP_STEPS * TABLE;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     D3D12_DESCRIPTOR_HEAP_DESC cd = hd;
     cd.NumDescriptors = UINT(textures.size()) * (FRAMES + 1) + 1;
@@ -716,7 +735,7 @@ bool make_frame(const D3D12_RESOURCE_DESC &d)
         if (!t.persistent && t.file.empty())
             continue;
         old.push_back(t.res);
-        t.res = texture(t.w, t.h, t.format, t.file.empty());
+        t.res = texture(t.w, t.h, t.format, t.file.empty(), levels_of(t));
         t.clear = t.file.empty();
         if (!t.res) {
             swofty::log("[postfx] texture %s (%ux%u, format %d) could not be made; post-processing is off",
@@ -740,6 +759,11 @@ bool make_frame(const D3D12_RESOURCE_DESC &d)
     return true;
 }
 
+UINT levels_of(const Tex &t)
+{
+    return t.file.empty() ? postfx::mip_levels(t.w, t.h, t.mips) : 1;
+}
+
 bool shared(const Tex &t)
 {
     return t.persistent || !t.file.empty();
@@ -760,7 +784,7 @@ bool ensure_work(int k)
     bool ok = wk.orig && wk.pic[0] && wk.pic[1];
     for (size_t i = 0; i < textures.size() && ok; i++)
         if (!shared(textures[i]))
-            ok = (wk.tex[i] = texture(textures[i].w, textures[i].h, textures[i].format, true)) != nullptr;
+            ok = (wk.tex[i] = texture(textures[i].w, textures[i].h, textures[i].format, true, levels_of(textures[i]))) != nullptr;
     wk.clear = true;
     if (!ok)
         swofty::log("[postfx] the working textures of slot %d could not be made; post-processing is off", k);
@@ -782,22 +806,182 @@ D3D12_GPU_DESCRIPTOR_HANDLE gpu_at(ID3D12DescriptorHeap *h, UINT i)
     return {h->GetGPUDescriptorHandleForHeapStart().ptr + UINT64(i) * frame.stride};
 }
 
-void srv(ID3D12Resource *r, DXGI_FORMAT f, D3D12_CPU_DESCRIPTOR_HANDLE at)
+void srv(ID3D12Resource *r, DXGI_FORMAT f, D3D12_CPU_DESCRIPTOR_HANDLE at, UINT first = 0, UINT count = 0)
 {
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Format = f;
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Texture2D.MipLevels = 1;
+    sv.Texture2D.MostDetailedMip = first;
+    sv.Texture2D.MipLevels = count ? count : r ? UINT(r->GetDesc().MipLevels) : 1;
     device->CreateShaderResourceView(r, &sv, at);
 }
 
-void uav(ID3D12Resource *r, DXGI_FORMAT f, D3D12_CPU_DESCRIPTOR_HANDLE at)
+// A raw view (ByteAddressBuffer) of bytes [offset, offset + size) of the buffer r; without r, a null view
+// that reads 0.
+void data_srv(ID3D12Resource *r, UINT offset, UINT size, D3D12_CPU_DESCRIPTOR_HANDLE at)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_R32_TYPELESS;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Buffer.FirstElement = offset / 4;
+    sv.Buffer.NumElements = r ? std::max(1u, (size + 3) / 4) : 1;
+    sv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    device->CreateShaderResourceView(r, &sv, at);
+}
+
+// The bytes each addon's code gave one of its passes (SwoftyCorePostfxSetData). Every frame a pass reads the latest
+// as t10, from its slot's own upload buffer.
+std::mutex data_lock;
+postfx::DataStore pass_data;
+std::atomic<bool> any_data;
+bool data_logged;
+std::atomic<bool> device_armed;  // the device hooks armed: passes can run at all
+
+// Packs the data of the live passes into slot s's upload buffer (offsets[i] and sizes[i] for live[i]), growing
+// the buffer when they don't fit. Sizes are 0 where a pass has none. Under lock, for a slot the GPU is done with.
+void pack_data(Slot &s, const std::vector<int> &live, std::vector<UINT> &offsets, std::vector<UINT> &sizes)
+{
+    offsets.assign(live.size(), 0);
+    sizes.assign(live.size(), 0);
+    if (!any_data.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> g(data_lock);
+    std::vector<const std::string *> found(live.size(), nullptr);
+    UINT total = 0;
+    for (size_t i = 0; i < live.size(); i++) {
+        const Pass &p = passes[size_t(live[i])];
+        const std::string *b = pass_data.find(postfx::DataStore::key(p.addon_id, p.name));
+        if (!b || b->empty())
+            continue;
+        found[i] = b;
+        offsets[i] = total;
+        sizes[i] = UINT(b->size());
+        total += (sizes[i] + DATA_ALIGN - 1) / DATA_ALIGN * DATA_ALIGN;
+    }
+    if (!total)
+        return;
+    if (total > s.data_cap) {
+        UINT cap = (total + DATA_MAX - 1) / DATA_MAX * DATA_MAX;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bd{};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = cap;
+        bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ID3D12Resource *b = nullptr;
+        void *at = nullptr;
+        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                   nullptr, IID_PPV_ARGS(&b))) ||
+            FAILED(b->Map(0, nullptr, &at))) {
+            release(b);
+            sizes.assign(live.size(), 0);
+            return;
+        }
+        retire({s.data});
+        s.data = b;
+        s.data_at = static_cast<uint8_t *>(at);
+        s.data_cap = cap;
+    }
+    UINT bytes = 0, with = 0;
+    for (size_t i = 0; i < live.size(); i++)
+        if (found[i]) {
+            memcpy(s.data_at + offsets[i], found[i]->data(), sizes[i]);
+            // a view is whole words: zero the rest of the last one, which could hold another pass's earlier bytes
+            memset(s.data_at + offsets[i] + sizes[i], 0, (4 - sizes[i] % 4) % 4);
+            bytes += sizes[i];
+            with++;
+        }
+    if (!data_logged) {
+        data_logged = true;
+        swofty::log("[postfx] passes read data from their addons' code (t10): %u pass(es), %u byte(s)", with, bytes);
+    }
+}
+
+void uav(ID3D12Resource *r, DXGI_FORMAT f, D3D12_CPU_DESCRIPTOR_HANDLE at, UINT mip = 0)
 {
     D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
     uv.Format = f;
     uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    uv.Texture2D.MipSlice = mip;
     device->CreateUnorderedAccessView(r, nullptr, &uv, at);
+}
+
+void transition_level(ID3D12GraphicsCommandList *list, ID3D12Resource *r, UINT level, D3D12_RESOURCE_STATES from,
+                      D3D12_RESOURCE_STATES to)
+{
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = r;
+    b.Transition.Subresource = level;
+    b.Transition.StateBefore = from;
+    b.Transition.StateAfter = to;
+    d3d12hooks::barrier_original(list, 1u, &b);
+}
+
+UINT mip_steps_used;
+
+bool make_mip_pso()
+{
+    HMODULE compiler = LoadLibraryA("d3dcompiler_47.dll");
+    auto compile = compiler ? reinterpret_cast<pD3DCompile>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
+    if (!compile) {
+        swofty::log("[postfx] d3dcompiler_47.dll!D3DCompile is unavailable; mipmapped textures keep only their first level");
+        return false;
+    }
+    static const char hlsl[] =
+        "Texture2D<float4> src:register(t2);RWTexture2D<float4> dst:register(u0);"
+        "[numthreads(8,8,1)]void CS(uint3 id:SV_DispatchThreadID){uint w,h;dst.GetDimensions(w,h);"
+        "if(id.x>=w||id.y>=h)return;uint sw,sh;src.GetDimensions(sw,sh);int2 m=int2(sw,sh)-1;int2 b=int2(id.xy)*2;"
+        "dst[id.xy]=0.25*(src.Load(int3(min(b,m),0))+src.Load(int3(min(b+int2(1,0),m),0))"
+        "+src.Load(int3(min(b+int2(0,1),m),0))+src.Load(int3(min(b+int2(1,1),m),0)));}";
+    ID3DBlob *code = nullptr, *err = nullptr;
+    HRESULT hr = compile(hlsl, sizeof hlsl - 1, nullptr, nullptr, nullptr, "CS", "cs_5_0", 0, 0, &code, &err);
+    if (err) {
+        if (FAILED(hr))
+            swofty::log("[postfx] mip downsample: %.*s", int(err->GetBufferSize()),
+                        static_cast<const char *>(err->GetBufferPointer()));
+        err->Release();
+    }
+    if (SUCCEEDED(hr) && code) {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = root;
+        pd.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+        hr = device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&mip_pso));
+    }
+    release(code);
+    if (FAILED(hr))
+        swofty::log("[postfx] the mip downsample pipeline could not be made (0x%08lx); mipmapped textures keep only their first level", hr);
+    return SUCCEEDED(hr);
+}
+
+// Fills levels 1.. of r from level 0, which the caller has left in HOME: each level is written as a UAV, then
+// moved to HOME before the next one reads it.
+void build_mips(ID3D12GraphicsCommandList *l, ID3D12Resource *r, DXGI_FORMAT f, UINT w, UINT h, UINT levels, int k)
+{
+    if (!mip_pso || levels < 2)
+        return;
+    l->SetPipelineState(mip_pso);
+    for (UINT level = 1; level < levels; level++) {
+        if (mip_steps_used >= MIP_STEPS)
+            return;
+        UINT at = mip_base() + (UINT(k) * MIP_STEPS + mip_steps_used++) * TABLE;
+        for (UINT i = 0; i < 2 + INPUTS; i++)
+            if (i == 2)
+                srv(r, f, cpu_at(frame.heap, at + i), level - 1, 1);
+            else
+                srv(nullptr, f, cpu_at(frame.heap, at + i));
+        data_srv(nullptr, 0, 0, cpu_at(frame.heap, at + DATA_AT));
+        uav(r, f, cpu_at(frame.heap, at + TABLE - 1), level);
+        postfx::Size to = postfx::mip_size(w, h, level);
+        transition_level(l, r, level, HOME, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        l->SetComputeRootDescriptorTable(1, gpu_at(frame.heap, at));
+        l->Dispatch(postfx::groups(to.w, 8), postfx::groups(to.h, 8), 1);
+        transition_level(l, r, level, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, HOME);
+    }
 }
 
 DXGI_FORMAT depth_view(DXGI_FORMAT f)
@@ -814,6 +998,56 @@ DXGI_FORMAT depth_view(DXGI_FORMAT f)
     default:
         return DXGI_FORMAT_UNKNOWN;
     }
+}
+
+// The depth buffer as the game leaves each of its passes that write it. On track the passes run in the
+// HUD's list, which never moves the depth buffer, so its state there is unknown; instead the core copies
+// the buffer right before the game's own barrier that takes it out of DEPTH_WRITE, where its state is
+// that barrier's StateBefore, exactly (copy_depth). The last copy of a frame holds the frame's finished
+// depth. The copy rests in NON_PIXEL_SHADER_RESOURCE, and passes read it wherever the place they run
+// leaves no readable depth of its own.
+std::atomic<ID3D12Resource *> depth_copy;
+std::atomic<unsigned> depth_copy_frame;  // frame_count when a copy was last recorded
+std::atomic<unsigned> depth_copy_until;  // copies are made until this frame: passes ran without readable depth
+constexpr unsigned DEPTH_COPY_FRAMES = 120;
+ID3D12Resource *depth_copy_of;           // the game's buffer the copy matches, compared, not held; under lock
+D3D12_RESOURCE_DESC depth_copy_desc;
+bool depth_copy_logged, depth_copy_failed;
+
+// The copy for the game's depth buffer src, made or remade when the game's buffer changed. Under lock.
+ID3D12Resource *depth_copy_for(ID3D12Resource *src, const D3D12_RESOURCE_DESC &d)
+{
+    ID3D12Resource *have = depth_copy.load(std::memory_order_acquire);
+    const D3D12_RESOURCE_DESC &h = depth_copy_desc;
+    if (have && depth_copy_of == src && h.Width == d.Width && h.Height == d.Height && h.Format == d.Format &&
+        h.MipLevels == d.MipLevels && h.DepthOrArraySize == d.DepthOrArraySize)
+        return have;
+    if (!device || depth_copy_failed)
+        return nullptr;
+    D3D12_RESOURCE_DESC cd = d;
+    cd.Flags &= ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ID3D12Resource *r = nullptr;
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &cd,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                               IID_PPV_ARGS(&r)))) {
+        depth_copy_failed = true;
+        swofty::log("[postfx] could not make a copy of the game's depth buffer (%llux%u, format %d); passes read "
+                    "depth only where the game leaves it readable",
+                    static_cast<unsigned long long>(d.Width), d.Height, int(d.Format));
+        return nullptr;
+    }
+    retire({depth_copy.exchange(r, std::memory_order_acq_rel)});
+    depth_copy_of = src;
+    depth_copy_desc = d;
+    if (!depth_copy_logged) {
+        depth_copy_logged = true;
+        swofty::log("[postfx] the core copies the game's depth buffer (%llux%u, format %d) where the game stops "
+                    "writing it, for passes that run where it isn't readable",
+                    static_cast<unsigned long long>(d.Width), d.Height, int(d.Format));
+    }
+    return r;
 }
 
 void write_ppm(const std::string &path, const uint8_t *src, UINT pitch, UINT w, UINT h, DXGI_FORMAT view)
@@ -1310,6 +1544,7 @@ bool record(const Where &w, int k)
             upload(l, t);
     l->SetComputeRootSignature(root);
     l->SetDescriptorHeaps(1, &frame.heap);
+    mip_steps_used = 0;
     UINT clear_at = FRAMES * MAX_PASSES * TABLE, ntex = UINT(textures.size());
     for (size_t i = 0; i < textures.size(); i++) {
         Tex &t = textures[i];
@@ -1324,6 +1559,8 @@ bool record(const Where &w, int k)
         const float zero[4] = {};
         l->ClearUnorderedAccessViewFloat(gpu_at(frame.heap, clear_at + at), cpu_at(frame.cpu, at), r, zero, 0, nullptr);
         transition(l, r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, HOME);
+        if (levels_of(t) > 1)
+            build_mips(l, r, t.format, t.w, t.h, levels_of(t), k);
         if (!own)
             t.clear = false;
     }
@@ -1360,16 +1597,38 @@ bool record(const Where &w, int k)
         swofty::log("[postfx] passes read the game's depth buffer (%ux%u, format %d) as t1", c[24], c[25],
                     int(depth->GetDesc().Format));
     }
+    // Where this place leaves no readable depth (the HUD's list on track), the frame's copy, when the game
+    // wrote its depth buffer this frame or the one before. It rests readable: no transition. Copies are made
+    // only while passes keep running in such places (depth_copy_until).
+    bool depth_copied = false;
+    if (!depth) {
+        depth_copy_until.store(frame_count + DEPTH_COPY_FRAMES, std::memory_order_relaxed);
+        ID3D12Resource *dc = depth_copy.load(std::memory_order_acquire);
+        if (dc && frame_count - depth_copy_frame.load(std::memory_order_relaxed) <= 2) {
+            D3D12_RESOURCE_DESC dd = dc->GetDesc();
+            depth = dc;
+            depth_fmt = depth_view(dd.Format);
+            c[24] = UINT(dd.Width);
+            c[25] = dd.Height;
+            c[26] = 1;
+            depth_copied = true;
+        }
+    }
     D3D12_RESOURCE_STATES depth_read = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    bool depth_moved = depth && !(w.depth_state & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    bool depth_moved = depth && !depth_copied && !(w.depth_state & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if (depth_moved)
         transition(l, depth, w.depth_state, depth_read);
     bool timed = queries && query_readback;
     UINT qbase = UINT(k) * MAX_PASSES * 2;
     ID3D12Resource *cur = wk.orig;
     int next = 0;
+    std::vector<UINT> data_offsets, data_sizes;
+    pack_data(s, live, data_offsets, data_sizes);
+    size_t live_i = 0;
     for (int index : live) {
         Pass &p = passes[size_t(index)];
+        UINT data_size = data_sizes[live_i], data_offset = data_offsets[live_i];
+        live_i++;
         ID3D12Resource *out = p.output < 0 ? wk.pic[next] : tex_of(size_t(p.output), k);
         DXGI_FORMAT of = p.output < 0 ? frame.view : textures[size_t(p.output)].format;
         UINT ow = p.output < 0 ? pw : textures[size_t(p.output)].w, oh = p.output < 0 ? ph : textures[size_t(p.output)].h;
@@ -1386,6 +1645,13 @@ bool record(const Where &w, int k)
             ID3D12Resource *r = input_res(p.inputs[i], k, f);
             put_srv(2 + i, r, f);
         }
+        if (data_size) {  // written every frame: the bytes move within the buffer
+            data_srv(s.data, data_offset, data_size, cpu_at(frame.heap, at + DATA_AT));
+            view[DATA_AT] = {};
+        } else if (postfx::rewrite(view[DATA_AT], static_cast<ID3D12Resource *>(nullptr), DXGI_FORMAT_UNKNOWN)) {
+            data_srv(nullptr, 0, 0, cpu_at(frame.heap, at + DATA_AT));
+        }
+        c[postfx::DATA_SIZE_AT] = data_size;
         if (postfx::rewrite(view[TABLE - 1], out, of))
             uav(out, of, cpu_at(frame.heap, at + TABLE - 1));
         transition(l, out, HOME, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1405,6 +1671,8 @@ bool record(const Where &w, int k)
         if (timed)
             l->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, qbase + s.passes * 2 + 1);
         transition(l, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, HOME);
+        if (p.output >= 0 && levels_of(textures[size_t(p.output)]) > 1)
+            build_mips(l, out, of, ow, oh, levels_of(textures[size_t(p.output)]), k);
         s.pass_of[s.passes++] = index;
         if (p.output < 0) {
             cur = out;
@@ -1713,6 +1981,54 @@ bool mark_aside(ID3D12GraphicsCommandList *list, UINT n, const D3D12_RESOURCE_BA
     return true;
 }
 
+// Before the game records a barrier batch that takes its depth buffer out of DEPTH_WRITE: copies the
+// buffer into depth_copy, from the state the barrier names as its StateBefore, and puts it back in that
+// state, so the game's barrier then runs as it would have. Whole-resource, unsplit barriers in direct
+// lists only; one copy per batch.
+void copy_depth(ID3D12GraphicsCommandList *list, UINT n, const D3D12_RESOURCE_BARRIER *barriers)
+{
+    for (UINT i = 0; i < n; i++) {
+        const D3D12_RESOURCE_BARRIER &b = barriers[i];
+        if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !(watched_bits(b.Transition.pResource) & W_DEPTH) ||
+            b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE ||
+            b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES ||
+            !(b.Transition.StateBefore & D3D12_RESOURCE_STATE_DEPTH_WRITE) ||
+            (b.Transition.StateAfter & D3D12_RESOURCE_STATE_DEPTH_WRITE))
+            continue;
+        if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
+            return;
+        ID3D12Resource *src = b.Transition.pResource;
+        D3D12_RESOURCE_DESC d = src->GetDesc();
+        if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.SampleDesc.Count != 1 ||
+            depth_view(d.Format) == DXGI_FORMAT_UNKNOWN)
+            return;
+        ID3D12Resource *copy;
+        {
+            std::lock_guard<std::recursive_mutex> g(lock);
+            copy = depth_copy_for(src, d);
+        }
+        if (!copy)
+            return;
+        D3D12_RESOURCE_BARRIER to[2]{}, back[2]{};
+        for (auto *t : {to, back})
+            for (int j = 0; j < 2; j++) {
+                t[j].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                t[j].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            }
+        to[0].Transition.pResource = back[0].Transition.pResource = src;
+        to[0].Transition.StateBefore = back[0].Transition.StateAfter = b.Transition.StateBefore;
+        to[0].Transition.StateAfter = back[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        to[1].Transition.pResource = back[1].Transition.pResource = copy;
+        to[1].Transition.StateBefore = back[1].Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        to[1].Transition.StateAfter = back[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        d3d12hooks::barrier_original(list, 2u, to);
+        list->CopyResource(copy, src);
+        d3d12hooks::barrier_original(list, 2u, back);
+        depth_copy_frame.store(frame_count, std::memory_order_relaxed);
+        return;
+    }
+}
+
 // Marks what each game list does with the watched resources. At the HUD-less step (the HUD-less copy
 // leaves UAV while this list has made the back buffer a render target) the passes are recorded into the
 // list, before the game's barrier, with every state as it was before this batch.
@@ -1730,6 +2046,8 @@ bool on_barrier(ID3D12GraphicsCommandList *list, UINT n, const D3D12_RESOURCE_BA
         return false;
     static const uint32_t marking = perf::probe("core", "postfx ResourceBarrier (watched)");
     perf::Scope m_scope(marking);
+    if ((seen & W_DEPTH) && device && frame_count <= depth_copy_until.load(std::memory_order_relaxed))
+        copy_depth(list, n, barriers);
     if (!(seen & (W_TONEMAP | W_BACK | W_HUDLESS)) && mark_aside(list, n, barriers, seen & W_DEPTH))
         return false;
     std::lock_guard<std::recursive_mutex> g(lock);
@@ -2098,6 +2416,7 @@ Tex fresh_texture(const postfx::PlanTex &pt)
     t.width = pt.decl.width;
     t.height = pt.decl.height;
     t.persistent = pt.decl.persistent;
+    t.mips = pt.decl.mips;
     t.format = DXGI_FORMAT(pt.decl.format);
     if (!t.file.empty() && !read_tex_file(t)) {
         swofty::log("[shaders] texture %s is left out: %s is missing or not a texture", t.name.c_str(), t.file.c_str());
@@ -2117,7 +2436,7 @@ bool fit_frame()
         t.w = sz.w;
         t.h = sz.h;
         if (shared(t) && !t.res) {
-            t.res = texture(t.w, t.h, t.format, t.file.empty());
+            t.res = texture(t.w, t.h, t.format, t.file.empty(), levels_of(t));
             t.clear = t.file.empty();
             if (!t.res)
                 return false;
@@ -2127,7 +2446,7 @@ bool fit_frame()
         if (!wk.orig)
             continue;
         for (size_t i = 0; i < textures.size(); i++)
-            if (!shared(textures[i]) && !wk.tex[i] && !(wk.tex[i] = texture(textures[i].w, textures[i].h, textures[i].format, true)))
+            if (!shared(textures[i]) && !wk.tex[i] && !(wk.tex[i] = texture(textures[i].w, textures[i].h, textures[i].format, true, levels_of(textures[i]))))
                 return false;
         wk.clear = true;
     }
@@ -2810,12 +3129,31 @@ bool load_passes()
     return !passes.empty();
 }
 
+// The setup is done with the profile's passes (it read them, or stopped before and there are none): the bytes
+// addons' code gave before then to a pass that isn't there go, and from now on only these passes get any.
+void passes_listed()
+{
+    std::lock_guard<std::recursive_mutex> g(lock);
+    std::lock_guard<std::mutex> d(data_lock);
+    pass_data.listed([](const std::string &k) {
+        for (const Pass &p : passes)
+            if (postfx::DataStore::key(p.addon_id, p.name) == k)
+                return true;
+        return false;
+    });
+    any_data.store(!pass_data.empty(), std::memory_order_relaxed);
+}
+
 }
 
 namespace runtime {
 
 void postfx_setup()
 {
+    // however the setup ends, the passes it leaves are the profile's from then on
+    struct Listed {
+        ~Listed() { passes_listed(); }
+    } listed;
     if (!enabled("postfx", nullptr))
         return;
     char v[260] = {};
@@ -2863,6 +3201,7 @@ void postfx_setup()
         swofty::log("[postfx] the core's D3D12 device hooks did not arm; post-processing is off");
         return;
     }
+    device_armed = true;
     state_armed = d3d12hooks::arm_list_state();
     if (!state_armed)
         swofty::log("[postfx] the command list state hooks did not arm; passes run only between the game's lists");
@@ -2872,4 +3211,81 @@ void postfx_setup()
                 textures.size(), capture_dir.empty() ? "" : "; captures go to ", capture_dir.c_str());
 }
 
+}
+
+namespace {
+
+// A module's path; empty if it doesn't fit.
+std::wstring module_path(HMODULE m)
+{
+    wchar_t path[1024];
+    DWORD n = GetModuleFileNameW(m, path, DWORD(std::size(path)));
+    return n && n < std::size(path) ? std::wstring(path, n) : std::wstring();
+}
+
+// The id of the addon whose native code is at `at` (postfx::addon_of_module); empty for code that isn't an addon's.
+std::string addon_at(const void *at)
+{
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(at), &m) ||
+        !m)
+        return {};
+    return postfx::addon_of_module(module_path(m), module_path(nullptr));
+}
+
+std::string lower(std::string s)
+{
+    for (auto &ch : s)
+        ch = char(tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+}
+
+// The bytes an addon's code gives one of its own passes, read by the pass as t10 from the next frame on until it
+// gives others; size 0 takes them away. Only the addon's own DLL can give them (the caller's DLL lies under
+// <game folder>\swofty\addons\<addon_id>\), and only to a pass its manifest lists, so one addon can't feed another's
+// passes and the core keeps at most 64 KB a pass. 0 when taken and that pass is running, 1 when taken but it isn't
+// (switched off, over its budget, post-processing off, or the core hasn't read the profile's passes yet: an addon's
+// on-load can come first, and the bytes wait for them), -1 for a missing addon id or pass name or bytes, -2 above
+// 64 KB, -3 when the caller isn't that addon's code, -4 when this profile has no pass of that name for the addon (not
+// in its manifest, or the build left it out, e.g. its shader didn't compile). swofty/postfx.hpp looks it up by name:
+// a core without it reads as unavailable.
+extern "C" __declspec(dllexport) int SwoftyCorePostfxSetData(const char *addon_id, const char *pass, const void *data,
+                                                             uint32_t size)
+{
+    if (!addon_id || !*addon_id || !pass || !*pass || (size && !data))
+        return -1;
+    if (size > DATA_MAX)
+        return -2;
+    if (addon_at(__builtin_return_address(0)) != lower(addon_id))
+        return -3;
+    std::string key = postfx::DataStore::key(addon_id, pass);
+    {
+        std::lock_guard<std::mutex> g(data_lock);
+        if (!pass_data.is_listed()) {
+            bool kept = pass_data.set_early(key, data, size);
+            any_data.store(!pass_data.empty(), std::memory_order_relaxed);
+            return kept ? 1 : -4;
+        }
+    }
+    bool known = false, running = false;
+    {
+        std::lock_guard<std::recursive_mutex> g(lock);
+        for (const Pass &p : passes)
+            if (p.addon_id == addon_id && p.name == pass) {
+                known = true;
+                running = running ||
+                          (device_armed && !broken && !p.off && !p.ruled_off && p.on && !addon_off(p.addon_id));
+            }
+    }
+    if (!known)
+        return -4;
+    {
+        std::lock_guard<std::mutex> g(data_lock);
+        pass_data.set(key, data, size);
+        any_data.store(!pass_data.empty(), std::memory_order_relaxed);
+    }
+    return running ? 0 : 1;
 }

@@ -109,11 +109,28 @@ fn connecting(step: &str, host: bool) -> Progress {
     }
 }
 
+/// The end of the session's reason while a joiner waits for the host's game to reach its lobby.
+pub const OPENS_LOBBY: &str = " to open the lobby";
+/// The end of the session's reason when the host picked cars this player's game doesn't own.
+pub const NEEDS_F1_2026: &str =
+    " picked the F1 2026 cars, and your copy of F1 25 doesn't have the F1 2026 content";
+
 /// The one step the room page shows, from the session's phase and, once the game runs, the game's cover.
 pub fn progress(state: &SessionState) -> Progress {
     let game = state.game.as_ref();
     match &state.phase {
         Phase::Connecting(step) => connecting(step, state.host),
+        Phase::WaitingForGame(why) if game.is_none() && why.ends_with(OPENS_LOBBY) => {
+            let mut label = why.clone();
+            if let Some(first) = label.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            Progress {
+                step: Step::StartingGame,
+                label,
+                percent: STARTING,
+            }
+        }
         Phase::InLobby | Phase::Racing => Progress {
             step: Step::InLobby,
             label: "In the lobby".into(),
@@ -175,6 +192,7 @@ pub fn problem(state: &SessionState) -> Option<Problem> {
             };
             Some(Problem { text, retry: false })
         }
+        Phase::WaitingForGame(why) if why.ends_with(NEEDS_F1_2026) => sentence(&format!("{why}."), false),
         Phase::WaitingForGame(why) => {
             let has = |s: &str| why.contains(s);
             if let Some(reason) = why.split_once("own room start failed: ").map(|(_, r)| r) {
@@ -225,6 +243,7 @@ mod tests {
             self_member: 2,
             base: 50000,
             room_failed: None,
+            content: None,
             cover: cover.map(|(step, percent)| Cover {
                 step: step.into(),
                 percent,
@@ -322,6 +341,20 @@ mod tests {
         assert_eq!(p.text, "F1 25 didn't start.");
         assert!(p.retry);
         assert!(!p.text.contains("wrapper"));
+    }
+
+    #[test]
+    fn missing_f1_2026_content_is_one_sentence_with_no_retry() {
+        let s = state(Phase::WaitingForGame(format!("Swofty{NEEDS_F1_2026}")), None);
+        assert_eq!(
+            problem(&s),
+            Some(Problem {
+                text:
+                    "Swofty picked the F1 2026 cars, and your copy of F1 25 doesn't have the F1 2026 content."
+                        .into(),
+                retry: false,
+            })
+        );
     }
 
     #[test]
