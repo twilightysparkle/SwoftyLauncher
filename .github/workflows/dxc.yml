@@ -19,10 +19,6 @@ on:
         description: The DXC run whose archives tools/dxc/SHA256SUMS pins (publish takes them instead of building)
         type: string
         default: ''
-  push:
-    paths:
-      - .github/workflows/dxc.yml
-      - tools/dxc/**
 
 permissions:
   contents: write
