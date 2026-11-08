@@ -423,7 +423,7 @@ constexpr const char *BACK_HOME = "the game went back to its main menu before th
 
 constexpr const char *LAN_DIALOG = "multiplayer_lan_msg";
 constexpr const char *IP_PROMPT = "set_join_via_ip";
-constexpr uint64_t OPEN_MS = 10000, PROMPT_MS = 5000, JOIN_LOBBY_MS = 30000, HOST_LOBBY_MS = 120000;
+constexpr uint64_t OPEN_MS = 10000, PROMPT_MS = 5000, JOIN_LOBBY_MS = 120000, HOST_LOBBY_MS = 120000;
 
 class Job {
 public:
@@ -700,6 +700,67 @@ private:
     uint64_t started_ = 0, transition_ = 0, origin_ = 0;
     bool on_ = false, held_ = false;
     int presses_ = 0;
+};
+
+constexpr uint64_t LEAVE_MS = 5000;
+
+class Leave {
+public:
+    enum class Step { none, call, wait, done, failed };
+
+    void start(const Command &c, uint64_t now)
+    {
+        cmd = c;
+        step_ = Step::call;
+        error.clear();
+        detail.clear();
+        deadline_ = now + LEAVE_MS;
+    }
+
+    bool active() const { return step_ == Step::call || step_ == Step::wait; }
+    bool finished() const { return step_ == Step::done || step_ == Step::failed; }
+    void reset() { step_ = Step::none; }
+
+    void fail(const std::string &why)
+    {
+        error = why;
+        step_ = Step::failed;
+    }
+
+    static bool out_of_session(bool lobby, int session_role)
+    {
+        return session_role == 0 || (session_role < 0 && !lobby);
+    }
+
+    bool tick(bool lobby, int session_role, uint64_t now)
+    {
+        switch (step_) {
+        case Step::call:
+            if (!lobby) {
+                detail = "the game had already left the lobby";
+                step_ = Step::done;
+                return false;
+            }
+            step_ = Step::wait;
+            return true;
+        case Step::wait:
+            if (out_of_session(lobby, session_role)) {
+                detail = lobby ? "the session is closed; the lobby screen is closing" : "the game left the lobby";
+                step_ = Step::done;
+            } else if (now >= deadline_)
+                fail("the game is still in the LAN session " + std::to_string(LEAVE_MS / 1000) + " s after it was told to leave");
+            return false;
+        default:
+            return false;
+        }
+    }
+
+    Command cmd;
+    std::string error, detail;
+
+private:
+    Step step_ = Step::none;
+    uint64_t deadline_ = 0;
 };
 
 // Names of inbox files the launcher writes: <digits>.json, written as .tmp and renamed.

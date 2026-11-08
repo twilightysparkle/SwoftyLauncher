@@ -2808,6 +2808,9 @@ pub type Game_CareerWizard_StartsInF1_t = unsafe extern "C" fn(
     entrant_list: *const c_char,
 ) -> bool;
 pub type Game_Career_IsDriverCareerMode_t = unsafe extern "C" fn(championship: *const c_void) -> bool;
+pub type Game_CheckPrivilegeTask_OnUpdate_t = unsafe extern "C" fn(task: *mut c_void);
+pub type Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback_t =
+    unsafe extern "C" fn(task: *mut c_void, privilege: u32, success: bool, continuation: *const c_void);
 pub type Game_ContractTeamSelect_OnEnter_t = unsafe extern "C" fn(state: *mut c_void) -> u64;
 pub type Game_ContractTeamSelect_OnExit_t = unsafe extern "C" fn(state: *mut c_void) -> u64;
 pub type Game_ContractTeamSelect_OnUpdate_t =
@@ -2853,6 +2856,8 @@ pub type Game_Handle_GarageCrewEvent_Thunk_t =
     unsafe extern "C" fn(cars: *mut *mut c_void, event: *mut c_void) -> u64;
 pub type Game_Handle_SpecGarageCrewEvent_Thunk_t =
     unsafe extern "C" fn(self_: *mut c_void, event: *mut c_void) -> u64;
+pub type Game_NetworkSubsystem_UpdateKeyMaterial_t =
+    unsafe extern "C" fn(closure: *mut c_void, success: *const bool, key_material: *const c_void);
 pub type Game_Network_CategoryOptionUsing_t = unsafe extern "C" fn(self_: *mut c_void);
 pub type Game_Network_SendingRedFlagVehicleStatusUpdate_t =
     unsafe extern "C" fn(red_flag_state: *mut c_void, dt: *const f64);
@@ -2860,6 +2865,8 @@ pub type Game_Network_SetScenario_t =
     unsafe extern "C" fn(session: *mut c_void, stat_id: u8, spec: *const c_void);
 pub type Game_OptionsStore_FindOption_t =
     unsafe extern "C" fn(map: *mut c_void, name: *mut *const c_char) -> u64;
+pub type Game_OsService_SubmitRequest_t =
+    unsafe extern "C" fn(os_service: *mut c_void, request: *const c_void, callback: *mut c_void);
 pub type Game_PitLane_MoveDownSpline_t = unsafe extern "C" fn(
     pitlane: *mut c_void,
     car: u8,
@@ -4328,6 +4335,16 @@ pub mod bindings {
     };
     pub const Game_Championship_ResetSessionsForRestart: Binding = Binding {
         id: "Game_Championship_ResetSessionsForRestart",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Game_CheckPrivilegeTask_OnUpdate: Binding = Binding {
+        id: "Game_CheckPrivilegeTask_OnUpdate",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback: Binding = Binding {
+        id: "Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback",
         kind: "func",
         status: Status::Experimental,
     };
@@ -6266,6 +6283,11 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Game_InviteManager_Cancel: Binding = Binding {
+        id: "Game_InviteManager_Cancel",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Game_InviteManager_ChangeState: Binding = Binding {
         id: "Game_InviteManager_ChangeState",
         kind: "func",
@@ -6601,6 +6623,11 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Game_NetworkSubsystem_UpdateKeyMaterial: Binding = Binding {
+        id: "Game_NetworkSubsystem_UpdateKeyMaterial",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Game_NetworkUI_StartRankedDivisionSearch: Binding = Binding {
         id: "Game_NetworkUI_StartRankedDivisionSearch",
         kind: "func",
@@ -6758,6 +6785,11 @@ pub mod bindings {
     };
     pub const Game_OptionsUI_ApplyFilterLevelCollectChanges: Binding = Binding {
         id: "Game_OptionsUI_ApplyFilterLevelCollectChanges",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Game_OsService_SubmitRequest: Binding = Binding {
+        id: "Game_OsService_SubmitRequest",
         kind: "func",
         status: Status::Experimental,
     };
@@ -7273,6 +7305,11 @@ pub mod bindings {
     };
     pub const Game_RttTaskManager_StartTask: Binding = Binding {
         id: "Game_RttTaskManager_StartTask",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Game_SSL_FetchKeyMaterial: Binding = Binding {
+        id: "Game_SSL_FetchKeyMaterial",
         kind: "func",
         status: Status::Experimental,
     };

@@ -9,6 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
@@ -23,7 +24,7 @@ use swofty_core::multiplayer::session::{
     Local, MemberState, Phase, RoomContent, Session, SessionState, Setup,
 };
 use swofty_core::store::Store;
-use swofty_i18n::trn;
+use swofty_i18n::{tr, trn};
 
 use crate::pages::{GUTTER, badge, label, monogram, tag};
 use crate::shell::{Page, Shell};
@@ -502,7 +503,7 @@ impl Shell {
                     .and_then(|()| ids.write(&file).map_err(|e| e.to_string()))
                 {
                     self.mp_page.launch_seen = ask.seq;
-                    session.launch_failed(&format!("the host's ids couldn't be written ({e})"));
+                    session.launch_failed(&format!("the host's ids and settings couldn't be written ({e})"));
                     return;
                 }
                 Some(file)
@@ -651,6 +652,21 @@ impl Shell {
     pub(crate) fn mp_viewed_room(&self) -> Option<&RoomSummary> {
         let code = self.mp_page.viewing.as_deref()?;
         self.mp_page.rooms.iter().find(|r| r.code == code)
+    }
+
+    /// The play button's word while a shared session starts and F1 25 isn't building or running yet, so it
+    /// can't be pressed as a second Play.
+    pub(crate) fn mp_starting_label(&self) -> Option<&'static str> {
+        let m = &self.mp_page;
+        if !m.busy() {
+            return None;
+        }
+        let hosting = m.starting.as_deref() == Some("create") || m.state.as_ref().is_some_and(|s| s.host);
+        Some(if hosting {
+            tr("Opening room…")
+        } else {
+            tr("Joining…")
+        })
     }
 
     pub(crate) fn mp_can_play_room(&self) -> bool {
@@ -1507,7 +1523,12 @@ impl Shell {
                 h_flex()
                     .gap(px(12.))
                     .items_center()
-                    .child(Icon::new(icon).size(px(22.)).text_color(color))
+                    .map(|d| match icon {
+                        IconName::LoaderCircle => {
+                            d.child(Spinner::new().icon(icon).with_size(px(22.)).color(color))
+                        }
+                        _ => d.child(Icon::new(icon).size(px(22.)).text_color(color)),
+                    })
                     .child(
                         v_flex()
                             .flex_1()

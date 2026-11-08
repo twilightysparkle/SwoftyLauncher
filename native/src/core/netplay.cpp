@@ -1,5 +1,7 @@
 #include "runtime.hpp"
 #include "netplay_icons_logic.hpp"
+#include "netplay_keys_logic.hpp"
+#include "netplay_privilege_logic.hpp"
 #include "netplay_session.hpp"
 
 #include <safetyhook.hpp>
@@ -109,6 +111,55 @@ const runtime::Sig S_ICON_GATES[] = {
 constexpr uintptr_t zero_flag = 0x40;
 constexpr const char *ICON_MIXIN = "swofty_core.dll (netplay platform icons)";
 constexpr const char *ICON_RESOLVER = "Vm_Resolve_RegistryNode";
+
+// Session key material. The game fetches the DTLS key material from EA's online services when a join starts
+// (InviteManager join step Game_SSL_FetchKeyMaterial, NetSub+0x10d0 = 1) and stays in eJoiningStart until the
+// completion closure Game_NetworkSubsystem_UpdateKeyMaterial runs. With no EA connection that closure never
+// runs. The transport is already forced to the null-SSL provider, which never reads the material, so while the
+// game is armed and that patch is in, the wrap of the OS-service submit that queues the fetch (its two callers
+// are the join step and the subsystem tick) runs the closure at once with a successful placeholder material.
+constexpr const char *KEYS_MIXIN = "swofty_core.dll (netplay key material)";
+constexpr const char *KEYS_SUBMIT = "Game_OsService_SubmitRequest";
+constexpr const char *KEYS_UPDATE = "Game_NetworkSubsystem_UpdateKeyMaterial";
+
+using KeysSubmit_t = void(void *service, const void *request, void **callback);
+KeysSubmit_t *keys_orig;
+uintptr_t keys_update;
+std::atomic<bool> null_ssl_forced{false};
+std::atomic<bool> said_keys{false};
+bool keys_offered = false, keys_bound = false, keys_settled = false;
+
+void keys_entry(void *service, const void *request, void **callback)
+{
+    if (null_ssl_forced.load(std::memory_order_relaxed) &&
+        runtime::netplay_keys::answer(callback, reinterpret_cast<const void *>(keys_update))) {
+        if (!said_keys.exchange(true))
+            swofty::log("[netplay] key material: the online fetch is answered at once (null-SSL transport)");
+        return;
+    }
+    keys_orig(service, request, callback);
+}
+
+// Session privilege checks. CheckPrivilegeTask::onUpdate hands its callback list to the online context's
+// privilege slot and waits in state 2 until the slot's provider has answered every node; with no EA connection
+// the provider never does, and the task is only ended 30 to 120 s later with the online-services popup. While the
+// game is armed, the wrap of onUpdate runs the real update, then calls each queued node callback (the task's own
+// privilegeCheckTaskCallback) as granted and releases the slot, so the task finishes on its next update.
+constexpr const char *PRIV_MIXIN = "swofty_core.dll (netplay privilege checks)";
+constexpr const char *PRIV_UPDATE = "Game_CheckPrivilegeTask_OnUpdate";
+constexpr const char *PRIV_CALLBACK = "Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback";
+
+using PrivUpdate_t = void(void *task);
+PrivUpdate_t *priv_orig;
+std::atomic<bool> said_priv{false};
+bool priv_offered = false, priv_bound = false, priv_settled = false;
+
+void priv_entry(void *task)
+{
+    priv_orig(task);
+    if (runtime::netplay_privilege::grant(static_cast<uint8_t *>(task)) > 0 && !said_priv.exchange(true))
+        swofty::log("[netplay] privilege checks: answered as granted (offline shared session)");
+}
 
 std::vector<safetyhook::MidHook> h_icon_gates;
 std::atomic<bool> icons_armed{false};
@@ -234,6 +285,7 @@ void session_patches()
     bool enc = patch(runtime::find(S_ENCRYPT_SELECT, "netplay", "netplay"), force_null_ssl, sizeof force_null_ssl);
     swofty::log("[netplay] transport encryption %s",
                 enc ? "forced to the null-SSL provider" : "left unchanged (signature did not resolve)");
+    null_ssl_forced = enc;
 
     bool lobby = patch(runtime::find(S_LOBBY_KICK, "netplay", "netplay"), skip_lobby_kick, sizeof skip_lobby_kick);
     swofty::log("[netplay] lobby privilege re-check %s",
@@ -294,6 +346,66 @@ void netplay_icons_commit()
         swofty::log("[netplay] driver platform icon keys left as they are: the %s wrap did not install (see the [core] "
                     "lines)",
                     ICON_RESOLVER);
+}
+
+std::vector<CoreMixins> netplay_keys_mixins()
+{
+    std::vector<CoreMixins> out;
+    if (keys_offered || !code_ready())
+        return out;
+    keys_offered = true;
+    if (!armed())
+        return out;
+    keys_update = swofty::api->resolve(KEYS_UPDATE);
+    if (!keys_update || !swofty::api->resolve(KEYS_SUBMIT)) {
+        keys_update = 0;
+        swofty::log("[netplay] key material left to the online fetch: needs %s and %s, which this build does not resolve",
+                    KEYS_SUBMIT, KEYS_UPDATE);
+        return out;
+    }
+    keys_bound = true;
+    out.push_back({KEYS_MIXIN, {{KEYS_SUBMIT, SWOFTY_MIXIN_WRAP, 0, (void *)&keys_entry, (void **)&keys_orig}}});
+    return out;
+}
+
+void netplay_keys_commit()
+{
+    if (!keys_bound || keys_settled)
+        return;
+    keys_settled = true;
+    if (!core_mixins_active(KEYS_MIXIN))
+        swofty::log("[netplay] key material left to the online fetch: the %s wrap did not install (see the [core] lines)",
+                    KEYS_SUBMIT);
+}
+
+std::vector<CoreMixins> netplay_privilege_mixins()
+{
+    std::vector<CoreMixins> out;
+    if (priv_offered || !code_ready())
+        return out;
+    priv_offered = true;
+    if (!armed())
+        return out;
+    if (!swofty::api->resolve(PRIV_UPDATE) || !swofty::api->resolve(PRIV_CALLBACK)) {
+        swofty::log("[netplay] privilege checks left to the online services: needs %s and %s, which this build does not "
+                    "resolve",
+                    PRIV_UPDATE, PRIV_CALLBACK);
+        return out;
+    }
+    priv_bound = true;
+    out.push_back({PRIV_MIXIN, {{PRIV_UPDATE, SWOFTY_MIXIN_WRAP, 0, (void *)&priv_entry, (void **)&priv_orig}}});
+    return out;
+}
+
+void netplay_privilege_commit()
+{
+    if (!priv_bound || priv_settled)
+        return;
+    priv_settled = true;
+    if (!core_mixins_active(PRIV_MIXIN))
+        swofty::log("[netplay] privilege checks left to the online services: the %s wrap did not install (see the [core] "
+                    "lines)",
+                    PRIV_UPDATE);
 }
 
 void netplay_setup()

@@ -274,6 +274,10 @@ inline constexpr address<"Game_Championship_AddSessionDefaultLength"> Game_Champ
 inline constexpr address<"Game_Championship_AddSessionFromDef"> Game_Championship_AddSessionFromDef{}; // L2 experimental
 inline constexpr address<"Game_Championship_AddSessionWithFormat"> Game_Championship_AddSessionWithFormat{}; // L2 experimental
 inline constexpr address<"Game_Championship_ResetSessionsForRestart"> Game_Championship_ResetSessionsForRestart{}; // L2 experimental
+using Game_CheckPrivilegeTask_OnUpdate_t = void(void *task);
+inline constexpr fn<"Game_CheckPrivilegeTask_OnUpdate", Game_CheckPrivilegeTask_OnUpdate_t> Game_CheckPrivilegeTask_OnUpdate{}; // L2 experimental, game::online_systems::tasks::CheckPrivilegeTask::onUpdate
+using Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback_t = void(void *task, uint32_t privilege, bool success, const void *continuation);
+inline constexpr fn<"Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback", Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback_t> Game_CheckPrivilegeTask_PrivilegeCheckTaskCallback{}; // L2 experimental, game::online_systems::tasks::CheckPrivilegeTask::privilegeCheckTaskCallback
 inline constexpr address<"Game_CinematicDirector_SendCinematicData"> Game_CinematicDirector_SendCinematicData{}; // L2 experimental
 inline constexpr address<"Game_CinematicPitStop_Start"> Game_CinematicPitStop_Start{}; // L2 experimental
 inline constexpr address<"Game_CinematicPitStop_Stop"> Game_CinematicPitStop_Stop{}; // L2 experimental
@@ -681,6 +685,7 @@ inline constexpr address<"Game_InGameMenuVM_OnReturnToGarage"> Game_InGameMenuVM
 inline constexpr address<"Game_InboxTabVM_OnTabActivated"> Game_InboxTabVM_OnTabActivated{}; // L2 experimental
 inline constexpr address<"Game_InboxTabVM_OnTabDeactivated"> Game_InboxTabVM_OnTabDeactivated{}; // L2 experimental
 inline constexpr address<"Game_Input_OnControlSchemeAdded"> Game_Input_OnControlSchemeAdded{}; // L2 experimental
+inline constexpr address<"Game_InviteManager_Cancel"> Game_InviteManager_Cancel{}; // L2 experimental, InviteManager::cancel
 inline constexpr address<"Game_InviteManager_ChangeState"> Game_InviteManager_ChangeState{}; // L2 experimental
 inline constexpr address<"Game_InviteManager_Join"> Game_InviteManager_Join{}; // L2 experimental
 inline constexpr address<"Game_InviteManager_OnCareerLoadedSoC"> Game_InviteManager_OnCareerLoadedSoC{}; // L2 experimental
@@ -748,6 +753,8 @@ inline constexpr address<"Game_NetworkReady_SendSuperReady"> Game_NetworkReady_S
 inline constexpr address<"Game_NetworkReady_SetRelevantSet"> Game_NetworkReady_SetRelevantSet{}; // L2 experimental
 inline constexpr address<"Game_NetworkSubsystem_ChangeMPMode"> Game_NetworkSubsystem_ChangeMPMode{}; // L2 experimental, NetworkSubsystem::changeMPMode
 inline constexpr address<"Game_NetworkSubsystem_SelectTitleConfig"> Game_NetworkSubsystem_SelectTitleConfig{}; // L2 experimental
+using Game_NetworkSubsystem_UpdateKeyMaterial_t = void(void *closure, const bool *success, const void *key_material);
+inline constexpr fn<"Game_NetworkSubsystem_UpdateKeyMaterial", Game_NetworkSubsystem_UpdateKeyMaterial_t> Game_NetworkSubsystem_UpdateKeyMaterial{}; // L2 experimental, NetworkSubsystem::updateKeyMaterial
 inline constexpr address<"Game_NetworkUI_StartRankedDivisionSearch"> Game_NetworkUI_StartRankedDivisionSearch{}; // L2 experimental
 inline constexpr address<"Game_NetworkUI_StartRankedRematching"> Game_NetworkUI_StartRankedRematching{}; // L2 experimental
 inline constexpr address<"Game_Network_ApplyInitialPitAndGridState"> Game_Network_ApplyInitialPitAndGridState{}; // L2 experimental
@@ -784,6 +791,8 @@ using Game_OptionsStore_FindOption_t = uint64_t(void *map, const char **name);
 inline constexpr fn<"Game_OptionsStore_FindOption", Game_OptionsStore_FindOption_t> Game_OptionsStore_FindOption{}; // L2 experimental
 inline constexpr address<"Game_OptionsSystem_ResolveOptionValue"> Game_OptionsSystem_ResolveOptionValue{}; // L2 experimental
 inline constexpr address<"Game_OptionsUI_ApplyFilterLevelCollectChanges"> Game_OptionsUI_ApplyFilterLevelCollectChanges{}; // L2 experimental
+using Game_OsService_SubmitRequest_t = void(void *os_service, const void *request, void *callback);
+inline constexpr fn<"Game_OsService_SubmitRequest", Game_OsService_SubmitRequest_t> Game_OsService_SubmitRequest{}; // L2 experimental
 inline constexpr address<"Game_PagedBuffer_Transfer"> Game_PagedBuffer_Transfer{}; // L2 experimental
 inline constexpr address<"Game_PagedBuffer_UsePageAt"> Game_PagedBuffer_UsePageAt{}; // L2 experimental
 inline constexpr address<"Game_ParcFermeCutScene_Initialise"> Game_ParcFermeCutScene_Initialise{}; // L2 experimental
@@ -899,6 +908,7 @@ inline constexpr address<"Game_RttTaskManager_OnTaskComplete"> Game_RttTaskManag
 inline constexpr address<"Game_RttTaskManager_ProcessCompletedTasks"> Game_RttTaskManager_ProcessCompletedTasks{}; // L2 experimental
 inline constexpr address<"Game_RttTaskManager_QueueTask"> Game_RttTaskManager_QueueTask{}; // L2 experimental
 inline constexpr address<"Game_RttTaskManager_StartTask"> Game_RttTaskManager_StartTask{}; // L2 experimental
+inline constexpr address<"Game_SSL_FetchKeyMaterial"> Game_SSL_FetchKeyMaterial{}; // L2 experimental
 using Game_SaveData_DeserialiseContainer_t = int *(SaveDataContainer *self, int *result, void *bag, uint8_t reset_on_error, uint64_t groups);
 inline constexpr fn<"Game_SaveData_DeserialiseContainer", Game_SaveData_DeserialiseContainer_t> Game_SaveData_DeserialiseContainer{}; // L3 stable
 using Game_SaveData_SerialiseContainer_t = int *(SaveDataContainer *self, int *result, void *bag, uint64_t groups);

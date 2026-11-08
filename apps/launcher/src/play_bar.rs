@@ -706,7 +706,15 @@ impl Shell {
             return self.addon_update_button(p, cx);
         }
         let vr = self.launch_mode().is_vr();
+        let starting = self.mp_starting_label();
         let (icon, label, bg, fg, enabled) = match state {
+            PlayState::Ready | PlayState::Crashed(_) if starting.is_some() => (
+                IconName::LoaderCircle,
+                starting.unwrap_or_default(),
+                p.elevated,
+                p.accent,
+                false,
+            ),
             PlayState::Ready | PlayState::Crashed(_) if vr => (
                 IconName::RectangleGoggles,
                 tr("Play in VR"),
@@ -762,7 +770,7 @@ impl Shell {
             ),
             PlayState::Elsewhere(_) => (IconName::Play, tr("Play"), p.elevated, p.text_muted, false),
         };
-        let ready = matches!(state, PlayState::Ready | PlayState::Crashed(_));
+        let ready = matches!(state, PlayState::Ready | PlayState::Crashed(_)) && starting.is_none();
         let missing = matches!(state, PlayState::NotInstalled);
         let running = matches!(state, PlayState::Running);
         let building = matches!(state, PlayState::Building);
@@ -814,7 +822,15 @@ impl Shell {
             .into_any_element()
     }
 
-    fn room_button(&self, state: &PlayState, p: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// "Play <host>'s Lobby" while a room is open on the Multiplayer page. `primary` gives it the Play button's
+    /// filled look, for when it stands in for Play.
+    fn room_button(
+        &self,
+        state: &PlayState,
+        primary: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let ready = matches!(
             state,
             PlayState::Ready | PlayState::Running | PlayState::Crashed(_)
@@ -830,15 +846,23 @@ impl Shell {
                 .px(px(18.))
                 .flex_shrink_0()
                 .rounded(px(9.))
-                .border_1()
-                .border_color(p.accent)
-                .text_color(p.accent)
+                .when(primary, |d| {
+                    d.min_w(px(170.))
+                        .bg(p.accent)
+                        .text_color(p.on_accent)
+                        .hover(move |s| s.bg(p.accent_hover))
+                })
+                .when(!primary, |d| {
+                    d.border_1()
+                        .border_color(p.accent)
+                        .text_color(p.accent)
+                        .hover(move |s| s.bg(p.selected))
+                })
                 .flex()
                 .items_center()
                 .justify_center()
                 .gap(px(8.))
                 .cursor_pointer()
-                .hover(move |s| s.bg(p.selected))
                 .child(Icon::new(IconName::Users).size(px(18.)))
                 .child(
                     div()
@@ -853,6 +877,10 @@ impl Shell {
 
     pub(crate) fn play_bar(&self, p: Palette, wide: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.play_state();
+        // With a room open on the Multiplayer page and the game ready, the room's button replaces Play.
+        let ready = matches!(state, PlayState::Ready | PlayState::Crashed(_));
+        let room = self.room_button(&state, ready, p, cx);
+        let lobby_only = ready && room.is_some();
         h_flex()
             .h(px(HEIGHT))
             .flex_shrink_0()
@@ -871,8 +899,8 @@ impl Shell {
                     .gap(px(20.))
                     .child(self.game_info(p, wide, cx))
                     .child(self.status(&state, p, cx))
-                    .children(self.room_button(&state, p, cx))
-                    .child(self.big_button(&state, p, cx)),
+                    .children(room)
+                    .when(!lobby_only, |d| d.child(self.big_button(&state, p, cx))),
             )
     }
 }

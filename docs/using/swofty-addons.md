@@ -46,6 +46,8 @@ PolyphoniX Native is a shader: the PolyphoniX Native look from Assetto Corsa's C
 - Every slider changes the picture straight away under **ADDON SETTINGS** in game.
 - It needs Swofty Launcher 1.7.12 or later.
 
+Keys do not fire while you type in a text box in the game, such as naming your team.
+
 | Setting | Id | Default | Does |
 |---|---|---|---|
 | On/off key | `toggle_key` | `B` | The key that turns it on and off while F1 25 is in front |
