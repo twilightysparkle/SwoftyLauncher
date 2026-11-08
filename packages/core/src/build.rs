@@ -917,6 +917,11 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
             .map(|f| f.erp.resources.into_iter().map(|r| r.name).collect())
             .unwrap_or_default()
     };
+    let mipmap_names = |origin: &Origin, src: &Source| -> Vec<String> {
+        src.resolve(&source_dir(store, &origin.addon, src.root))
+            .map(|p| crate::erpbuild::mipmap_names(&p))
+            .unwrap_or_default()
+    };
     let mut lenient = packages.clone();
     if let Some(core) = addons.get(CORE_ID) {
         lenient.insert(CORE_ID.to_owned(), core.name.clone());
@@ -924,7 +929,8 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
     let mut planner = Planner::new(&features, &config.runtime_assets)
         .build_only(&config.build_assets)
         .lenient(lenient)
-        .overlays(&overlay_names);
+        .overlays(&overlay_names)
+        .mipmaps(&mipmap_names);
     if features != Features::default() {
         hasher.update(format!("runtime {features:?} {:?};", config.runtime_assets));
         if !config.build_assets.is_empty() {
@@ -1441,12 +1447,22 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
     if let Some(asked) = room_asked {
         hasher.update(format!("room {asked};"));
     }
+    let core_left_out = crate::stdlib::reports::Conflicts::read(&store.root, Some(&game.dir))
+        .map(|c| c.left_out)
+        .unwrap_or_default();
+    let core_warning = crate::stdlib::reports::left_out_warning(
+        &core_left_out,
+        &BTreeMap::new(),
+        &resolved.order,
+        &|id: &str| addons.get(id).map_or(id, |m| m.name.as_str()).to_owned(),
+    );
     let lent_ids = crate::row_ids::lent().filter(|o| o.stamp(&resolved.order).is_some());
     if let Some(stamp) = lent_ids.as_ref().and_then(|o| o.stamp(&resolved.order)) {
         hasher.update(stamp);
     }
     built.buildhash = hex(&hasher.finalize())[..16].to_owned();
     built.overlay = store.overlay_dir(profile, &built.buildhash);
+    built.warnings.extend(core_warning);
     let (lines_at, warnings_at) = (built.lines.len(), built.warnings.len());
     if let Some(saved) = Saved::load(&built.overlay, &built.buildhash).filter(|s| s.usable(store, game)) {
         saved.restore(&mut built)?;
@@ -1557,6 +1573,16 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
         built.lines.extend(db_report.lines);
         built.warnings.extend(db_report.warnings);
         built.warnings.extend(planner.take_skipped());
+        let id_left_out = planner.take_id_left_out();
+        if !id_left_out.is_empty() {
+            let name = |id: &str| addons.get(id).map_or(id, |m| m.name.as_str()).to_owned();
+            built.warnings.extend(crate::stdlib::reports::left_out_warning(
+                &BTreeMap::new(),
+                &id_left_out,
+                &resolved.order,
+                &name,
+            ));
+        }
         let mut kept: BTreeMap<String, usize> = BTreeMap::new();
         for key in crate::tracks::keep_changes(&mut db, &shipped_db, &track_changes) {
             let by = planner

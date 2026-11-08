@@ -11,8 +11,8 @@ use crate::conflicts::Changes;
 use crate::dbedit::deps::Copy;
 use crate::entrant_lists::StockLists;
 use crate::ops::{
-    DbOps, DbReport, ErpOp, FieldNames, MovedStatId, RowIds, apply_db_ops_lenient, explicit_stat_ids, no_row,
-    stat_id_ceiling,
+    DbOps, DbReport, ErpOp, FieldNames, MovedStatId, RowIds, apply_db_ops_lenient, explicit_stat_ids,
+    ids_exhausted, no_row, stat_id_ceiling,
 };
 use crate::owned::{self, Added};
 use crate::rowkeys::{Names, RowKeys};
@@ -260,6 +260,7 @@ pub struct Planner<'a> {
     removals: usize,
     fields: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     skipped: Vec<String>,
+    id_left_out: BTreeMap<String, usize>,
     waits: BTreeSet<(String, String)>,
     stock_removals: BTreeMap<String, usize>,
     track_removals: BTreeMap<String, usize>,
@@ -270,11 +271,15 @@ pub struct Planner<'a> {
     core_rows: BTreeMap<String, BTreeSet<String>>,
     touched: BTreeMap<String, Touched>,
     overlays: Option<&'a OverlayNames<'a>>,
+    mipmaps: Option<&'a MipmapNames<'a>>,
     row_ids: Option<RefCell<crate::row_ids::Store>>,
 }
 
 /// The resource names in an `erp.overlay` op's archive.
 pub type OverlayNames<'a> = dyn Fn(&Origin, &Source) -> Vec<String> + 'a;
+
+/// The file names in an `erp.add-mipmaps` op's source folder; empty when the source is a single file.
+pub type MipmapNames<'a> = dyn Fn(&Origin, &Source) -> Vec<String> + 'a;
 
 #[derive(Default)]
 struct Touched {
@@ -357,6 +362,7 @@ impl<'a> Planner<'a> {
             removals: 0,
             fields: BTreeMap::new(),
             skipped: Vec::new(),
+            id_left_out: BTreeMap::new(),
             waits: BTreeSet::new(),
             stock_removals: BTreeMap::new(),
             track_removals: BTreeMap::new(),
@@ -367,12 +373,18 @@ impl<'a> Planner<'a> {
             core_rows: BTreeMap::new(),
             touched: BTreeMap::new(),
             overlays: None,
+            mipmaps: None,
             row_ids: None,
         }
     }
 
     pub fn overlays(mut self, names: &'a OverlayNames<'a>) -> Self {
         self.overlays = Some(names);
+        self
+    }
+
+    pub fn mipmaps(mut self, names: &'a MipmapNames<'a>) -> Self {
+        self.mipmaps = Some(names);
         self
     }
 
@@ -456,8 +468,20 @@ impl<'a> Planner<'a> {
 
     pub fn push(&mut self, op: Op) {
         self.rank(&op.origin);
-        if let Some((target, replaces)) = target(&op.op) {
+        let placed: Vec<String> = match (&op.op, self.mipmaps) {
+            (AssetOp::Erp(ErpOp::AddMipmaps { source, target }), Some(names)) => names(&op.origin, source)
+                .iter()
+                .map(|rel| crate::erpbuild::mipmap_path(target, rel))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if placed.is_empty()
+            && let Some((target, replaces)) = target(&op.op)
+        {
             self.write(target, &op.origin, replaces);
+        }
+        for path in placed {
+            self.write(Target::File(path), &op.origin, true);
         }
         if let (AssetOp::Erp(ErpOp::Overlay { erps, source }), Some(names)) = (&op.op, self.overlays) {
             for uri in names(&op.origin, source) {
@@ -878,6 +902,17 @@ impl<'a> Planner<'a> {
     // An op on a row that only the core adds at the game's start cannot apply in the build: it is skipped with a warning.
     fn settle(&mut self, origin: &Origin, errors: Vec<swofty_addon::Error>, last: bool) -> Result<()> {
         let mut errors = errors;
+        let no_id = errors.iter().filter(|e| ids_exhausted(e)).count();
+        if no_id > 0 || (!errors.is_empty() && self.id_left_out.contains_key(&origin.addon)) {
+            *self.id_left_out.entry(origin.addon.clone()).or_default() += no_id;
+            self.skipped.extend(errors.iter().map(|e| {
+                format!(
+                    "{origin}: left out: {}; a change that depends on a row left out is left out too",
+                    e.to_string().trim_start_matches("applying ")
+                )
+            }));
+            return Ok(());
+        }
         if last {
             let (core, rest): (Vec<_>, Vec<_>) = errors
                 .into_iter()
@@ -1030,6 +1065,12 @@ impl<'a> Planner<'a> {
             .iter()
             .max_by_key(|w| self.ranks.iter().position(|o| o == *w))
             .map(|w| w.addon.as_str())
+    }
+
+    /// The addons whose cars or teams the last `apply_db` left out for want of a free stat id, with how many
+    /// of their rows got none.
+    pub fn take_id_left_out(&mut self) -> BTreeMap<String, usize> {
+        std::mem::take(&mut self.id_left_out)
     }
 
     /// Lenient addons' changes the last `apply_db` could not apply.
@@ -1356,6 +1397,57 @@ mod tests {
         p.push(op("b", &remove("r")));
         assert_eq!(p.route(Kind::Erp), Route::Build);
         assert_eq!(p.route_note(Kind::Erp), None);
+    }
+
+    fn mipmap_conflicts(files: &[(&str, &[&str])], ops: &[(&str, &str)]) -> Vec<String> {
+        let features = Features {
+            stable: BTreeSet::from([Kind::Erp, Kind::Db]),
+            experimental: BTreeSet::new(),
+        };
+        let none = BTreeSet::new();
+        let names = |_: &Origin, src: &Source| -> Vec<String> {
+            files
+                .iter()
+                .find(|(path, _)| *path == src.path)
+                .map(|(_, names)| names.iter().map(|n| (*n).to_owned()).collect())
+                .unwrap_or_default()
+        };
+        let mut p = Planner::new(&features, &none).mipmaps(&names);
+        for (addon, source) in ops {
+            p.push(op(
+                addon,
+                &format!(
+                    r#"{{"op":"erp.add-mipmaps","source":"{source}","target":"environment_package/core_assets/objects/textures/main_front_end/names/"}}"#
+                ),
+            ));
+        }
+        p.finish().conflicts.iter().map(Conflict::to_string).collect()
+    }
+
+    #[test]
+    fn folder_mipmaps_with_different_names_do_not_overlap() {
+        let shown = mipmap_conflicts(
+            &[("m", &["s0_a.mipmaps", "s0_b.mipmaps"]), ("n", &["s1_a.mipmaps"])],
+            &[("a", "m"), ("b", "n")],
+        );
+        assert!(shown.is_empty(), "{shown:?}");
+    }
+
+    #[test]
+    fn folder_mipmaps_with_the_same_name_overlap_once() {
+        let shown = mipmap_conflicts(
+            &[
+                ("m", &["s0_a.mipmaps", "shared.mipmaps"]),
+                ("n", &["s1_a.mipmaps", "shared.mipmaps"]),
+            ],
+            &[("a", "m"), ("b", "n")],
+        );
+        assert_eq!(
+            shown,
+            [
+                "environment_package/core_assets/objects/textures/main_front_end/names/shared.mipmaps: b overrides a"
+            ]
+        );
     }
 
     fn lists() -> Gvdb {
