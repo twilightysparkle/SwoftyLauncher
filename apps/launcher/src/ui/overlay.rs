@@ -1,6 +1,9 @@
-use gpui_kit::component::{TITLE_BAR_HEIGHT, h_flex};
+use gpui_kit::component::{TITLE_BAR_HEIGHT, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+
+use crate::scale::px;
+use crate::theme::Palette;
 
 type Dismiss = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 
@@ -11,6 +14,7 @@ pub(crate) struct Overlay {
     id: ElementId,
     scrim: Hsla,
     below_title_bar: bool,
+    scrolls: bool,
     on_dismiss: Option<Dismiss>,
     children: Vec<AnyElement>,
 }
@@ -21,6 +25,7 @@ impl Overlay {
             id: id.into(),
             scrim: hsla(0., 0., 0., 0.42),
             below_title_bar: false,
+            scrolls: false,
             on_dismiss: None,
             children: Vec::new(),
         }
@@ -44,6 +49,12 @@ impl Overlay {
         self
     }
 
+    /// Scroll the content when it is taller than the window.
+    pub(crate) fn scrolls(mut self) -> Self {
+        self.scrolls = true;
+        self
+    }
+
     /// Called when the scrim itself (not the panel) is clicked.
     pub(crate) fn on_dismiss(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_dismiss = Some(Box::new(f));
@@ -58,11 +69,15 @@ impl ParentElement for Overlay {
 }
 
 impl RenderOnce for Overlay {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
         let dismiss = self.on_dismiss.map(std::rc::Rc::new);
         let panel = div()
             .id((self.id.clone(), "panel"))
             .on_click(|_, _, cx| cx.stop_propagation())
+            .when(self.scrolls, |d| {
+                d.max_h(window.viewport_size().height - TITLE_BAR_HEIGHT - px(32.))
+                    .overflow_y_scroll()
+            })
             .children(self.children);
         h_flex()
             .id(self.id)
@@ -80,4 +95,21 @@ impl RenderOnce for Overlay {
             .when_some(dismiss, |d, f| d.on_click(move |_, window, cx| f(window, cx)))
             .child(panel)
     }
+}
+
+/// The root of a page-replacing screen (the welcome wizard): opaque, full size,
+/// with the app's text defaults. Its title bar comes from [`title_bar`].
+pub(crate) fn takeover(id: impl Into<ElementId>, p: Palette) -> Stateful<Div> {
+    v_flex()
+        .id(id)
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .bg(p.background)
+        .text_color(p.text)
+        .text_size(px(14.))
+}
+
+pub(crate) fn title_bar(p: Palette) -> TitleBar {
+    TitleBar::new().bg(p.chrome)
 }

@@ -18,19 +18,27 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
+/// `bytes` for disk space: GB from one gigabyte, else MB.
+pub fn size_coarse(bytes: u64) -> String {
+    if bytes >= 1 << 30 {
+        format!("{} GB", swofty_core::disk::gb(bytes))
+    } else {
+        format!("{} MB", bytes.div_ceil(1 << 20))
+    }
+}
+
 /// A fraction (0 to 1) as a whole percent: `0.42` is `42%`.
 pub fn percent(fraction: f32) -> String {
     format!("{:.0}%", fraction * 100.)
 }
 
-/// A count in short form: `950`, `1.2k`, `3.4M`. The browser keeps its own copy until
-/// it moves to this one.
-#[allow(dead_code)]
+/// A count in short form: `950`, `1.2k`, `41k`, `3.4M`.
 pub fn compact(n: u64) -> String {
     match n {
         0..1000 => n.to_string(),
-        1000..1_000_000 => format!("{:.1}k", n as f64 / 1000.),
-        _ => format!("{:.1}M", n as f64 / 1_000_000.),
+        1000..10_000 => format!("{:.1}k", n as f64 / 1000.),
+        10_000..1_000_000 => format!("{}k", n / 1000),
+        _ => format!("{:.1}M", n as f64 / 1e6),
     }
 }
 
@@ -65,6 +73,20 @@ fn now_secs() -> f64 {
         .map_or(0., |d| d.as_secs_f64())
 }
 
+/// An id as words: `team_simplified` becomes `Team Simplified`.
+pub fn title_case(word: &str) -> String {
+    word.split(['_', '-'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +97,14 @@ mod tests {
         assert_eq!(size(2048), "2 KB");
         assert_eq!(size(5 << 20), "5.0 MB");
         assert_eq!(size(3 << 30), "3.00 GB");
+    }
+
+    #[test]
+    fn disk_sizes_are_coarse() {
+        assert_eq!(size_coarse(0), "0 MB");
+        assert_eq!(size_coarse(1), "1 MB");
+        assert_eq!(size_coarse(5 << 20), "5 MB");
+        assert_eq!(size_coarse(3 << 29), "1.5 GB");
     }
 
     #[test]
