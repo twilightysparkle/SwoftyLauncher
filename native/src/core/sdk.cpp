@@ -278,7 +278,9 @@ void ready()
     postfx_setup();
     grade_setup();
     srv_clamp_setup();
+    live_setup();
     telemetry_setup();
+    lap_rec_setup();
     placed_record_setup();
     net_trace_setup();
     udp_ids_setup();

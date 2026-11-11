@@ -3,6 +3,7 @@
 #include "hud_drawlist.hpp"
 #include "hud_font_atlas.hpp"
 #include "hud_image.hpp"
+#include "main_menu.hpp"
 #include "hud_input.hpp"
 #include "text_entry.hpp"
 #include "hud_guard.hpp"
@@ -149,17 +150,26 @@ bool killed(const char *what)
 
 std::wstring hardware_settings_path();
 
-bool before_fg_wanted()
+int before_fg_forced()
 {
-    static const bool on = [] {
-        int forced = -1;
+    static const int forced = [] {
+        int f = -1;
         char v[8] = {};
         DWORD n = GetEnvironmentVariableA("SWOFTY_OVERLAY_FG", v, sizeof v);
         const json::Value &j = runtime::config()["overlay_fg"];
         if (n && n < sizeof v)
-            forced = v[0] != '0' && v[0] != '\0';
+            f = v[0] != '0' && v[0] != '\0';
         else if (j.type == json::Value::Bool)
-            forced = j.b;
+            f = j.b;
+        return f;
+    }();
+    return forced;
+}
+
+bool before_fg_wanted()
+{
+    static const bool on = [] {
+        int forced = before_fg_forced();
         std::wstring path = forced < 0 ? hardware_settings_path() : std::wstring();
         hud::guard::FgSetting game;
         if (!path.empty())
@@ -168,6 +178,22 @@ bool before_fg_wanted()
     }();
     return on;
 }
+
+// RivaTuner Statistics Server attaches to the process when the probe window is made, so this is asked after
+// arm_swapchain; its shared memory names it when it runs but has not attached yet.
+std::string device_hook_rival()
+{
+    for (auto name : hud::guard::DEVICE_HOOK_RIVALS)
+        if (GetModuleHandleA(std::string(name).c_str()))
+            return std::string(name);
+    if (HANDLE rtss = OpenFileMappingW(FILE_MAP_READ, FALSE, L"RTSSSharedMemoryV2")) {
+        CloseHandle(rtss);
+        return "RTSSHooks64.dll (RivaTuner Statistics Server is running)";
+    }
+    return {};
+}
+
+std::string device_hook_rival_seen;
 
 std::vector<std::pair<void *, bool>> told;
 std::vector<void *> unknown_told;
@@ -1560,6 +1586,7 @@ hud::Frame &build_frame(const std::vector<hud::Paintsub> &subs, UINT width, UINT
         hud::build(subs, frame, float(width), float(height), overlay_off());
         draw_cursor(frame);
         runtime::room_cover::paint(frame, now);
+        runtime::main_menu::paint(frame, now);
     }
     flush_stats(now);
     if (frame.dropped && !dropped_told) {
@@ -1620,7 +1647,14 @@ void draw_frame(IDXGISwapChain3 *sc, const d3d12hooks::Swapchain *known, void *)
         subs = reg.subs();
     }
     bool cover = runtime::room_cover::active();
-    if (subs.empty() && !cap.on && !cover) {
+    bool menu = runtime::main_menu::drawing();
+    if (menu) {
+        static bool told = false;
+        if (!std::exchange(told, true))
+            swofty::log("[main-menu] the present hook passed its first frame with the main menu panel due (%zu paint callback(s))",
+                        subs.size());
+    }
+    if (subs.empty() && !cap.on && !cover && !menu) {
         drop_pending();
         return;
     }
@@ -1649,19 +1683,22 @@ void draw_frame(IDXGISwapChain3 *sc, const d3d12hooks::Swapchain *known, void *)
         if (!hud::guard::draws_before_present(gate, device_hooked)) {
             fg_active.store(false);
             drop_pending();
+            std::string why = device_hook_rival_seen.empty()
+                                  ? "frame generation was off when the game started, or SWOFTY_OVERLAY_FG=0 / "
+                                    "\"overlay_fg\": false"
+                                  : device_hook_rival_seen + " hooks the same D3D12 entry points";
             if (fg_named) {
                 if (fresh)
                     swofty::log("[overlay] frame generation (%s) owns swapchain %p and the core's D3D12 device hooks "
-                                "did not arm (drawing before frame generation is off: frame generation was off when the game "
-                                "started, or SWOFTY_OVERLAY_FG=0 / \"overlay_fg\": false); the overlay does not draw on it",
-                                c.fg.c_str(), static_cast<void *>(sc));
+                                "did not arm (drawing before frame generation is off: %s); the overlay does not draw on it",
+                                c.fg.c_str(), static_cast<void *>(sc), why.c_str());
             } else if (!fg_watch.told || fresh) {
                 swofty::log("[overlay] swapchain %p was created through %s, frame generation is not off in the game's "
-                            "settings and drawing before frame generation is off (frame generation was off when the game "
-                            "started, or SWOFTY_OVERLAY_FG=0 / \"overlay_fg\": false); the overlay does not draw on it",
+                            "settings and drawing before frame generation is off (%s); the overlay does not draw on it",
                             static_cast<void *>(sc),
                             ffx ? "FidelityFX (amd_fidelityfx_dx12.dll)"
-                                : "Streamline's frame generation hook (sl.dlss_g.dll)");
+                                : "Streamline's frame generation hook (sl.dlss_g.dll)",
+                            why.c_str());
             }
             return;
         }
@@ -1677,7 +1714,7 @@ void draw_frame(IDXGISwapChain3 *sc, const d3d12hooks::Swapchain *known, void *)
         }
         fg_active.store(true);
         bool addons = !subs.empty() && !killed("paint");
-        if (addons || cover) {
+        if (addons || cover || menu) {
             hud::Frame &frame = build_frame(addons ? subs : std::vector<hud::Paintsub>(), desc.BufferDesc.Width,
                                             desc.BufferDesc.Height, now);
             keep_pending(sc, frame, desc, color_space, now);
@@ -1728,7 +1765,7 @@ void draw_frame(IDXGISwapChain3 *sc, const d3d12hooks::Swapchain *known, void *)
                     desc.BufferDesc.Height, int(desc.BufferDesc.Format), desc.BufferCount, c.by.c_str());
     }
     bool addons = !subs.empty() && !killed("paint");
-    if (addons || cover)
+    if (addons || cover || menu)
         paint_frame(sc, c.queue, addons ? subs : std::vector<hud::Paintsub>(), desc, now, color_space);
     if (cap.on && !killed("capture"))
         capture_step(sc, c.queue, desc, now);
@@ -1754,26 +1791,46 @@ bool resolve_d3d12()
     return false;
 }
 
+void arm_before_fg();
+
 bool arm()
 {
     if (!resolve_d3d12())
         return false;
     d3d12hooks::on_present(draw_frame);
     d3d12hooks::on_presented(presented);
-    if (before_fg_wanted()) {
-        d3d12hooks::on_setname(on_setname);
-        d3d12hooks::on_barrier(on_barrier);
-        d3d12hooks::on_exec(on_exec);
-        d3d12hooks::ProbeScope probe;
-        device_hooked = d3d12hooks::arm_device();
-        if (!device_hooked)
-            swofty::log("[overlay] the core's D3D12 device hooks did not arm; the overlay cannot draw when frame "
-                        "generation owns the swapchain");
-        else
-            swofty::log("[overlay] drawing before frame generation is on (frame generation is on in the game's "
-                        "settings, or SWOFTY_OVERLAY_FG / \"overlay_fg\")");
+    d3d12hooks::ProbeScope probe;
+    bool swapchain = d3d12hooks::arm_swapchain();
+    if (before_fg_wanted())
+        arm_before_fg();
+    return swapchain;
+}
+
+void arm_before_fg()
+{
+    std::string rival = device_hook_rival();
+    if (!hud::guard::device_hooks_allowed(rival, before_fg_forced())) {
+        device_hook_rival_seen = rival;
+        swofty::log("[overlay] %s hooks the D3D12 entry points the core's device hooks use, so they are not armed: the "
+                    "overlay draws at Present as before 1.8.38 and does not draw while frame generation is on "
+                    "(SWOFTY_OVERLAY_FG=1 / \"overlay_fg\": true arms them anyway)",
+                    rival.c_str());
+        return;
     }
-    return d3d12hooks::arm_swapchain();
+    if (!rival.empty())
+        swofty::log("[overlay] %s is in the process; the core's device hooks arm anyway on SWOFTY_OVERLAY_FG / "
+                    "\"overlay_fg\"",
+                    rival.c_str());
+    d3d12hooks::on_setname(on_setname);
+    d3d12hooks::on_barrier(on_barrier);
+    d3d12hooks::on_exec(on_exec);
+    device_hooked = d3d12hooks::arm_device();
+    if (!device_hooked)
+        swofty::log("[overlay] the core's D3D12 device hooks did not arm; the overlay cannot draw when frame "
+                    "generation owns the swapchain");
+    else
+        swofty::log("[overlay] drawing before frame generation is on (frame generation is on in the game's "
+                    "settings, or SWOFTY_OVERLAY_FG / \"overlay_fg\")");
 }
 
 // ----- SwoftyOverlay table ----------------------------------------------------------------------
@@ -2183,16 +2240,19 @@ void setup()
     capture_setup();
     bool on = gate_on();
     bool cover = runtime::room_cover::setup();
+    bool menu = runtime::main_menu::wants_overlay();
+    if (menu)
+        swofty::log("[main-menu] the present hook arms for the main menu panel and video card");
     if (cover)
         swofty::log("[cover] a direct start is requested; the present hook arms for its cover screen");
-    if (!on && !cap.on && !cover) {
+    if (!on && !cap.on && !cover && !menu) {
         swofty::log("[overlay] the overlay feature is experimental and off; the HUD present hook is not armed");
         return;
     }
     if (!on && cap.on)
         swofty::log("[overlay] the overlay is off; the present hook arms for SWOFTY_FRAME_CAPTURE only");
     implemented = on;
-    if (on || cover) {
+    if (on || cover || menu) {
         renderer.font_tried = true;
         if (!hud::img::grey(hud::font::ATLAS_PNG, hud::font::ATLAS_PNG_SIZE, renderer.font_px))
             swofty::log("[overlay] decoding the built-in font atlas failed; text draws nothing");
@@ -2253,6 +2313,60 @@ int frame_capture_poll(std::string *why)
     if (cap.request_state < 0 && why)
         *why = cap.request_why;
     return cap.request_state;
+}
+
+}
+
+namespace runtime {
+
+int overlay_image(const std::string &id, const std::string &path, uint32_t *width, uint32_t *height)
+{
+    static std::mutex failed_lock;
+    static std::vector<std::string> failed;
+    std::string key = id + "|" + path;
+    {
+        std::lock_guard<std::mutex> g(reg_lock);
+        int slot = reg.find_image(id);
+        const hud::Image *im = slot >= 0 ? reg.image(slot) : nullptr;
+        if (im && im->generation > 0 && im->source == key) {
+            if (width)
+                *width = im->width;
+            if (height)
+                *height = im->height;
+            return slot;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> f(failed_lock);
+        if (std::find(failed.begin(), failed.end(), key) != failed.end())
+            return -1;
+    }
+    std::string why;
+    hud::img::Pixels px;
+    std::wstring wpath = path.rfind("swofty:", 0) == 0 ? runtime::under_swofty(path.substr(7)) : runtime::wide(path);
+    std::string data = runtime::read_file(wpath, size_t(8) << 20);
+    if (data.empty() || !hud::img::decode(data, px, why)) {
+        swofty::log("[overlay] main menu image %s: %s", path.c_str(), data.empty() ? "unreadable" : why.c_str());
+        std::lock_guard<std::mutex> f(failed_lock);
+        failed.push_back(key);
+        return -1;
+    }
+    uint32_t w = px.width, h = px.height;
+    int slot;
+    {
+        std::lock_guard<std::mutex> g(reg_lock);
+        slot = reg.set_image(id, w, h, std::move(px.rgba));
+        if (slot >= 0)
+            reg.set_source(slot, key);
+    }
+    if (slot + 1 >= int(TEX_MAX))
+        return -1;
+    swofty::log("[overlay] main menu image %s (%ux%u) loaded (slot %d)", path.c_str(), w, h, slot);
+    if (width)
+        *width = w;
+    if (height)
+        *height = h;
+    return slot;
 }
 
 }

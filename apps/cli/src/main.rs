@@ -3,6 +3,8 @@ mod db;
 mod dev;
 mod doctor;
 mod ea;
+mod hud;
+mod laps;
 mod offline;
 mod postfx;
 mod recover;
@@ -162,6 +164,11 @@ enum Command {
     Saves(saves::SavesCommand),
     #[command(
         subcommand,
+        about = "Time Trial boards: the laps waiting to upload and the ones sent"
+    )]
+    Laps(laps::LapsCommand),
+    #[command(
+        subcommand,
         about = "Test addons in the game: plan the game starts, run the tests and write the report"
     )]
     Test(testing::TestCommand),
@@ -175,6 +182,11 @@ enum Command {
         about = "The addon registry: check dependencies, and show the core's conflicts and status from your last session"
     )]
     Registry(registry::RegistryCommand),
+    #[command(
+        subcommand,
+        about = "The HUD composer: check the stock dial facts and compose an addon's hud.element records"
+    )]
+    Hud(hud::HudCommand),
     #[command(about = "List every career in the career index, the profile that started it and what it needs")]
     Careers,
     #[command(about = "Check for a new release and install it into this copy")]
@@ -578,6 +590,7 @@ fn dispatch(store: &Store, cli: Cli) -> Result<ExitCode> {
         Command::Doctor => doctor::doctor(&store),
         Command::Game(cmd) => game(&store, cmd).map(|_| ExitCode::SUCCESS),
         Command::Saves(cmd) => saves::command(&store, cmd),
+        Command::Laps(cmd) => laps::command(&store, &profile, cmd),
         Command::Steam { start } => run::steam_check(&store, start),
         Command::Postfx(cmd) => postfx::command(cmd),
         Command::Shaders(cmd) => shaders::command(&store, &profile, cmd),
@@ -585,6 +598,7 @@ fn dispatch(store: &Store, cli: Cli) -> Result<ExitCode> {
         Command::Dev(cmd) => dev::command(&store, &profile, cmd),
         Command::Update { check } => update::update(check),
         Command::Registry(cmd) => registry::command(&store, &profile, cmd),
+        Command::Hud(cmd) => hud::command(&store, cmd),
         Command::Careers => registry::careers(&store, &profile).map(|_| ExitCode::SUCCESS),
     }
 }
