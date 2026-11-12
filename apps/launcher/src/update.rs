@@ -468,9 +468,14 @@ impl Shell {
                 Some(
                     row.child(dot(p.accent))
                         .child(text(format!(
-                            "Update required: {}. The launcher restarts afterwards.",
+                            "Update available: {}. The launcher restarts afterwards.",
                             changes.join(" and ")
                         )))
+                        .child(
+                            link("update-now", "Update now", p)
+                                .flex_shrink_0()
+                                .on_click(cx.listener(|this, _, window, cx| this.start_updates(window, cx))),
+                        )
                         .when_some(notes, |d, notes| {
                             d.child(
                                 link("update-notes", "Release notes", p)
@@ -516,9 +521,9 @@ impl Shell {
                         )
                         .when(gate == Gate::Retry, |d| {
                             d.child(
-                                link("play-anyway", "Play without updating", p)
-                                    .flex_shrink_0()
-                                    .on_click(cx.listener(|this, _, window, cx| this.play(window, cx))),
+                                link("retry-update", "Retry update", p).flex_shrink_0().on_click(
+                                    cx.listener(|this, _, window, cx| this.start_updates(window, cx)),
+                                ),
                             )
                         })
                         .when(gate == Gate::Play && u.held.is_some(), |d| {

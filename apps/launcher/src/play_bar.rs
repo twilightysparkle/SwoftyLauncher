@@ -283,11 +283,21 @@ impl Shell {
                 )
             });
         }
-        if let Some(row) = self.update_status(self.update_gate(state), status_row(), p, cx) {
-            return row;
-        }
-        if let Some(row) = self.addon_update_status(state, status_row(), p, cx) {
-            return row;
+        // The launcher's update and the addon updates are separate lines; both show when both are pending.
+        let launcher = self.update_status(self.update_gate(state), status_row(), p, cx);
+        let addons = self.addon_update_status(state, status_row(), p, cx);
+        match (launcher, addons) {
+            (Some(launcher), Some(addons)) => {
+                return v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_center()
+                    .gap(px(2.))
+                    .child(launcher)
+                    .child(addons);
+            }
+            (Some(row), None) | (None, Some(row)) => return row,
+            (None, None) => {}
         }
         let rebuild = !self.library.profile.is_vanilla() && !self.library.rebuild.is_empty();
         match state {
@@ -629,7 +639,8 @@ impl Shell {
 
     fn big_button(&self, state: &PlayState, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let gate = self.update_gate(state);
-        if gate != Gate::Play {
+        // A pending update never takes the Play button; only a running update does.
+        if matches!(gate, Gate::Installing | Gate::Restarting) {
             return self.update_button(gate, p, cx);
         }
         if self.addon_update_takes_play(state) {

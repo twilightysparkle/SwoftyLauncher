@@ -82,9 +82,9 @@ impl Shell {
         self.browser.batch.as_ref().is_some_and(|b| !b.left.is_empty())
     }
 
-    pub(crate) fn addon_update_takes_play(&self, state: &PlayState) -> bool {
+    /// Only a running update takes the Play button; pending updates are offered next to it.
+    pub(crate) fn addon_update_takes_play(&self, _state: &PlayState) -> bool {
         self.updating_addons()
-            || (matches!(state, PlayState::Ready | PlayState::Crashed(_)) && !self.addon_updates().is_empty())
     }
 
     pub(super) fn update_addons(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -298,10 +298,18 @@ impl Shell {
                 .iter()
                 .map(|u| format!("{} {} → {}", u.name, u.installed, u.to.version))
                 .collect();
-            return Some(row.child(dot(p.accent)).child(text(trf!(
-                "Addon updates: {changes}.",
-                changes = changes.join(", ")
-            ))));
+            return Some(
+                row.child(dot(p.accent))
+                    .child(text(trf!(
+                        "Addon updates: {changes}.",
+                        changes = changes.join(", ")
+                    )))
+                    .child(
+                        link("addon-updates-now", tr("Update addons"), p)
+                            .flex_shrink_0()
+                            .on_click(cx.listener(|this, _, window, cx| this.update_addons(window, cx))),
+                    ),
+            );
         }
         let failed: Vec<String> = self
             .browser

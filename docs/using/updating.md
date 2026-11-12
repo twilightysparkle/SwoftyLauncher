@@ -9,17 +9,17 @@ The launcher keeps itself and Simplified for Swofty, the addon behind the **Mods
 
 ## Update the launcher
 
-The launcher checks for a new launcher release and a new Simplified for Swofty release when it opens, then every minute while it's open. When either is available, **Play** becomes **Update**. The button names what will update, and the line next to it shows the versions and a link to the release notes.
+The launcher checks for a new launcher release and a new Simplified for Swofty release when it opens, then every minute while it's open. When either is available, a line next to **Play** shows the versions, an **Update now** link and a link to the release notes. **Play** stays available, so an update never stops you from playing.
 
-1. Close F1 25. While the game runs, you'll keep the **Stop** button; **Update** appears once the game exits.
-2. Select **Update**. It installs the launcher first, then Simplified for Swofty, and shows the progress on the button. The launcher downloads from cdn.swofty.net, and from GitHub when cdn.swofty.net is unreachable or has no usable release listing. Each launcher download is checked against the SHA-256 its release lists. The launcher update replaces `bin/`, `loader/` and, on Linux, `share/`, and removes the `addons/` folder that launchers before 1.4.0 carried.
+1. Close F1 25. The update starts only while the game is not running.
+2. Select **Update now**. It installs the launcher first, then Simplified for Swofty, and shows the progress on the button. The launcher downloads from cdn.swofty.net, and from GitHub when cdn.swofty.net is unreachable or has no usable release listing. Each launcher download is checked against the SHA-256 its release lists. The launcher update replaces `bin/`, `loader/` and, on Linux, `share/`, and removes the `addons/` folder that launchers before 1.4.0 carried.
 3. The launcher restarts on its own when the update finishes, including when only Simplified for Swofty updated. It restarts once, into the new launcher, when both updated.
 
 A download that the connection breaks off resumes from where it stopped. When it keeps breaking, the error says to turn off antivirus HTTPS or web scanning and any VPN or proxy, or to try another network; see [If a download fails](/using/addon-browser#if-a-download-fails).
 
 If a check fails because you're offline, both cdn.swofty.net and GitHub are down or GitHub's rate limit is reached, you can still play. The launcher checks again a minute later, or when GitHub's rate limit resets.
 
-If one part of an update fails, the other part still installs. If the launcher update fails, you'll see the error next to **Retry update** and the old launcher files stay in place. Select **Retry update**, or **Play without updating** to play the version you have. If only Simplified for Swofty fails, **Play** comes back with the error and **Try again** next to it. An update interrupted partway is rolled back the next time you start the launcher.
+If one part of an update fails, the other part still installs. If the launcher update fails, you'll see the error next to **Retry update** and the old launcher files stay in place. Select **Retry update**, or just select **Play** to play the version you have. If only Simplified for Swofty fails, **Play** comes back with the error and **Try again** next to it. An update interrupted partway is rolled back the next time you start the launcher.
 
 Running the [installer](/guide/installation#install-with-the-installer) again also installs the latest release, downloaded from the same places. It finds your install and updates it in place, or [moves it](/guide/installation#update-or-move-an-existing-install) to another folder you choose.
 
@@ -58,10 +58,12 @@ These rules are for Team Simplified, who publish the addon at [TeamSimplified/si
 
 ## Addon updates
 
-The launcher compares your installed addons with the [Addon Browser](/using/addon-browser) when it opens, then every 30 minutes. When an addon that is on in your active profile has a newer version that works with your launcher, **Play** becomes **Update addons** with the number of updates, and the line next to it lists them. Updates for addons that are off do not change **Play**; they show as an update on the Addons page and in the Addon Browser, and become part of **Update addons** when you turn the addon on.
+The launcher compares your installed addons with the [Addon Browser](/using/addon-browser) when it opens, then every 30 minutes. When an addon that is on in your active profile has a newer version that works with your launcher, the line next to **Play** lists the updates and has an **Update addons** link. Updates for addons that are off do not change **Play**; they show as an update on the Addons page and in the Addon Browser, and become part of **Update addons** when you turn the addon on.
 
-1. Close F1 25. **Update addons** appears once the game exits.
-2. Select **Update addons**. Each update joins the [Downloads queue](/using/addon-browser#downloads), is checked against its SHA-256, and replaces the installed version. Its switch and settings stay as they were in every profile.
+When a launcher update and addon updates are both waiting, each has its own line next to **Play**, with its own link.
+
+1. Close F1 25. The link appears once the game exits.
+2. Select **Update addons**. **Play** is replaced by the update progress while it runs. Each update joins the [Downloads queue](/using/addon-browser#downloads), is checked against its SHA-256, and replaces the installed version. Its switch and settings stay as they were in every profile.
 3. Select the download card above the Play bar to open **Downloads** and see each update's progress or error. **Play** comes back when the batch finishes.
 
 An addon that fails to update keeps its installed version. Retry it from **Downloads** or use **Try again** beside the update error.

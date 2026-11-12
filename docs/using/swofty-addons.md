@@ -20,7 +20,7 @@ Swofty publishes most of these addons in the [Addon Browser](/using/addon-browse
 
 - **Install it:** open the **Addon Browser**, find it, and select **Install**. Follow its progress on the [Downloads page](/using/addon-browser#downloads).
 - **Turn it on:** on the **Addons** page, toggle its switch in the profile you want it in, then press **Play**. From a terminal: `swofty addons enable <id>`.
-- **Update it:** when Swofty publishes a new version, **Play** becomes **Update addons**. See [Updating](/using/updating#addon-updates).
+- **Update it:** when Swofty publishes a new version, an **Update addons** link appears next to **Play**. See [Updating](/using/updating#addon-updates).
 - **Remove it:** expand its row on the **Addons** page and select **Remove addon**. Install it again from the Addon Browser to get it back.
 
 Launchers before 1.4.0 carried these addons in an `addons/` folder next to `bin/`. Updating to 1.4.0 removes that folder; the installed copies stay installed and update from the Addon Browser.
