@@ -115,6 +115,8 @@ pub struct Config {
     pub discord_username: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub news_seen: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub dismissed_cards: BTreeSet<String>,
     /// The career vault's size cap in MB; 500 when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_cap_mb: Option<u64>,
@@ -127,6 +129,9 @@ pub struct Config {
     /// Show the Swofty boards and rival ghosts inside Time Trial; on unless turned off.
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub time_trial_ingame: bool,
+    /// Show the latest Swofty video card on the F1 25 home screen; on unless turned off.
+    #[serde(default = "on", skip_serializing_if = "is_on")]
+    pub home_video: bool,
 }
 
 fn on() -> bool {
@@ -1020,6 +1025,23 @@ mod tests {
     }
 
     #[test]
+    fn home_video_is_on_unless_turned_off() {
+        assert!(Config::default().home_video);
+        assert!(
+            !serde_json::to_string(&Config::default())
+                .unwrap()
+                .contains("home_video")
+        );
+        let off = Config {
+            home_video: false,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains(r#""home_video":false"#));
+        assert!(!serde_json::from_str::<Config>(&json).unwrap().home_video);
+    }
+
+    #[test]
     fn old_session_logs_are_kept_unless_clearing_is_turned_on() {
         assert!(!Config::default().clear_old_session_logs);
         let old: Config = serde_json::from_str(r#"{ "developer": true }"#).unwrap();
@@ -1099,6 +1121,19 @@ mod tests {
         config.news_seen.insert("discord".into());
         let back: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert!(back.news_seen.contains("discord"));
+    }
+
+    #[test]
+    fn config_remembers_dismissed_cards() {
+        let mut config = Config::default();
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("dismissed_cards")
+        );
+        config.dismissed_cards.insert("discord-banner".into());
+        let back: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(back.dismissed_cards.contains("discord-banner"));
     }
 
     fn strings(args: &[&str]) -> Vec<String> {

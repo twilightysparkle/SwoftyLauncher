@@ -3602,6 +3602,8 @@ pub type Sess_Assign_GarageSlotsByTeamOrder_t = unsafe extern "C" fn(
 );
 pub type Sess_Build_GroupResult_t =
     unsafe extern "C" fn(weekend: *mut c_void, group: u8, result: *mut c_void);
+pub type Sess_Collect_GameModeSetupModes_t =
+    unsafe extern "C" fn(out: *mut c_void, allocator: *mut c_void) -> *mut c_void;
 pub type Sess_Find_GroupRowPosition_t =
     unsafe extern "C" fn(weekend: *mut c_void, result: *mut c_void, driver_key: u32) -> *mut i32;
 pub type Sess_FormationLap_Update_t =
@@ -3626,6 +3628,12 @@ pub type Sess_Issue_TimePenalty_t =
     unsafe extern "C" fn(rules: *mut c_void, incident: *mut u8, reason: u32, seconds: u32);
 pub type Sess_Issue_Warning_t = unsafe extern "C" fn(rules: *mut c_void, incident: *mut u8, reason: u32);
 pub type Sess_Load_Teams_t = unsafe extern "C" fn(entrants_system: *mut c_void, set: u8);
+pub type Sess_Parse_EntrantList_t = unsafe extern "C" fn(
+    ordinal: *mut c_int,
+    row: *const GdbTableCursor,
+    list: *mut c_void,
+    driver_registry: *mut c_void,
+);
 pub type Sess_PitStopUpdateJob_Update_t = unsafe extern "C" fn(job: *mut c_void);
 pub type Sess_PreRaceToRace_Update_t = unsafe extern "C" fn(state: *mut c_void, route: *mut u32) -> *mut u32;
 pub type Sess_PreRace_Update_t =
@@ -12788,6 +12796,11 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Sess_Collect_GameModeSetupModes: Binding = Binding {
+        id: "Sess_Collect_GameModeSetupModes",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Sess_Complete_Update: Binding = Binding {
         id: "Sess_Complete_Update",
         kind: "func",
@@ -13515,6 +13528,11 @@ pub mod bindings {
     };
     pub const Sess_Parse_CarStateTransform: Binding = Binding {
         id: "Sess_Parse_CarStateTransform",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Sess_Parse_EntrantList: Binding = Binding {
+        id: "Sess_Parse_EntrantList",
         kind: "func",
         status: Status::Experimental,
     };
@@ -16268,6 +16286,26 @@ pub mod bindings {
         kind: "site",
         status: Status::Experimental,
     };
+    pub const site_Game_GhostlapTrace_RivalLogBoard: Binding = Binding {
+        id: "site_Game_GhostlapTrace_RivalLogBoard",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_GhostlapTrace_RivalLogDone: Binding = Binding {
+        id: "site_Game_GhostlapTrace_RivalLogDone",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_GrandPrixContinueVm_F1wCarCheck: Binding = Binding {
+        id: "site_Game_GrandPrixContinueVm_F1wCarCheck",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_GrandPrixContinueVm_F1wWarningCheck: Binding = Binding {
+        id: "site_Game_GrandPrixContinueVm_F1wWarningCheck",
+        kind: "site",
+        status: Status::Experimental,
+    };
     pub const site_Game_PitLane_BoxPoseFalse: Binding = Binding {
         id: "site_Game_PitLane_BoxPoseFalse",
         kind: "site",
@@ -16350,6 +16388,16 @@ pub mod bindings {
     };
     pub const site_Game_TimeTrialLeaderboard_BoardsDone: Binding = Binding {
         id: "site_Game_TimeTrialLeaderboard_BoardsDone",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_TimeTrial_SetReferenceLogBoard: Binding = Binding {
+        id: "site_Game_TimeTrial_SetReferenceLogBoard",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_TimeTrial_SetReferenceLogDone: Binding = Binding {
+        id: "site_Game_TimeTrial_SetReferenceLogDone",
         kind: "site",
         status: Status::Experimental,
     };

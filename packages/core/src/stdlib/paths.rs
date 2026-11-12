@@ -65,7 +65,7 @@ const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "content.package",
-        include_str!("../../../sdk/std/registries/content.package/1.2.json"),
+        include_str!("../../../sdk/std/registries/content.package/1.3.json"),
     ),
     (
         "driver.head",
@@ -105,7 +105,7 @@ const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "hud.element",
-        include_str!("../../../sdk/std/registries/hud.element/1.0.json"),
+        include_str!("../../../sdk/std/registries/hud.element/1.1.json"),
     ),
     (
         "hub.tab",

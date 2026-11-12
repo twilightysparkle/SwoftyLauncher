@@ -152,10 +152,31 @@ inline VideoCard plan_card(float k, float text_w)
     return c;
 }
 
+// The 16:9 band the front end is laid out in, centred in the frame: the full height of a 16:9 or wider frame and
+// the full width of a taller one (16:10 on a Steam Deck), with the game's backdrop above and below it.
+struct Band {
+    float left = 0, top = 0, width = 0, height = 0;
+};
+
+inline Band ui_band(float width, float height)
+{
+    Band b;
+    b.height = width * 9.0f / 16.0f < height ? width * 9.0f / 16.0f : height;
+    b.width = b.height * 16.0f / 9.0f;
+    b.left = (width - b.width) * 0.5f;
+    b.top = (height - b.height) * 0.5f;
+    return b;
+}
+
+// The panel's size unit: 1 at a band 1028 px tall.
+inline float panel_scale(float width, float height) { return ui_band(width, height).height / 1028.0f; }
+
 inline Point scene_to_px(double x, double y, float width, float height)
 {
-    float s = scene_scale(height);
-    return {width * 0.5f + float(SCENE_CENTRE_X_SHIFT) * height + s * float(x), float(SCENE_CENTRE_Y) * height - s * float(y)};
+    Band b = ui_band(width, height);
+    float s = scene_scale(b.height);
+    return {width * 0.5f + float(SCENE_CENTRE_X_SHIFT) * b.height + s * float(x),
+            b.top + float(SCENE_CENTRE_Y) * b.height - s * float(y)};
 }
 
 constexpr uint32_t djb2(const char *s)
@@ -368,6 +389,20 @@ inline const char *return_command(Mode m)
     }
 }
 
+// The card mode a session counts for, from the game mode of the session that loaded (apply::facts::mode_of names). The
+// container a card opens keeps its own tabs, so a Grand Prix card press can end in a Time Trial (or the other way round):
+// the session's mode then wins. Any other known mode has no card command; an unread or unknown mode keeps the press.
+inline Mode driven_mode(Mode pressed, const std::string &session_mode)
+{
+    if (pressed == Mode::none || session_mode.empty() || session_mode == "unknown")
+        return pressed;
+    if (session_mode == "time_trial")
+        return Mode::time_trial;
+    if (session_mode == "grand_prix")
+        return Mode::grand_prix;
+    return Mode::none;
+}
+
 enum class Back { stock, route, home, twostep };
 
 inline Back back_variant_of(const std::string &v, bool data_in_build)
@@ -435,6 +470,22 @@ inline EntryPointWrite entry_point_write(uintptr_t resolved, bool writable)
 inline bool migrate_failed(const std::string &text)
 {
     return text.find("failed to migrate") != std::string::npos || text.find("No screen called") != std::string::npos;
+}
+
+// A Migrate command is logged when it fails or moves the tracked flow, not on every migrate.
+inline bool migrate_logged(bool failed, const std::string &flow, const std::string &flow_before)
+{
+    return failed || (!flow.empty() && flow != flow_before);
+}
+
+// One VirtualQuery answer (state committed or not, protection, region base and size) says whether n bytes at p can be written.
+// The protection values are the Windows PAGE_* constants.
+inline bool region_writable(bool committed, uint32_t protect, uintptr_t base, uint64_t size, uintptr_t p, size_t n)
+{
+    constexpr uint32_t NOACCESS = 0x01, GUARD = 0x100, WRITABLE = 0x04 | 0x08 | 0x40 | 0x80;
+    if (!p || !committed || (protect & (NOACCESS | GUARD)) || !(protect & WRITABLE))
+        return false;
+    return p >= base && p + n <= base + size;
 }
 
 // A session that ended after a Time Trial or Grand Prix card press hands over to the f1_world flow's container; the

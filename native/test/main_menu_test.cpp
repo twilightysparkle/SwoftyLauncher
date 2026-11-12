@@ -109,6 +109,18 @@ int main()
         expect(std::abs(big.thumb_w / big.thumb_h - 16.0 / 9.0) < 1e-4, "the thumbnail is 16:9");
         auto br = mm::scene_to_px(mm::CARD_RIGHT_X, mm::CARD_BOTTOM_Y, 1908, 1028);
         expect(br.x > 1795 && br.x < 1805 && br.y > 950 && br.y < 962, "the card's right and bottom anchors land at (1800, 956) at 1908x1028");
+        auto deck = mm::scene_to_px(mm::CARD_RIGHT_X, mm::CARD_BOTTOM_Y, 1280, 800);
+        auto wide = mm::scene_to_px(mm::CARD_RIGHT_X, mm::CARD_BOTTOM_Y, 1280, 720);
+        expect(std::abs(deck.x - wide.x) < 0.01f && std::abs(deck.y - (wide.y + 40)) < 0.01f,
+               "at 16:10 the card keeps its 16:9 place, moved down by the 40 px band above it (1280x800)");
+        expect(deck.x < 1280 && deck.y < 760, "at 16:10 the card ends inside the frame and above the band's bottom edge");
+        expect(std::abs(mm::panel_scale(1280, 800) - mm::panel_scale(1280, 720)) < 1e-6f &&
+                   std::abs(mm::panel_scale(1908, 1028) - 1.0f) < 1e-6f,
+               "the panel's size follows the band, not the frame height");
+        auto ultra = mm::scene_to_px(mm::CARD_RIGHT_X, mm::CARD_BOTTOM_Y, 3440, 1440);
+        auto ultra_band = mm::ui_band(3440, 1440);
+        expect(ultra_band.top == 0 && ultra_band.left > 0 && ultra.x < ultra_band.left + ultra_band.width,
+               "on a 21:9 frame the band is the full height and the card stays inside it");
     }
     expect(mm::panel_due(true, true, true, false, true), "the panel is due on the open home screen once prepared");
     expect(!mm::panel_due(false, true, true, false, true) && !mm::panel_due(true, false, true, false, true) &&
@@ -138,6 +150,22 @@ int main()
     expect(std::string(mm::return_command(mm::Mode::time_trial)) == "time_trial" &&
                std::string(mm::return_command(mm::Mode::grand_prix)) == "solo_gp" && std::string(mm::return_command(mm::Mode::none)).empty(),
            "the session-end hand-over raises the command of the card that started the session");
+    expect(mm::driven_mode(mm::Mode::grand_prix, "time_trial") == mm::Mode::time_trial &&
+               std::string(mm::return_command(mm::driven_mode(mm::Mode::grand_prix, "time_trial"))) == "time_trial",
+           "a Grand Prix card press that ends in a Time Trial (the container's Time Trial tab) hands over to the Time Trial picker");
+    expect(mm::driven_mode(mm::Mode::time_trial, "grand_prix") == mm::Mode::grand_prix &&
+               std::string(mm::return_command(mm::driven_mode(mm::Mode::time_trial, "grand_prix"))) == "solo_gp",
+           "a Time Trial card press that ends in a Grand Prix hands over to the Grand Prix");
+    expect(mm::driven_mode(mm::Mode::grand_prix, "grand_prix") == mm::Mode::grand_prix &&
+               mm::driven_mode(mm::Mode::time_trial, "time_trial") == mm::Mode::time_trial,
+           "a session of the pressed card's own mode keeps the card");
+    expect(mm::driven_mode(mm::Mode::grand_prix, "") == mm::Mode::grand_prix && mm::driven_mode(mm::Mode::grand_prix, "unknown") == mm::Mode::grand_prix &&
+               mm::driven_mode(mm::Mode::time_trial, "unknown") == mm::Mode::time_trial,
+           "an unread or unknown game mode keeps the card that was pressed");
+    expect(mm::driven_mode(mm::Mode::grand_prix, "split_screen") == mm::Mode::none && mm::driven_mode(mm::Mode::time_trial, "f1_world") == mm::Mode::none,
+           "a session of another mode from the container's tabs raises no card command");
+    expect(mm::driven_mode(mm::Mode::none, "time_trial") == mm::Mode::none && mm::driven_mode(mm::Mode::none, "grand_prix") == mm::Mode::none,
+           "a session no card started never arms a hand-over");
     {
         auto route = mm::Back::route;
         expect(std::string(mm::back_replacement(route, mm::djb2("f1_world_activity_container"), "f1_world")) == "swofty_back_home" &&
@@ -191,6 +219,17 @@ int main()
                !mm::return_due(false, false, mm::Mode::time_trial, true) && !mm::return_due(true, true, mm::Mode::time_trial, true) &&
                !mm::return_due(true, false, mm::Mode::time_trial, false),
            "the hand-over is armed when a session that a card started has ended");
+    expect(mm::migrate_logged(true, "", "frontend") && mm::migrate_logged(false, "f1_world", "frontend"), "a failed or flow-changing migrate is logged");
+    expect(!mm::migrate_logged(false, "frontend", "frontend") && !mm::migrate_logged(false, "", "frontend"), "a migrate within the same flow is not logged");
+    expect(mm::region_writable(true, 0x04, 0x1000, 0x1000, 0x1ffc, 4), "read-write memory inside its region is writable");
+    expect(mm::region_writable(true, 0x08, 0x1000, 0x1000, 0x1000, 4) && mm::region_writable(true, 0x40, 0x1000, 0x1000, 0x1000, 4),
+           "write-copy and execute-read-write are writable");
+    expect(!mm::region_writable(true, 0x02, 0x1000, 0x1000, 0x1000, 4) && !mm::region_writable(true, 0x20, 0x1000, 0x1000, 0x1000, 4),
+           "read-only and execute-read are not writable");
+    expect(!mm::region_writable(false, 0x04, 0x1000, 0x1000, 0x1000, 4), "reserved memory is not writable");
+    expect(!mm::region_writable(true, 0x104, 0x1000, 0x1000, 0x1000, 4), "a guard page is not writable");
+    expect(!mm::region_writable(true, 0x04, 0x1000, 0x1000, 0x1ffe, 4), "bytes past the region are not writable");
+    expect(!mm::region_writable(true, 0x04, 0x1000, 0x1000, 0, 4), "null is not writable");
     expect(mm::entry_point_write(0x146066c74, true) == mm::EntryPointWrite::write,
            "the F1 World entry point is cleared through the address the binding set resolved");
     expect(mm::entry_point_write(0, true) == mm::EntryPointWrite::unresolved && mm::entry_point_write(0, false) == mm::EntryPointWrite::unresolved,

@@ -43,6 +43,7 @@ Subs<SetNameFn> setnames;
 Subs<ResetFn> resets;
 Subs<RenderTargetsFn> render_targets;
 Subs<RtvFn> rtvs;
+Subs<UnreadQueueFn> unread_queues;
 
 template <class T> void release(T *&p)
 {
@@ -55,11 +56,11 @@ std::mutex lock;
 std::vector<Swapchain> chains;
 std::vector<std::pair<void *, UINT>> pending_color_space;
 
-safetyhook::InlineHook h_present, h_resize, h_resize1, h_color_space, h_create, h_create_hwnd, h_create_core,
+safetyhook::InlineHook h_present, h_present1, h_resize, h_resize1, h_color_space, h_create, h_create_hwnd, h_create_core,
     h_create_comp, h_exec, h_barrier, h_setname;
 HMODULE impl_create, impl_hwnd, impl_core, impl_comp;
 constexpr size_t RESOURCE_GETDESC_SLOT = 10, SRV_SLOT = 19, SETNAME_SLOT = 6, EXEC_SLOT = 10, BARRIER_SLOT = 26, RTV_SLOT = 20, OM_SLOT = 46;
-thread_local int creating;
+thread_local int creating, presenting;
 std::atomic<bool> in_present;
 
 std::string self_module()
@@ -162,29 +163,140 @@ HRESULT STDMETHODCALLTYPE create_comp_hook(IDXGIFactory2 *f, IUnknown *dev, cons
     return hr;
 }
 
+using SlGetNativeInterface = int(__cdecl *)(void *proxy, void **native);
+
+std::mutex execs_lock;
+std::vector<hud::guard::ExecSeen> execs_seen;
+std::atomic<bool> execs_wanted;
+
+void count_exec(ID3D12CommandQueue *q)
+{
+    DWORD tid = GetCurrentThreadId();
+    ULONGLONG now = GetTickCount64();
+    auto same = [&](const hud::guard::ExecSeen &e) { return e.queue == q; };
+    {
+        std::lock_guard<std::mutex> g(execs_lock);
+        auto it = std::find_if(execs_seen.begin(), execs_seen.end(), same);
+        if (it != execs_seen.end()) {
+            if (it->type == hud::guard::LIST_TYPE_DIRECT) {
+                it->tid = tid;
+                it->tick = now;
+            }
+            return;
+        }
+        if (execs_seen.size() >= 8)
+            return;
+    }
+    int type = int(q->GetDesc().Type);
+    std::lock_guard<std::mutex> g(execs_lock);
+    if (execs_seen.size() < 8 && std::none_of(execs_seen.begin(), execs_seen.end(), same))
+        execs_seen.push_back({q, type, tid, now});
+}
+
+bool recent_direct_queue(DWORD tid, hud::guard::ExecSeen &out)
+{
+    std::lock_guard<std::mutex> g(execs_lock);
+    const hud::guard::ExecSeen *e = hud::guard::present_queue_from_execs(execs_seen, tid);
+    if (e)
+        out = *e;
+    return e != nullptr;
+}
+
+std::vector<void *> refused, waiting;
+bool unread_arm_asked;
+
+bool listed(const std::vector<void *> &v, void *sc)
+{
+    return std::find(v.begin(), v.end(), sc) != v.end();
+}
+
 bool learn(IDXGISwapChain3 *sc, void *caller, const std::string &pfg, Swapchain &out)
 {
-    static void *refused;
-    if (sc == refused)
+    if (listed(refused, sc))
         return false;
+    DWORD tid = GetCurrentThreadId();
     ID3D12CommandQueue *q = nullptr;
-    if (FAILED(sc->GetDevice(IID_PPV_ARGS(&q))) || !q) {
-        refused = sc;
-        swofty::log("[d3d12] swapchain %p was made before the creation hooks and does not name a D3D12 command queue; "
-                    "ignored",
-                    static_cast<void *>(sc));
-        return false;
+    HRESULT hr = sc->GetDevice(IID_PPV_ARGS(&q));
+    const char *via = "IDXGISwapChain::GetDevice at Present";
+    std::string native_note;
+    if (FAILED(hr) || !q) {
+        q = nullptr;
+        HMODULE sl = GetModuleHandleW(L"sl.interposer.dll");
+        auto get_native = sl ? reinterpret_cast<SlGetNativeInterface>(GetProcAddress(sl, "slGetNativeInterface"))
+                             : nullptr;
+        if (!sl)
+            native_note = "sl.interposer.dll is not loaded";
+        else if (!get_native)
+            native_note = "sl.interposer.dll has no slGetNativeInterface";
+        else {
+            void *native = nullptr;
+            int sr = get_native(sc, &native);
+            if (!hud::guard::streamline_result_ok(sr) || !native) {
+                char buf[64];
+                snprintf(buf, sizeof buf, "slGetNativeInterface returned %d", sr);
+                native_note = buf;
+            } else {
+                HRESULT nhr = static_cast<IDXGISwapChain *>(native)->GetDevice(IID_PPV_ARGS(&q));
+                if (FAILED(nhr) || !q) {
+                    q = nullptr;
+                    char buf[96];
+                    snprintf(buf, sizeof buf, "native swapchain %p GetDevice failed: 0x%08lx", native,
+                             static_cast<unsigned long>(nhr));
+                    native_note = buf;
+                } else
+                    via = "slGetNativeInterface + IDXGISwapChain::GetDevice at Present";
+            }
+        }
     }
-    D3D12_COMMAND_QUEUE_DESC qd = q->GetDesc();
-    q->Release();
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    hud::guard::ExecSeen exec{};
+    if (q) {
+        qd = q->GetDesc();
+        q->Release();
+    } else {
+        bool told = listed(waiting, sc);
+        if (!told && waiting.size() < 16)
+            waiting.push_back(sc);
+        using hud::guard::UnreadQueue;
+        UnreadQueue step = hud::guard::unread_queue_step(bool(h_exec), unread_arm_asked, false);
+        if (step == UnreadQueue::Arm) {
+            unread_arm_asked = true;
+            for (int i = 0, k = unread_queues.n.load(); i < k; i++)
+                if (unread_queues.fns[i](sc, caller))
+                    break;
+            step = hud::guard::unread_queue_step(bool(h_exec), unread_arm_asked, false);
+        }
+        if (step == UnreadQueue::Refuse) {
+            refused.push_back(sc);
+            swofty::log("[d3d12] swapchain %p was made before the creation hooks and its present queue cannot be read; "
+                        "ignored (GetDevice: 0x%08lx; %s)",
+                        static_cast<void *>(sc), static_cast<unsigned long>(hr), native_note.c_str());
+            return false;
+        }
+        execs_wanted.store(true, std::memory_order_relaxed);
+        bool seen = recent_direct_queue(tid, exec);
+        if (hud::guard::unread_queue_step(true, unread_arm_asked, seen) == UnreadQueue::Wait) {
+            if (!told)
+                swofty::log("[d3d12] swapchain %p was made before the creation hooks and its present queue cannot be "
+                            "read (GetDevice: 0x%08lx; %s); no direct command queue has executed command lists yet, "
+                            "so the overlay waits",
+                            static_cast<void *>(sc), static_cast<unsigned long>(hr), native_note.c_str());
+            return false;
+        }
+        q = static_cast<ID3D12CommandQueue *>(exec.queue);
+        qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        via = exec.tid == tid ? "ID3D12CommandQueue::ExecuteCommandLists on the presenting thread"
+                              : "ID3D12CommandQueue::ExecuteCommandLists, most recent direct queue";
+    }
     std::string by = module_of(caller);
     out = Swapchain();
     out.sc = sc;
     out.queue = q;
-    out.how = "IDXGISwapChain::GetDevice at Present";
+    out.how = via;
     out.by = by;
     out.fg = hud::guard::learned_fg(qd.Type == D3D12_COMMAND_LIST_TYPE_DIRECT, pfg);
     out.streamline = hud::guard::streamline_caller(by);
+    out.armed_late = exec.queue && unread_arm_asked;
     {
         std::lock_guard<std::mutex> g(lock);
         auto pend = std::find_if(pending_color_space.begin(), pending_color_space.end(),
@@ -200,10 +312,21 @@ bool learn(IDXGISwapChain3 *sc, void *caller, const std::string &pfg, Swapchain 
         else
             chains.push_back(out);
     }
-    swofty::log("[d3d12] swapchain %p was made before the creation hooks; its queue %p (type %d) is read from the "
-                "swapchain; presented from %s%s",
-                static_cast<void *>(sc), static_cast<void *>(q), int(qd.Type), by.c_str(),
-                out.streamline ? "; through Streamline" : "");
+    if (exec.queue)
+        swofty::log("[d3d12] swapchain %p was made before the creation hooks; its present queue %p is the direct queue "
+                    "that executed command lists on thread %lu %llu ms before Present on thread %lu; presented from "
+                    "%s%s%s",
+                    static_cast<void *>(sc), static_cast<void *>(q), static_cast<unsigned long>(exec.tid),
+                    static_cast<unsigned long long>(GetTickCount64() - exec.tick), static_cast<unsigned long>(tid),
+                    by.c_str(), out.streamline ? "; through Streamline" : "",
+                    out.armed_late ? "; the device hooks armed for it after the game named its back buffers, so the "
+                                     "overlay draws on it at Present"
+                                   : "");
+    else
+        swofty::log("[d3d12] swapchain %p was made before the creation hooks; its queue %p (type %d) is read from the "
+                    "swapchain; presented from %s%s",
+                    static_cast<void *>(sc), static_cast<void *>(q), int(qd.Type), by.c_str(),
+                    out.streamline ? "; through Streamline" : "");
     return true;
 }
 
@@ -222,6 +345,7 @@ std::string fg_caller(void *caller)
 struct PresentSeen {
     void *sc, *caller;
     DWORD tid;
+    const char *how;
 };
 
 std::mutex present_lock;
@@ -229,7 +353,7 @@ std::vector<PresentSeen> present_seen;
 ULONGLONG present_since;
 unsigned present_count;
 
-void count_present(IDXGISwapChain3 *sc, void *caller)
+void count_present(IDXGISwapChain3 *sc, void *caller, const char *how)
 {
     DWORD tid = GetCurrentThreadId();
     ULONGLONG now = GetTickCount64();
@@ -239,11 +363,11 @@ void count_present(IDXGISwapChain3 *sc, void *caller)
         present_since = now;
     bool fresh = present_seen.size() < 32 &&
                  std::none_of(present_seen.begin(), present_seen.end(), [&](const PresentSeen &p) {
-                     return p.sc == sc && p.caller == caller && p.tid == tid;
+                     return p.sc == sc && p.caller == caller && p.tid == tid && p.how == how;
                  });
     if (fresh) {
-        present_seen.push_back({sc, caller, tid});
-        swofty::log("[d3d12] Present on swapchain %p from %s (%p) on thread %lu", static_cast<void *>(sc),
+        present_seen.push_back({sc, caller, tid, how});
+        swofty::log("[d3d12] %s on swapchain %p from %s (%p) on thread %lu", how, static_cast<void *>(sc),
                     module_of(caller).c_str(), caller, tid);
     }
     if (now - present_since >= 60000) {
@@ -255,12 +379,17 @@ void count_present(IDXGISwapChain3 *sc, void *caller)
     }
 }
 
-HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain3 *sc, UINT sync, UINT flags)
+// Present and Present1 both close a frame. One that runs inside the other on the same thread, as DXVK's Present
+// calls its Present1, is the same frame and is dispatched once, by the outer call.
+template <class Original>
+HRESULT dispatch_present(IDXGISwapChain3 *sc, UINT flags, void *caller, const char *how, Original original)
 {
+    if (!hud::guard::dispatches_present(presenting))
+        return original();
+    presenting++;
     if (!(flags & DXGI_PRESENT_TEST))
-        count_present(sc, __builtin_return_address(0));
+        count_present(sc, caller, how);
     if (!(flags & DXGI_PRESENT_TEST) && presents.n.load() && !in_present.exchange(true)) {
-        void *caller = __builtin_return_address(0);
         std::string pfg = fg_caller(caller);
         Swapchain c;
         bool known = false;
@@ -280,10 +409,24 @@ HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain3 *sc, UINT sync, UINT flag
             presents.fns[i](sc, known ? &c : nullptr, caller);
         in_present.store(false);
     }
-    HRESULT hr = h_present.call<HRESULT>(sc, sync, flags);
+    HRESULT hr = original();
     for (int i = 0, n = presenteds.n.load(); i < n; i++)
         presenteds.fns[i](sc, hr);
+    presenting--;
     return hr;
+}
+
+HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain3 *sc, UINT sync, UINT flags)
+{
+    return dispatch_present(sc, flags, __builtin_return_address(0), "Present",
+                            [&] { return h_present.call<HRESULT>(sc, sync, flags); });
+}
+
+HRESULT STDMETHODCALLTYPE present1_hook(IDXGISwapChain3 *sc, UINT sync, UINT flags,
+                                        const DXGI_PRESENT_PARAMETERS *params)
+{
+    return dispatch_present(sc, flags, __builtin_return_address(0), "Present1",
+                            [&] { return h_present1.call<HRESULT>(sc, sync, flags, params); });
 }
 
 HRESULT STDMETHODCALLTYPE resize_hook(IDXGISwapChain3 *sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags)
@@ -339,6 +482,8 @@ HRESULT STDMETHODCALLTYPE color_space_hook(IDXGISwapChain3 *sc, DXGI_COLOR_SPACE
 
 void STDMETHODCALLTYPE exec_hook(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *lists)
 {
+    if (execs_wanted.load(std::memory_order_relaxed))
+        count_exec(q);
     ExecPlan plan;
     for (int i = 0, k = execs.n.load(); i < k; i++)
         execs.fns[i](q, n, lists, plan);
@@ -863,6 +1008,16 @@ void on_reset(ResetFn fn)
     resets.add(fn);
 }
 
+void on_unread_queue(UnreadQueueFn fn)
+{
+    unread_queues.add(fn);
+}
+
+bool learning(void *sc)
+{
+    return listed(waiting, sc) && !listed(refused, sc);
+}
+
 void exec_original(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *lists)
 {
     if (h_exec && hud::guard::vtable_slot_is(q, EXEC_SLOT, h_exec.target()))
@@ -1033,14 +1188,16 @@ bool arm_swapchain()
              install(h_present, sc_vt[8], reinterpret_cast<void *>(&present_hook), "IDXGISwapChain::Present");
         if (!ok)
             break;
+        bool present1 = sc_vt[22] != sc_vt[8] && install(h_present1, sc_vt[22], reinterpret_cast<void *>(&present1_hook),
+                                                         "IDXGISwapChain1::Present1");
         install(h_resize, sc_vt[13], reinterpret_cast<void *>(&resize_hook), "IDXGISwapChain::ResizeBuffers");
         install(h_resize1, sc_vt[39], reinterpret_cast<void *>(&resize1_hook), "IDXGISwapChain3::ResizeBuffers1");
         install(h_color_space, sc_vt[38], reinterpret_cast<void *>(&color_space_hook),
                 "IDXGISwapChain3::SetColorSpace1");
-        swofty::log("[d3d12] swapchain hooks armed in %s: Present (vt+0x40), ResizeBuffers (vt+0x68), "
+        swofty::log("[d3d12] swapchain hooks armed in %s: Present (vt+0x40), %sResizeBuffers (vt+0x68), "
                     "SetColorSpace1 (vt+0x130), ResizeBuffers1 (vt+0x138); only swapchains created after this point "
                     "are known",
-                    module_of(sc_vt[8]).c_str());
+                    module_of(sc_vt[8]).c_str(), present1 ? "Present1 (vt+0xb0), " : "");
     } while (false);
     release(swap);
     release(swap1);

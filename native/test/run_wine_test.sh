@@ -190,7 +190,8 @@ EOF
     gl_channels=
     [[ $mode == trigger ]] && gl_rate=0
     [[ $mode == trigger || $mode == vm ]] && gl_channels=default,verbose
-    SWOFTY_UDP_STOCK_IDS=$udp_ids SWOFTY_RESOLVE=$resolve SWOFTY_TEST_ASSETS=$([[ $mode == assets* ]] && echo 1) SWOFTY_GAME_LOG=$gl_level SWOFTY_GAME_LOG_RATE=$gl_rate SWOFTY_GAME_LOG_CHANNELS=$gl_channels SWOFTY_TEST_REQUESTS=${req:+Z:${req//\//\\}} SWOFTY_TEST_ITEMS=$ITEMS \
+    rm -f "$OUT"/game/swofty/stall-*.txt
+    SWOFTY_TEST_LOAD_STALL_REPORT=$([[ $mode == state ]] && echo 1) SWOFTY_UDP_STOCK_IDS=$udp_ids SWOFTY_RESOLVE=$resolve SWOFTY_TEST_ASSETS=$([[ $mode == assets* ]] && echo 1) SWOFTY_GAME_LOG=$gl_level SWOFTY_GAME_LOG_RATE=$gl_rate SWOFTY_GAME_LOG_CHANNELS=$gl_channels SWOFTY_TEST_REQUESTS=${req:+Z:${req//\//\\}} SWOFTY_TEST_ITEMS=$ITEMS \
         "${PIN[@]}" xvfb-run -a wine "$OUT/game/F1_25.exe" $mode || status=1
     if [[ $mode == assets_ro ]]; then
         GAME_ADDON=$OUT/game/swofty/addons/example.sample-mod
@@ -204,6 +205,38 @@ EOF
         "$OUT/game/swofty/addons/example.sample-mod"
     echo "---- $LOG ($mode)"
     grep -v '  section ' "$LOG"
+    if [[ $mode == state ]]; then
+        once "stall: the watchdog is armed" '\[stall\] load-stall watchdog armed: a report of every thread.s stack'
+        once "stall: the test report is written beside the crash reports" '\[stall\] load-stall report 1 of at most 1: .*thread\(s\) read in [0-9]+ ms; written to swofty\\stall-[0-9]{8}-[0-9]{6}\.txt'
+        once "stall: the report holds the thread table" '\[stall\] == Threads \([0-9]+; [1-9][0-9]* unwound'
+        check "stall: a suspended thread's stack is unwound and named" '\[stall\]   #1  [0-9a-f]{16} rsp=[0-9a-f]{16}  [A-Za-z0-9_.]+\+0x[0-9a-f]+ '
+        check "stall: a wait is named from the module's exports" '\[stall\] thread [0-9]+.*, waiting in [A-Za-z]+'
+        once "stall: the watchdog thread is not suspended" '\[stall\] thread [0-9]+.*\(the load-stall watchdog, not suspended\)'
+        once "stall: the report ends" '\[stall\] end of load-stall report 1'
+        stall_files=$(ls "$OUT"/game/swofty/stall-*.txt 2>/dev/null | wc -l)
+        if [[ $stall_files == 1 ]] && grep -q '^== Loaded modules' "$OUT"/game/swofty/stall-*.txt; then
+            echo "ok  : stall: swofty\\stall-<time>.txt holds the report"
+        else
+            echo "FAIL: stall: swofty\\stall-<time>.txt holds the report ($stall_files file(s))"
+            status=1
+        fi
+        rm -f "$OUT"/game/swofty/stall-*.txt
+    fi
+    if [[ $mode == trigger ]]; then
+        once "stall: the game's deadlock WARN reaches the log" '\[game\] TEST_WARN \(warn\): The signal timed out, this is unexpected and may indicate a deadlock, see trace above for Extra Info[[:space:]]*$'
+        once "stall: the WARN asks for a report at once, on the watchdog's thread" '\[stall\] load-stall report 1 of at most 2: the game logged "The signal timed out, this is unexpected and may indicate a deadlock" [0-9]+\.[0-9] s ago; .*thread\(s\) read in [0-9]+ ms; written to swofty\\stall-[0-9]{8}-[0-9]{6}\.txt'
+        once "stall: the WARN report says the game's hang signal" '\[stall\] game hang signal: the game.s deadlock warning, [0-9]+\.[0-9] s ago'
+        once "stall: the WARN report runs on the load-stall watchdog's own thread" '\[stall\] thread [0-9]+.*\(the load-stall watchdog, not suspended\)'
+        once "stall: the WARN report ends" '\[stall\] end of load-stall report 1'
+        stall_files=$(ls "$OUT"/game/swofty/stall-*.txt 2>/dev/null | wc -l)
+        if [[ $stall_files == 1 ]] && grep -q '^the game logged "The signal timed out' "$OUT"/game/swofty/stall-*.txt; then
+            echo "ok  : stall: swofty\\stall-<time>.txt holds the WARN report"
+        else
+            echo "FAIL: stall: swofty\\stall-<time>.txt holds the WARN report ($stall_files file(s))"
+            status=1
+        fi
+        rm -f "$OUT"/game/swofty/stall-*.txt
+    fi
     if [[ $mode == udp ]]; then
         once "udp: the map is read and sendto is hooked" '\[udp\] stock ids on: 1 team id\(s\), 1 driver id\(s\), 1 sendto slot\(s\)'
         once "udp: the launcher's mapping lines are logged" '\[udp\] stock ids: team 507 -> 4 \(forceindia\); driver 197 -> 255 \(no stock driver\)'

@@ -102,13 +102,77 @@ int main()
            "a live Time Trial runs the track watch for the bridge, the guards or the diagnostics");
     expect(!tb::track_watch_on(false, false, false, true, true), "a live Time Trial with nothing on does not run it");
     expect(!tb::track_watch_due(false, 10000, 0) && !tb::track_watch_due(true, 10400, 10000) && tb::track_watch_due(true, 10500, 10000) && tb::track_watch_due(true, 500, 0),
-           "the watch reads the track twice a second only while on");
+           "a watch retry is due half a second after the last read, and only while on");
     expect(!tb::diag_tick_on(true, false, false) && !tb::diag_tick_on(true, true, false), "the diagnostics tick is off outside a live Time Trial, whatever is on");
     expect(tb::diag_tick_on(true, false, true) && tb::diag_tick_on(false, true, true), "a live Time Trial runs the diagnostics tick for the bridge or the diagnostics");
     expect(!tb::diag_tick_on(false, false, true), "a live Time Trial with nothing on does not run it");
-    expect(!tb::diag_tick_due(false, 10000, 0) && !tb::diag_tick_due(true, 10499, 10000) && tb::diag_tick_due(true, 10500, 10000) && tb::diag_tick_due(true, 500, 0),
-           "the diagnostics tick runs at most twice a second, and only while on");
-    expect(!tb::diag_tick_due(tb::diag_tick_on(true, true, false), 99999, 0), "the diagnostics switch alone never makes the tick due outside a Time Trial");
+    {
+        uint8_t block[tb::HANDLER_BLOCK] = {};
+        block[0x1d8] = 4;
+        uint64_t key = tb::handler_key(block, sizeof block, 0);
+        expect(key == tb::handler_key(block, sizeof block, 0), "the handler key is the same for the same fields");
+        uint8_t other[tb::HANDLER_BLOCK];
+        bool every_field = true;
+        for (const tb::HandlerField &f : tb::HANDLER_KEY_FIELDS)
+            for (size_t i = 0; i < f.size; i++) {
+                memcpy(other, block, sizeof block);
+                other[f.at + i] ^= 1;
+                every_field = every_field && tb::handler_key(other, sizeof other, 0) != key;
+            }
+        expect(every_field, "a change in any field the watch line prints changes the key");
+        memcpy(other, block, sizeof block);
+        other[0x1d8] = 1;
+        expect(tb::handler_key(other, sizeof other, 0) != key, "the entry state going from 4 to 1 changes the key");
+        expect(tb::handler_key(block, sizeof block, 3) != key, "the rival finder's state is part of the key");
+        memcpy(other, block, sizeof block);
+        other[0x200] = 0x55;
+        other[0x4f0] = 0x55;
+        expect(tb::handler_key(other, sizeof other, 0) == key, "bytes the watch line does not print leave the key alone");
+        expect(tb::handler_key(block, 0x100, 0) != key && tb::handler_key(nullptr, 0, 0) == tb::handler_key(nullptr, 0, 0), "a short block reads its missing fields as zero");
+
+        tb::HandlerWatch seen;
+        expect(!tb::handler_watch_full(false, 0, key, 1000, seen) && !tb::handler_watch_full(true, 0, key, 1000, seen), "no handler, no description");
+        expect(tb::handler_watch_full(false, 0x3474bd830, key, 1000, seen), "the first handler is described in full");
+        seen = {0x3474bd830, key, 1000};
+        expect(!tb::handler_watch_full(false, 0x3474bd830, key, 1500, seen) && !tb::handler_watch_full(false, 0x3474bd830, key, 1000 + tb::HANDLER_REFRESH_MS - 1, seen),
+               "the same handler with the same fields is not described again on the next ticks");
+        expect(tb::handler_watch_full(false, 0x3474bd830, key, 1000 + tb::HANDLER_REFRESH_MS, seen), "the save checks are described again after the refresh period");
+        expect(tb::handler_watch_full(false, 0x3474bd830, key ^ 1, 1500, seen), "a changed field is described at once");
+        expect(tb::handler_watch_full(false, 0x3474bd000, key, 1500, seen), "a new handler is described at once");
+        expect(tb::handler_watch_full(true, 0x3474bd830, key, 1500, seen), "diagnostics mode describes the handler on every tick");
+        int full = 0;
+        tb::HandlerWatch w;
+        for (int64_t t = 0; t < 60000; t += 500)
+            if (tb::handler_watch_full(false, 0x3474bd830, key, t, w)) {
+                full++;
+                w = {0x3474bd830, key, t};
+            }
+        expect(full == 6, "a steady handler is described in full 6 times a minute instead of 120");
+
+        tb::SaveChecks walked;
+        expect(!tb::save_checks_due(false, 0, 1000, walked) && !tb::save_checks_due(true, 0, 1000, walked), "no handler, no save-check walk");
+        expect(tb::save_checks_due(false, 0x3474bd830, 1000, walked), "a new handler's save checks are walked at once");
+        walked = {0x3474bd830, 1000};
+        expect(!tb::save_checks_due(false, 0x3474bd830, 1000 + tb::SAVE_CHECKS_MS - 1, walked) && tb::save_checks_due(false, 0x3474bd830, 1000 + tb::SAVE_CHECKS_MS, walked),
+               "the same handler's save checks are walked again only after SAVE_CHECKS_MS");
+        expect(tb::save_checks_due(false, 0x3474bd000, 1500, walked), "a handler change walks the save checks at once");
+        expect(tb::save_checks_due(true, 0x3474bd830, 1500, walked), "diagnostics mode walks the save checks on every description");
+        int walks = 0, lines = 0;
+        tb::HandlerWatch line;
+        tb::SaveChecks walk;
+        for (int64_t t = 0; t < 10000; t += tb::WATCH_PERIOD_MS) {
+            uint64_t changing = key + uint64_t(t / tb::WATCH_PERIOD_MS);
+            if (!tb::handler_watch_full(false, 0x3474bd830, changing, t, line))
+                continue;
+            line = {0x3474bd830, changing, t};
+            lines++;
+            if (tb::save_checks_due(false, 0x3474bd830, t, walk)) {
+                walks++;
+                walk = {0x3474bd830, t};
+            }
+        }
+        expect(lines == 20 && walks == 2, "a handler whose fields change on every tick gets a watch line each tick but a save-check walk only every 5 s");
+    }
     expect(tb::garage_should_drive(true, true, 0x1000, 0x2000, 0x2038, 0), "a panel with seven tabs is driven once");
     expect(!tb::garage_should_drive(true, true, 0x1000, 0x2000, 0x2038, 0x1000, 7), "the same panel is not driven twice");
     expect(!tb::garage_should_drive(false, true, 0x1000, 0x2000, 0x2038, 0) && !tb::garage_should_drive(true, false, 0x1000, 0x2000, 0x2038, 0),
@@ -137,6 +201,8 @@ int main()
     expect(tb::garage_gate_byte(0, false, true, 0x12) == 0 && tb::garage_gate_byte(0, true, false, 0x12) == 0 && tb::garage_gate_byte(0, true, true, 0x10) == 0 &&
                tb::garage_gate_byte(0, true, true, -1) == 0,
            "it is untouched with the bridge off, for stock content and in other session types");
+    expect(tb::replay_session_on(true, true) && !tb::replay_session_on(true, false) && !tb::replay_session_on(false, true) && !tb::replay_session_on(false, false),
+           "the replay system hooks act only in a live Time Trial session, never in a Grand Prix, a career race or the front end");
     expect(tb::replay_capture_due(1000, 2500, 1500) && !tb::replay_capture_due(1000, 2499, 1500) && !tb::replay_capture_due(0, 9999, 1500), "a capture is due after its delay and never without a pending mark");
     {
         uint8_t h[16] = {0, 0, 0, 0, 0xa8, 0xca, 0x2f, 0xe3};
@@ -151,9 +217,59 @@ int main()
            "the save starts only behind the switch, the bridge, a genuine replay system, a recording and a job queue, on stock content as on ours");
     expect(tb::replay_file_settled(100, 100, 3, 3) && !tb::replay_file_settled(100, 99, 3, 3) && !tb::replay_file_settled(0, 0, 9, 3) && !tb::replay_file_settled(100, 100, 2, 3),
            "a replay file is settled only when its size stopped changing");
-    expect(tb::replay_lap_is_best(88505, 1, 0) && tb::replay_lap_is_best(88505, -1, 90000) && !tb::replay_lap_is_best(88505, 0, 0) && !tb::replay_lap_is_best(90000, 1, 88505) &&
+    expect(tb::replay_lap_is_best(88505, 1, 0) && tb::replay_lap_is_best(88505, 1, 90000) && !tb::replay_lap_is_best(88505, 0, 0) && !tb::replay_lap_is_best(90000, 1, 88505) &&
                !tb::replay_lap_is_best(88505, 1, 88505) && !tb::replay_lap_is_best(0, 1, 0),
            "a lap marks a replay save only when valid and a new session best");
+    expect(!tb::replay_lap_is_best(35875, -1, 87599) && !tb::replay_lap_is_best(35875, -1, 0), "a lap of unknown validity (timed by our clock) is never a best");
+    {
+        int64_t best = 0;
+        auto lap = [&](int64_t ms, int valid, bool early = false) {
+            tb::ReplayLapOutcome o = tb::replay_lap_outcome(ms, valid, best, false, early);
+            if (o.new_best)
+                best = ms;
+            return o;
+        };
+        tb::ReplayLapOutcome a = lap(87599, 1), b = lap(35875, -1), c = lap(60392, -1);
+        expect(a.mark && a.new_best && !a.restart && best == 87599, "the session's first valid lap saves its replay and the recording is kept");
+        expect(!b.mark && !b.new_best && b.restart && !c.mark && c.restart && best == 87599, "a lap timed by our clock saves nothing and restarts the recording at its line");
+        tb::ReplayLapOutcome d = lap(87400, 1), e = lap(86000, 0);
+        expect(d.mark && d.new_best && best == 87400, "the clock lap does not lower the session best, so the next faster valid lap still saves its replay");
+        expect(!e.mark && !e.new_best && e.restart && best == 87400, "an invalid lap faster than the best saves nothing and leaves the best alone");
+        expect(!lap(88000, 1, true).restart && lap(88000, 1).restart, "a slower lap restarts at the line unless it already restarted before it");
+        expect(std::string(tb::replay_restart_when(tb::restart_before_line)) == "before the line" &&
+                   std::string(tb::replay_restart_when(tb::restart_after_lap)) == "at the line" &&
+                   std::string(tb::replay_restart_when(tb::restart_timing_starts)) == "at the line, timing starts" && !*tb::replay_restart_when(tb::restart_none),
+               "each recording restart names when it ran");
+        tb::ReplayLapOutcome any = tb::replay_lap_outcome(35875, -1, 87400, true, false);
+        expect(any.mark && !any.new_best && !any.restart, "the capture-any test switch saves an unknown lap without making it the best");
+        best = 0;
+        tb::ReplayLapOutcome first = lap(38644, -1), then = lap(87166, 1);
+        expect(!first.mark && first.restart && then.mark && then.new_best && best == 87166,
+               "a clock lap first in the session (a restart mid-lap) saves nothing and the session's first valid lap still saves its replay");
+    }
+    {
+        tb::ReplayRestartView v;
+        v.functions = v.capture = v.viewer_idle = v.system_readable = v.system_vtable = v.manager_ok = v.queue_readable = true;
+        v.sys = 0x317a560, v.mgr = 0x500d94370, v.queue = 0x31e2700;
+        v.active89 = 1, v.state20 = 0, v.recording6e1 = 1, v.loaded428 = -1, v.queue_busy48 = 0;
+        uint8_t after_reset[4] = {0, 1, 0, 0};
+        uint32_t dword = 0;
+        std::memcpy(&dword, after_reset, 4);
+        v.external78 = after_reset[0];
+        expect(dword != 0 && tb::replay_restart_blocker(v).empty(),
+               "after a reset ([+0x79] = 1) the restart reads [+0x78] as the byte SetState checks, so it is allowed where a dword read never was");
+        auto blocked = [&](auto change, const char *name) {
+            tb::ReplayRestartView w = v;
+            change(w);
+            return tb::replay_restart_blocker(w).find(name) != std::string::npos;
+        };
+        expect(blocked([](auto &w) { w.external78 = 1; }, "[sys+0x78] (external control) 0x1") && blocked([](auto &w) { w.state20 = 2; }, "[sys+0x20] (state, 0 = Record) 0x2") &&
+                   blocked([](auto &w) { w.active89 = 0; }, "[sys+0x89]") && blocked([](auto &w) { w.recording6e1 = 0; }, "[mgr+0x6e1]") &&
+                   blocked([](auto &w) { w.loaded428 = 3; }, "[mgr+0x428] (loaded replay, -1 = none) 0x3") && blocked([](auto &w) { w.queue_busy48 = 1; }, "[queue+0x48]") &&
+                   blocked([](auto &w) { w.saving = true; }, "still being copied") && blocked([](auto &w) { w.pending = true; }, "save is marked") &&
+                   blocked([](auto &w) { w.system_vtable = false; }, "GameReplaySystem vtable 0x317a560") && blocked([](auto &w) { w.manager_ok = false; }, "replay manager 0x500d94370"),
+               "a restart that may not run names the guard that failed and its value");
+    }
     {
         tb::ReplayManagerView m;
         m.vtable20 = 0x142000000ull, m.system40 = 0x317a560, m.lock118 = 0x32e0000, m.queue150 = 0x32e4000, m.flag6e1 = 1;
@@ -296,6 +412,48 @@ int main()
     mo2.cstr(0x57000, "UpdateSession");
     expect(tb::method_at_op(mo2.mem(), op, &name) == tb::Method::none && name == "UpdateSession", "another method is named and not redirected");
 
+    // method with a learned string form
+    {
+        tb::StrForm form;
+        std::string got;
+        expect(tb::method_with_form(mo2.mem(), op, form, nullptr) == tb::Method::none && !form.ok(), "a request that is no Time Trial method teaches no form");
+        expect(tb::method_with_form(mo2.mem(), op, form, &got) == tb::Method::none && got == "UpdateSession", "its name is still read when asked for");
+        expect(tb::method_with_form(mo.mem(), op, form, &got) == tb::Method::get_tt && got == "GetTTLeaderboard" && form.ok() && form.form == tb::Form::c_str &&
+                   form.word == 0,
+               "a Time Trial method teaches its string form");
+        expect(tb::unpack_form(tb::pack_form(form)).form == form.form && tb::unpack_form(tb::pack_form(form)).word == form.word && !tb::unpack_form(0).ok(),
+               "a form packs into one word and back; zero is no form");
+        got.clear();
+        expect(tb::method_with_form(mo2.mem(), op, form, &got) == tb::Method::none && got == "UpdateSession", "with the form known another method is one read");
+        Fake ne;
+        ne.put<uint64_t>(op + tb::OP_METHOD, 0x58000);
+        ne.ne(0x58000, "AddLeaderboardEntry");
+        tb::StrForm learned = form;
+        expect(tb::method_with_form(ne.mem(), op, learned, &got) == tb::Method::add_entry && got == "AddLeaderboardEntry",
+               "a name in another form gives no string in the known form and is probed in full");
+        Fake none;
+        tb::StrForm keep = form;
+        expect(tb::method_with_form(none.mem(), op, keep, nullptr) == tb::Method::none && keep.form == form.form, "an unreadable op passes and keeps the form");
+    }
+
+    // hooks that matter only in Time Trial
+    {
+        using K = swofty_core::apply::facts::ModeKind;
+        expect(!tb::tt_hooks_idle(K::time_trial, false) && !tb::tt_hooks_idle(K::unknown, false), "Time Trial and an unknown mode keep the hooks");
+        expect(tb::tt_hooks_idle(K::career, false) && tb::tt_hooks_idle(K::other, false), "a career or another mode idles them");
+        expect(!tb::tt_hooks_idle(K::career, true) && !tb::tt_hooks_idle(K::other, true), "the diagnostics keep them everywhere");
+        expect(tb::gate_reads_op(false, true, true, true, true), "a failing check of a request the bridge can answer reads the op");
+        expect(!tb::gate_reads_op(false, true, true, true, false), "checks that pass leave the op unread");
+        expect(!tb::gate_reads_op(false, false, true, true, true) && !tb::gate_reads_op(false, true, false, true, true) && !tb::gate_reads_op(false, true, true, false, true),
+               "the bridge off, no push hook or no OnResult leave the op unread");
+        expect(tb::gate_reads_op(true, false, false, false, false), "the diagnostics read every op");
+        expect(tb::garage_update_idle(0, 0, 0, 0, 1), "no panel: idle");
+        expect(tb::garage_update_idle(0x1000, 0x1000, 0, 0, 1), "a driven panel: idle");
+        expect(tb::garage_update_idle(0x1000, 0, 0x1000, 3, 3), "a panel seen with content not ours: idle while the generation holds");
+        expect(!tb::garage_update_idle(0x1000, 0, 0x1000, 3, 4), "the generation moved: the panel is looked at again");
+        expect(!tb::garage_update_idle(0x2000, 0, 0x1000, 3, 3) && !tb::garage_update_idle(0x2000, 0x1000, 0, 0, 1), "another panel is looked at");
+    }
+
     // XML
     for (const char *eol : {"\n", "\r\n"})
         for (bool sq : {false, true}) {
@@ -422,6 +580,111 @@ int main()
         auto filled = tb::request_track(base, tb::parse_board("LBV0002D"), "");
         expect(filled.custom && filled.key == "swofty.fill:china" && tb::route_of(tb::Method::get_tt, tb::parse_board("LBV0002D"), true, filled.custom) == tb::Route::mailbox,
                "the request for a dormant stock row a track fills is still ours");
+
+        // The loading screen of a Time Trial on a custom track with the game's own cars: the session's track is not read yet
+        // (session code empty, content game/...) while the ghost handler already downloads the player's ghost and must read the
+        // player's board entry. Every hook has to call that board ours, or the requests go to the mailbox while the handler's
+        // write precondition stays offline, the entry read never starts and the ghost download repeats every 2.5 s.
+        {
+            auto board = tb::parse_board("LBV0007D");
+            bool content = tb::ours_session("game/f1_2025", false);
+            auto track = tb::request_track(base, board, "");
+            expect(!content && track.custom, "on the loading screen the content is the game's and the board's track is custom");
+            expect(tb::board_ours(board, track.custom, content), "the handler's hooks call a custom track's board ours before the session's track is read");
+            for (tb::Method m : {tb::Method::get_tt, tb::Method::get_friends_tt, tb::Method::get_binary, tb::Method::add_entry, tb::Method::update_binary})
+                expect((tb::route_of(m, board, true, track.custom || content) == tb::Route::mailbox) == tb::board_ours(board, track.custom, content),
+                       "a board whose requests go to the mailbox is ours for the handler's hooks too");
+            auto stock = tb::parse_board("LBV0001D");
+            auto stock_track = tb::request_track(base, stock, "");
+            expect(!tb::board_ours(stock, stock_track.custom, content) && tb::route_of(tb::Method::get_binary, stock, true, stock_track.custom || content) == tb::Route::pass,
+                   "a stock track with the game's cars stays the game's for the requests and the handler");
+            expect(tb::board_ours(stock, stock_track.custom, tb::ours_session("swofty.x/f1_2022", false)) && tb::board_ours(tb::parse_board("LBV0601D"), false, false),
+                   "addon content or an addon descriptor makes a stock track's board ours");
+            expect(!tb::board_ours(tb::BoardName{}, true, true), "an unparsed board is never ours");
+        }
+
+        struct Sim {
+            tb::TrackReads reads;
+            bool live = false;
+            int game_reads = 0, empty_left = 0;
+            std::string game_track, session_code;
+            std::string read()
+            {
+                game_reads++;
+                std::string code = empty_left > 0 ? (empty_left--, std::string()) : game_track;
+                session_code = code;
+                return code;
+            }
+            void watch(bool on, int64_t t)
+            {
+                if (live == on)
+                    return;
+                live = on;
+                if (on)
+                    reads.enter(t, [this] { return read(); });
+            }
+            void drive(int64_t from, int64_t to)
+            {
+                std::string code;
+                for (int64_t t = from; t < to; t += 3)
+                    reads.tick(live, t, [this] { return read(); }, code);
+            }
+        };
+        constexpr int64_t TEN_MIN = 600000;
+        {
+            Sim s;
+            s.game_track = "bahrain";
+            s.watch(true, 1000);
+            s.drive(1000, 1000 + TEN_MIN);
+            int old_rule = 0;
+            for (int64_t t = 1000, checked = 1000; t < 1000 + TEN_MIN; t += 3)
+                if (tb::track_watch_due(true, t, checked))
+                    old_rule++, checked = t;
+            std::printf("note: over ten simulated minutes the track was read %d time(s); the twice-a-second rule read it %d times\n", s.game_reads, old_rule);
+            expect(s.game_reads == 1 && old_rule > 1100, "a ten-minute Time Trial session reads the track once at the enter, not twice a second");
+            expect(tb::request_track(base, tb::BoardName{}, s.session_code).key == "bahrain", "the board takes the track read at the enter");
+            s.watch(false, 1000 + TEN_MIN);
+            s.game_track = "ring";
+            s.drive(1000 + TEN_MIN, 1000 + 2 * TEN_MIN);
+            expect(s.game_reads == 1 && s.session_code == "bahrain", "the front end does not read the track and keeps the last one");
+            s.watch(true, 1000 + 2 * TEN_MIN);
+            s.drive(1000 + 2 * TEN_MIN, 1000 + 3 * TEN_MIN);
+            expect(s.game_reads == 2 && tb::request_track(base, tb::BoardName{}, s.session_code).key == "swofty.tracks:ring",
+                   "another track from the pause menu enters a new session, which reads it once and moves the board to it");
+        }
+        {
+            Sim s;
+            s.game_track = "china";
+            s.empty_left = 3;
+            s.watch(true, 5000);
+            s.drive(5000, 5000 + TEN_MIN);
+            expect(s.game_reads == 4 && s.session_code == "china" && s.reads.known.load(), "a session entered before its track is known reads it again until it is, then stops");
+        }
+        {
+            Sim s;
+            s.empty_left = 1 << 30;
+            s.game_track = "never";
+            s.watch(true, 0);
+            s.drive(0, TEN_MIN);
+            expect(s.game_reads == tb::TRACK_READS && s.session_code.empty() && !s.reads.known.load(), "a track that never reads stops after TRACK_READS reads in the session");
+            s.watch(false, TEN_MIN);
+            s.empty_left = 0;
+            s.watch(true, TEN_MIN + 1);
+            expect(s.game_reads == tb::TRACK_READS + 1 && s.session_code == "never", "the next session reads again from the start");
+        }
+        {
+            tb::TrackReads r;
+            std::string code;
+            int n = 0;
+            r.enter(1000, [&] { return n++, std::string(); });
+            expect(!r.tick(true, 1499, [&] { return n++, std::string("x"); }, code) && n == 1, "a retry waits half a second after the last read");
+            expect(r.tick(true, 1500, [&] { return n++, std::string("x"); }, code) == 2 && code == "x" && n == 2, "the retry is the session's second read");
+            expect(!r.tick(true, 1500, [&] { return n++, std::string("y"); }, code) && !r.tick(true, 99999, [&] { return n++, std::string("y"); }, code) && n == 2,
+                   "a second tick at the same time does not read again, and a known track is never read again");
+            tb::TrackReads off;
+            off.enter(1000, [&] { return n++, std::string(); });
+            expect(!off.tick(false, 99999, [&] { return n++, std::string("y"); }, code) && n == 3, "nothing is read with the watch off");
+        }
 
         for (const char *eol : {"\n", "\r\n"}) {
             std::string x = sample_xml(eol, false);

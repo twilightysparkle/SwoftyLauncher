@@ -73,6 +73,12 @@ inline bool streamline_caller(std::string_view path)
     return same_name(name, "sl.interposer.dll") || same_name(name, "sl.common.dll") || streamline_hook(name);
 }
 
+// sl::Result::eOk is 0; Streamline's other codes are all failures.
+inline bool streamline_result_ok(int result)
+{
+    return result == 0;
+}
+
 // What a queue learned from a swapchain's own GetDevice makes of the swapchain: only a direct queue is drawn on.
 inline std::string learned_fg(bool direct_queue, std::string_view present_fg)
 {
@@ -143,6 +149,116 @@ inline bool present_hook_yields(const ArmReasons &reasons, std::string_view riva
     return reasons.menu_only() && !rival.empty();
 }
 
+// Present layers that make the game's swapchain on a path the core's creation hooks miss, and the swapchain
+// does not name its queue at Present either. Its present queue is then learned from ExecuteCommandLists,
+// which takes the device hooks.
+inline constexpr std::string_view PRESENT_LAYERS[] = {"NvPresent64.dll"};
+
+inline std::string present_layer_in(const std::vector<std::string> &modules)
+{
+    for (auto &m : modules)
+        for (auto l : PRESENT_LAYERS)
+            if (same_name(base_name(m), l))
+                return std::string(l);
+    return {};
+}
+
+inline bool device_hooks_wanted_for(const std::vector<std::string> &modules)
+{
+    return !present_layer_in(modules).empty();
+}
+
+// NVIDIA's modules that present the game's frames on a swapchain the creation hooks can miss: the NVIDIA app's
+// present layer, DLSS Frame Generation and Streamline, in the order the log names them.
+inline constexpr std::string_view NVIDIA_FG_SOURCES[] = {"NvPresent64.dll", "nvngx_dlssg.dll", "sl.dlss_g.dll",
+                                                         "sl.interposer.dll"};
+
+inline bool nvidia_fg_source(std::string_view path)
+{
+    std::string_view name = base_name(path);
+    for (auto s : NVIDIA_FG_SOURCES)
+        if (same_name(name, s))
+            return true;
+    return false;
+}
+
+// Whether the device hooks arm when a swapchain whose present queue cannot be read first reaches Present, and
+// why: `source` names the NVIDIA modules in the process, `refused` says why they stay off. AMD's and Intel's
+// frame generation calling Present, or SWOFTY_OVERLAY_FG / "overlay_fg" set to 0, keep them off.
+struct OnDemandArm {
+    std::string source, refused;
+    bool arms() const { return !source.empty(); }
+};
+
+inline OnDemandArm on_demand_arm(const std::vector<std::string> &modules, std::string_view present_caller, int forced)
+{
+    OnDemandArm out;
+    if (forced == 0) {
+        out.refused = "SWOFTY_OVERLAY_FG=0 / \"overlay_fg\": false";
+        return out;
+    }
+    if (fg_module(present_caller) && !nvidia_fg_source(present_caller)) {
+        out.refused = std::string(base_name(present_caller)) + " presents it (AMD's or Intel's frame generation)";
+        return out;
+    }
+    for (auto s : NVIDIA_FG_SOURCES)
+        for (auto &m : modules)
+            if (same_name(base_name(m), s)) {
+                if (!out.source.empty())
+                    out.source += ", ";
+                out.source += s;
+                break;
+            }
+    if (out.source.empty())
+        out.refused = "no NVIDIA frame generation, Streamline or present layer module is in the process";
+    return out;
+}
+
+// Whether a Present or Present1 closes the frame: not one made inside another on the same thread (DXVK's Present
+// calls its Present1), which is the same frame.
+inline bool dispatches_present(int presenting_depth)
+{
+    return presenting_depth == 0;
+}
+
+// What learn does with a swapchain whose present queue cannot be read: ask once to arm the device hooks, wait
+// for a direct queue to execute command lists once they are armed, learn that queue, or refuse the swapchain.
+enum class UnreadQueue { Arm, Wait, Learn, Refuse };
+
+inline UnreadQueue unread_queue_step(bool exec_hooked, bool arm_asked, bool direct_queue_seen)
+{
+    if (exec_hooked)
+        return direct_queue_seen ? UnreadQueue::Learn : UnreadQueue::Wait;
+    return arm_asked ? UnreadQueue::Refuse : UnreadQueue::Arm;
+}
+
+constexpr int LIST_TYPE_DIRECT = 0;
+
+// A command queue seen in ExecuteCommandLists: its type from one GetDesc, and the thread and tick of its
+// last call while it is direct.
+struct ExecSeen {
+    void *queue;
+    int type;
+    uint32_t tid;
+    uint64_t tick;
+};
+
+// The present queue of a swapchain the creation hooks missed: the direct queue that last executed command
+// lists on the presenting thread, else the direct queue that executed most recently; nullptr when none has.
+inline const ExecSeen *present_queue_from_execs(const std::vector<ExecSeen> &seen, uint32_t tid)
+{
+    const ExecSeen *same = nullptr, *newest = nullptr;
+    for (auto &e : seen) {
+        if (e.type != LIST_TYPE_DIRECT)
+            continue;
+        if (e.tid == tid && (!same || e.tick > same->tick))
+            same = &e;
+        if (!newest || e.tick > newest->tick)
+            newest = &e;
+    }
+    return same ? same : newest;
+}
+
 inline bool xml_int(const std::string &text, const char *element, const char *attr, int &out)
 {
     size_t at = text.find(std::string("<") + element + " ");
@@ -161,6 +277,7 @@ struct FgSetting {
     bool known = false;
     int mode = -1, multi = -1;
     bool on() const { return !known || mode != 0; }
+    const char *word() const { return !known ? "unknown" : mode != 0 ? "on" : "off"; }
 };
 
 inline int hdr_mode(const std::string &hardware_settings)
@@ -245,6 +362,13 @@ template <class FgOff> inline Gate gate_for_swapchain(std::string_view fg, bool 
 {
     const bool ffx = ffx_loader(fg), named = !fg.empty() && !ffx, through = streamline || ffx;
     return gate_for(named, through, named || !through || fg_setting_off());
+}
+
+// A swapchain whose queue was learned after the device hooks armed on demand for it: the game named its back
+// buffers before they armed, so drawing before frame generation has none to draw into, and it is drawn on at Present.
+template <class FgOff> inline Gate gate_for_swapchain(std::string_view fg, bool streamline, bool armed_late, FgOff fg_setting_off)
+{
+    return armed_late ? Gate::Direct : gate_for_swapchain(fg, streamline, fg_setting_off);
 }
 
 inline bool draws_before_present(Gate gate, bool device_hooks)

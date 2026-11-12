@@ -1,5 +1,6 @@
 #include "../../src/core/apply/content/boot.hpp"
 #include "../../src/core/apply/ids.hpp"
+#include "../../src/core/apply/room.hpp"
 #include "../../src/core/apply/scheduler.hpp"
 #include "../../src/core/career_ops/teams_plan.hpp"
 #include "../../src/core/career_ops/teams_store.hpp"
@@ -9,6 +10,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 using namespace swofty_core;
@@ -55,6 +57,44 @@ static std::optional<std::string> written(const rows::Engine &e, const std::stri
 }
 
 static Value op(const char *json) { return swofty::json::parse(json); }
+
+static std::vector<std::string> holes(const std::vector<rows::Write> &applied, const rows::Base &base)
+{
+    std::unordered_map<uint64_t, std::string> have;
+    for (auto &w : applied)
+        have[w.key] = w.text;
+    auto exists = [&](const std::string &path) {
+        uint64_t k = content::gvdb::fnv64(path);
+        return have.count(k) || base(k);
+    };
+    const std::string tail = "_instancecount_";
+    std::vector<std::string> out;
+    for (auto &w : applied) {
+        std::size_t dot = w.path.rfind("._");
+        if (dot == std::string::npos || w.path.size() < tail.size() ||
+            w.path.compare(w.path.size() - tail.size(), tail.size(), tail) != 0)
+            continue;
+        std::string table = w.path.substr(0, dot);
+        std::string row = w.path.substr(dot + 2, w.path.size() - dot - 2 - tail.size());
+        auto stock = base(w.key);
+        int64_t from = stock ? std::strtoll(stock->text.c_str(), nullptr, 10) : 0;
+        for (int64_t i = from, n = std::strtoll(w.text.c_str(), nullptr, 10); i < n; i++) {
+            std::string at = table + "." + row + "_" + std::to_string(i);
+            if (!exists(at + "._metadata_") && !exists(at))
+                out.push_back(at);
+        }
+    }
+    return out;
+}
+
+static std::vector<rows::Write> owned_by(const rows::Engine &e, const std::set<std::string> &owners)
+{
+    std::vector<rows::Write> out;
+    for (auto &w : e.writes())
+        if (owners.count(w.owner))
+            out.push_back(w);
+    return out;
+}
 
 static void engine_tests()
 {
@@ -144,6 +184,59 @@ static void engine_tests()
 }
 
 // A small database with the stock rows a package copies.
+static void room_hole_tests()
+{
+    rows::Keys keys;
+    keys.parse("@t.rows.row_N\n_metadata_\nspeed\n");
+    Db db;
+    db.put("t.rows._row_instancecount_", 0, "1");
+    db.put("t.rows.row_0._metadata_", 4, "stock");
+    db.put("t.rows.row_0.speed", 1, "1.5");
+    std::vector<std::string> order = {"swofty.swofty-seasons-2015", "swofty.swofty-seasons-2024"};
+    auto lay = [&](const std::set<std::string> &skip) {
+        auto e = std::make_unique<rows::Engine>(db.base(), keys);
+        auto add = [&](const std::string &owner, const std::string &label) {
+            if (skip.count(owner))
+                return;
+            e->attribute(owner, "driver.identity");
+            e->apply(op(("{\"op\":\"add-row\",\"table\":\"t.rows\",\"from\":\"t.rows.row[_metadata_=stock]\","
+                         "\"set\":{\"_metadata_\":\"" + label + "\"}}").c_str()));
+            e->commit();
+        };
+        add(order[0], "sw15_driver");
+        add(order[1], "sw24_driver");
+        add(order[0], "sw-sw15_maldonado");
+        return e;
+    };
+    auto fresh_of = [](const rows::Engine &e) {
+        std::map<std::string, std::size_t> out;
+        for (auto &w : e.writes())
+            if (w.fresh)
+                out[w.owner]++;
+        return out;
+    };
+    auto full = lay({});
+    auto counted = fresh_of(*full);
+    check(counted[order[0]] == 4 && counted[order[1]] == 2 && written(*full, "t.rows._row_instancecount_") == "4",
+          "a seat entrant laid out after every registry sits past the later addon's row, and its addon owns the count");
+    namespace rm = apply::room;
+    std::vector<rm::AddonAsk> asks = {{order[0], counted[order[0]], 0}, {order[1], counted[order[1]], 0}};
+    auto per_addon = rm::admit(4, asks);
+    auto torn = holes(owned_by(*full, {order[0]}), db.base());
+    check(per_addon.addons[0].admitted && !per_addon.addons[1].admitted && torn.size() == 1 && torn[0] == "t.rows.row_2",
+          "refusing the later addon after layout leaves the count at 4 with row 2 never created (1121flatpunto45l's "
+          "crash): " + (torn.empty() ? std::string("none") : torn[0]));
+    auto whole = rm::admit_whole(4, asks);
+    check(!whole.admitted_keys && !whole.addons[0].admitted && holes(owned_by(*full, {}), db.base()).empty(),
+          "past the room after layout, nothing is applied and the table keeps its own rows");
+    auto again = content::readmit(order, counted, {}, 4);
+    check(again.skip == std::set<std::string>{order[1]}, "readmitted on its counted keys, the later addon is left out");
+    auto relaid = lay(again.skip);
+    check(holes(relaid->writes(), db.base()).empty() && written(*relaid, "t.rows._row_instancecount_") == "3" &&
+              written(*relaid, "t.rows.row_2._metadata_") == "sw-sw15_maldonado" && fresh_of(*relaid)[order[0]] <= 4,
+          "laid out again without it, the seat entrant takes row 2 and every counted row exists");
+}
+
 static void stock_package_rows(Db &db)
 {
     auto row = [&](const std::string &prefix, std::initializer_list<std::pair<const char *, std::string>> fields) {
@@ -231,7 +324,7 @@ static void leaderboard_tests(const std::string &regs)
     st.set_validator(&registry::schema_validator());
     const SwoftyRegistry *t = registry::table();
     for (const char *name : {"engine_sound", "vehicle.package", "vehicle", "livery", "content.package", "era.box"}) {
-        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "content.package" ? "/1.2.json" : "/1.0.json"));
+        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "content.package" ? "/1.3.json" : "/1.0.json"));
         t->declare(name, SwoftyText{schema.data(), schema.size()});
     }
     auto package = [](const char *list, const char *board) {
@@ -491,6 +584,49 @@ static void variant_tests(const std::string &regs)
     check(y.records["content.package"] == 1 && written(y.engine, "entrants.entrant_lists.entrant_list_1._metadata_") ==
                                                    "esp_f1_2017_v10",
           "with the first addon left out, the next one's rows start at the table's next index");
+
+    content::Expansion p(db.base());
+    content::expand(st, p, content::planning_ids());
+    check(p.addon_fresh == x.addon_fresh && p.fresh == x.fresh, "the plan counts the new keys the boot writes, per addon");
+    std::vector<std::string> order = st.order();
+    check(holes(x.engine.writes(), db.base()).empty(), "a boot applied whole leaves no table claiming a missing row");
+    namespace rm = apply::room;
+    std::vector<rm::AddonAsk> asks;
+    for (auto &a : order)
+        asks.push_back({a, x.addon_fresh[a], 0});
+    uint64_t room = std::min(base_keys, var_keys) == var_keys ? var_keys : base_keys + var_keys - 1;
+    auto per_addon = rm::admit(room, asks);
+    std::set<std::string> kept;
+    for (auto &v : per_addon.addons)
+        if (v.admitted)
+            kept.insert(v.addon);
+    auto torn = holes(owned_by(x.engine, kept), db.base());
+    std::printf("      per-addon refusal at room %llu keeps %zu addon(s), %zu missing row(s)%s\n", (unsigned long long)room,
+                kept.size(), torn.size(), torn.empty() ? "" : (": first " + torn.front()).c_str());
+    if (var_keys < base_keys)
+        check(!torn.empty() && kept.count("mod.esp") && !kept.count("swofty.classic-seasons-2017"),
+              "refusing the first addon of a laid-out boot keeps the second's rows past the first's: the table claims "
+              "rows that were never created (1121flatpunto45l's crash)");
+    auto whole = rm::admit_whole(room, asks);
+    check(!whole.admitted_keys && holes(owned_by(x.engine, {}), db.base()).empty(),
+          "past the room, nothing of the laid-out boot is applied, so no table claims a missing row");
+    auto again = content::readmit(order, x.addon_fresh, {}, room);
+    check(again.skip.size() == 1, "the counted keys leave one addon out whole");
+    content::Expansion z(db.base());
+    content::expand(st, z, stat, again.skip);
+    std::size_t z_keys = 0;
+    for (auto &[a, n] : z.addon_fresh)
+        z_keys += n;
+    check(z_keys <= room && holes(z.engine.writes(), db.base()).empty(),
+          "laid out again without it, the boot fits the room and no table claims a missing row");
+    auto settled = content::readmit(order, z.addon_fresh, again, room);
+    check(settled.skip == again.skip, "the second layout fits, so the readmission settles");
+    auto none = content::readmit(order, x.addon_fresh, {}, base_keys + var_keys);
+    check(none.skip.empty(), "a boot that fits the room is laid out once");
+    std::map<std::string, std::size_t> core_first = x.addon_fresh;
+    core_first["swofty.core"] = 5;
+    check(content::readmit(order, core_first, {}, base_keys + var_keys).skip.size() == 1,
+          "keys of owners outside the load order are charged before any addon");
 }
 
 // The stock wide rows next to the ones a 24-car package copies (f1_2025 and f1_teams_2024 from stock_package_rows):
@@ -877,6 +1013,20 @@ static void livery_tests()
               fops.find("\"team_customisation\":\"\"") != std::string::npos,
           "a special on a car with no stock se_livery row takes no other team's team customisation");
 
+    recs["mod.a/car"] = Value::object({{"label", "cs17_mercedes"}, {"donor", "game/mercedes_2025"}});
+    db[std::string(content::SE_LIVERIES) + ".se_livery_0.compatible_vehicle"] = "cs17_mercedes";
+    db.erase(std::string(content::SE_LIVERIES) + ".se_livery_0.team_customisation");
+    content::Plan booted, unplanned, planned;
+    int s1 = 0, s2 = 0, s3 = 0;
+    content::lower_livery("mod.a/sp", sp, {}, lookup, read, booted, stat, &s1);
+    content::lower_livery("mod.a/sp", sp, {}, lookup, read, unplanned, {}, &s2);
+    content::lower_livery("mod.a/sp", sp, {}, lookup, read, planned, content::planning_ids(), &s3);
+    check(booted.ops.size() == 2 && unplanned.ops.size() == 0 && unplanned.refused == 1,
+          "without stat ids a special livery lowers to nothing, so the old plan missed its rows (315 keys of SWOFTY "
+          "2021-2024)");
+    check(planned.ops.size() == booted.ops.size() && !planned.refused,
+          "the plan's own stat ids lower it to the rows the boot writes");
+
     content::Plan missing;
     Value bad = Value::object({{"vehicle", "mod.a/car"}, {"archive", "a.erp"}});
     recs["mod.a/car"] = Value::object({{"label", "nope"}});
@@ -1000,7 +1150,7 @@ static void team_tests(const std::string &regs)
     bool pool = false;
     for (auto &scan : content::scan_all_pools(text)) {
         ids.define_pool(scan.registry, {{{scan.lo, scan.hi}}});
-        pool |= scan.registry == "team.identity" && scan.lo == 4 && scan.hi == 1023;
+        pool |= scan.registry == "team.identity" && scan.lo == 4 && scan.hi == 16382;
     }
     check(pool, "the team stat id pool starts above the table's ids");
     for (auto &p : pins)
@@ -1862,6 +2012,76 @@ static void older_rows(Db &db)
     db.put("game_setup.scenarios.scenario_1.statId", 0, "16");
 }
 
+static void shared_switch_tests(const std::string &regs)
+{
+    registry::reset_store();
+    auto &st = registry::store();
+    st.set_order({"swofty.classic-seasons-2017", "swofty.swofty-seasons-2017"});
+    st.set_validator(&registry::schema_validator());
+    const SwoftyRegistry *t = registry::table();
+    for (const char *name : {"engine_sound", "vehicle.package", "vehicle", "livery", "content.package", "era.box"}) {
+        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "vehicle" ? "/1.1.json" : "/1.0.json"));
+        t->declare(name, SwoftyText{schema.data(), schema.size()});
+    }
+    int r1 = registry::load_data_file("swofty.classic-seasons-2017", "registry/content.json", R"j({
+      "engine_sound": { "honda": { "bundle": "sounds/cs17_honda.bdl", "settings_from": "game/mercedes_2025" } },
+      "vehicle": { "toro_rosso": { "label": "cs17_toro_rosso", "donor": "game/mercedes_2025", "stat_id": 526,
+                                   "engine_sound": "swofty.classic-seasons-2017/honda",
+                                   "audio_switch": "f1_M_mercedes", "audio_from": "f1_m_mercedes" } } })j");
+    int r2 = registry::load_data_file("swofty.swofty-seasons-2017", "registry/content.json", R"j({
+      "engine_sound": { "renault": { "bundle": "sounds/sw17_renault.bdl", "settings_from": "game/mercedes_2025" } },
+      "vehicle": { "lotus": { "label": "sw17_lotus", "donor": "game/mercedes_2025", "stat_id": 919,
+                              "engine_sound": "swofty.swofty-seasons-2017/renault",
+                              "audio_switch": "f1_M_mercedes", "audio_from": "f1_m_mercedes" } },
+      "content.package": { "sw_2017": {
+        "title": { "literal": "SWOFTY 2017" }, "entrant_list": "sw_f1_2017", "season": 2017,
+        "teams": [ { "key": "lotus", "vehicle": "swofty.swofty-seasons-2017/lotus",
+                     "drivers": [ { "driver": "game/max_verstappen", "number": 33, "look": null } ] } ],
+        "database": { "entrant_list_from": "f1_2025", "standings_from": "f1_teams_2024", "content_sets": ["2025"] } } } })j");
+    st.end_register();
+    check(r1 == SWOFTY_ASSET_OK && r2 == SWOFTY_ASSET_OK, "two packs whose cars name one sound switch register");
+
+    Db db;
+    stock_package_rows(db);
+    apply::ids::Store ids;
+    auto text = [&](const std::string &path) -> std::optional<std::string> {
+        auto r = db.base()(content::gvdb::fnv64(path));
+        return r ? std::optional<std::string>(r->text) : std::nullopt;
+    };
+    for (auto &scan : content::scan_all_pools(text))
+        ids.define_pool(scan.registry, {{{scan.lo, scan.hi}}});
+    for (auto &p : content::pins(st))
+        ids.pin(p.registry, p.id, p.stat_id, "test");
+    content::StatIds stat = [&](const std::string &reg, const std::string &id, int64_t pin) -> int64_t {
+        return pin >= 0 ? ids.pin(reg, id, pin, "test").id : ids.allocate(reg, id, "test").id;
+    };
+    content::Expansion x(db.base());
+    content::expand(st, x, stat);
+    for (auto &l : x.lines["vehicle"])
+        std::printf("      %s\n", l.c_str());
+    auto has_label = [&](const std::string &table, const std::string &row, const std::string &label) {
+        for (int i = 0; i < 8; i++)
+            if (written(x.engine, table + "." + row + "_" + std::to_string(i) + "._metadata_") == label)
+                return table + "." + row + "_" + std::to_string(i);
+        return std::string();
+    };
+    check(x.records["vehicle"] == 2 && x.refused["vehicle"] == 0 && x.left_out.empty(),
+          "both cars apply and nothing is left out");
+    std::string first = has_label("entrants.vehicles", "vehicle", "cs17_toro_rosso");
+    std::string second = has_label("entrants.vehicles", "vehicle", "sw17_lotus");
+    check(!first.empty() && !second.empty() && written(x.engine, second + ".stat_id") == "919",
+          "the later car keeps its row, so every entrant list that names sw17_lotus finds it");
+    check(written(x.engine, "audio.audio_car_data.f1_M_mercedes.bundle_name") == "cs17_honda.bdl",
+          "the switch's sound rows stay the earlier car's");
+    bool said = false;
+    for (auto &l : x.lines["vehicle"])
+        said |= l.find("vehicle swofty.swofty-seasons-2017/lotus: sound switch f1_M_mercedes is "
+                       "swofty.classic-seasons-2017/toro_rosso's") == 0;
+    check(said, "the log names the car that has the switch");
+    check(x.records["content.package"] == 1 && !has_label("entrants.entrant_lists", "entrant_list", "sw_f1_2017").empty(),
+          "the later car's own season list is not left out");
+}
+
 static void id_clash_tests(const std::string &regs)
 {
     registry::reset_store();
@@ -2026,12 +2246,71 @@ static void stock_only_tests(const std::string &regs)
     check(fresh == 5, "a stock stat_id call allocates nothing from the pool: the next free id is still the first above the table");
 }
 
+static void virtual_list_tests(const std::string &regs)
+{
+    registry::reset_store();
+    auto &st = registry::store();
+    st.set_order({"mod.vl"});
+    st.set_validator(&registry::schema_validator());
+    const SwoftyRegistry *t = registry::table();
+    for (const char *name : {"engine_sound", "vehicle.package", "vehicle", "livery", "content.package", "era.box"}) {
+        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "content.package" ? "/1.3.json" : "/1.0.json"));
+        t->declare(name, SwoftyText{schema.data(), schema.size()});
+    }
+    auto package = [](const char *list, bool virt) {
+        return std::string(R"({ "title": "lng_x", "entrant_list": ")") + list + R"(", "season": 1960, "stat_id": "auto", )" +
+               (virt ? R"("virtual_list": true, )" : "") + R"("teams": [ { "key": "mercedes", "vehicle": null,
+                 "drivers": [ { "driver": "game/lewis_hamilton", "number": 44, "look": null } ] } ],
+                 "database": { "entrant_list": ")" + list + R"(", "scenario_stat_id": null, "content_sets": ["2025"],
+                 "looks": { "mercedes/lewis_hamilton": "x" } } })";
+    };
+    std::string json = std::string("{ \"content.package\": { \"real\": ") + package("vl_real", false) +
+                       ", \"v1\": " + package("vl_1960", true) + ", \"v2\": " + package("vl_1961", true) + " } }";
+    check(registry::load_data_file("mod.vl", "registry/content.json", json) == SWOFTY_ASSET_OK, "the virtual list packages register");
+    st.end_register();
+    Db db;
+    stock_package_rows(db);
+    apply::ids::Store ids;
+    auto text = [&](const std::string &path) -> std::optional<std::string> {
+        auto r = db.base()(content::gvdb::fnv64(path));
+        return r ? std::optional<std::string>(r->text) : std::nullopt;
+    };
+    std::map<std::string, content::PoolScan> scans;
+    for (auto &scan : content::scan_all_pools(text)) {
+        ids.define_pool(scan.registry, {{{scan.lo, scan.hi}}});
+        scans[scan.registry] = scan;
+    }
+    content::settle_ids(ids, st, scans, "test");
+    content::StatIds stat = [&](const std::string &reg, const std::string &id, int64_t pin) -> int64_t {
+        return pin >= 0 ? ids.pin(reg, id, pin, "test").id : ids.allocate(reg, id, "test").id;
+    };
+    content::Expansion x(db.base());
+    content::expand(st, x, stat);
+    auto &e = x.engine;
+    const std::string lists = "entrants.entrant_lists.entrant_list_";
+    auto label = [&](int i) { return e.text(lists + std::to_string(i) + "._metadata_").value_or(""); };
+    std::string all;
+    for (auto &l : x.lines["content.package"])
+        all += l + "\n";
+    check(e.text("entrants.entrant_lists._entrant_list_instancecount_").value_or("") == "3",
+          "two virtual lists leave the stock list, the real one and the host counted\n" + all);
+    std::set<std::string> counted = {label(0), label(1), label(2)};
+    check(counted == std::set<std::string>{"f1_2025", "vl_real", "swofty_virtual_list"}, "the counted rows are f1_2025, vl_real and the host");
+    check(label(10000) == "vl_1960" && label(10001) == "vl_1961", "the virtual lists sit at entrant_list_10000 and 10001");
+    check(e.text(lists + "10000.entrant_0.entrant_reference").has_value(), "a virtual list keeps its entrant rows");
+    check(!e.text(lists + "10000.stat_id").has_value() || e.text(lists + "10000.stat_id") != e.text(lists + "1.stat_id"),
+          "a virtual list does not share the real list's stat id");
+    check(all.find("virtual lists: host swofty_virtual_list added") != std::string::npos, "the host is added and logged");
+    check(all.find("virtual lists: 2 moved above the count") != std::string::npos, "the move is logged");
+}
+
 int main(int argc, char **argv)
 {
     box_time_trial_tests();
     seat_entrant_tests();
     slot_tests();
     engine_tests();
+    room_hole_tests();
     livery_tests();
     garage_tests();
     package_team_row_tests();
@@ -2052,7 +2331,11 @@ int main(int argc, char **argv)
     if (argc > 1)
         career_registry_tests(argv[1]);
     if (argc > 1)
+        shared_switch_tests(argv[1]);
+    if (argc > 1)
         id_clash_tests(argv[1]);
+    if (argc > 1)
+        virtual_list_tests(argv[1]);
     std::printf("%s\n", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;
 }

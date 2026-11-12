@@ -1,11 +1,13 @@
 #pragma once
 
+#include "apply/facts.hpp"
 #include "apply/tracks/base.hpp"
 
 #include <swofty/json.hpp>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -318,6 +320,38 @@ inline Method method_at_op(const Mem &m, uint64_t op, std::string *name = nullpt
     return Method::none;
 }
 
+// Every F1os op is built by one template, so its method name has one string form. Once a Time Trial method was read in a form
+// (`known`), a request is told by one string read in that form: a name that is not a Time Trial method passes without the probe of
+// the twelve forms. A read that gives no string probes as method_at_op does. The name of a request that is not a Time Trial
+// method is only looked for when `name` is given.
+inline Method method_with_form(const Mem &m, uint64_t op, StrForm &known, std::string *name)
+{
+    if (known.ok()) {
+        std::string s = read_with(m, op + OP_METHOD, known);
+        if (!s.empty()) {
+            Method got = method_of(s);
+            if (name)
+                *name = std::move(s);
+            return got;
+        }
+    }
+    std::string s;
+    StrForm f = probe_form(m, op + OP_METHOD, [](const std::string &v) { return method_of(v) != Method::none; }, &s);
+    if (f.ok()) {
+        known = f;
+        Method got = method_of(s);
+        if (name)
+            *name = std::move(s);
+        return got;
+    }
+    if (name)
+        probe_form(m, op + OP_METHOD, [](const std::string &v) { return v.size() >= 3; }, name);
+    return Method::none;
+}
+
+inline uint32_t pack_form(StrForm f) { return uint32_t(f.form) << 8 | (f.word & 0xff); }
+inline StrForm unpack_form(uint32_t v) { return {Form(v >> 8 & 0xff), v & 0xff}; }
+
 // Board track keys
 
 struct BoardTrack {
@@ -373,9 +407,9 @@ inline BoardTrack request_track(const swofty_core::apply::tracks::Base &base, co
     return board_track(base, session_code);
 }
 
-// The session's track comes from the game's current-track getter, which costs hundreds of milliseconds per call from the front
-// end. The watch runs only while a Time Trial session is live: the bridge, the guards or the diagnostics need the track, and the
-// session entered as a Time Trial and has not ended. In the front end the last track read is kept.
+// The session's track comes from the game's current-track getter, which costs 100 ms or more per call. The watch runs only while a
+// Time Trial session is live: the bridge, the guards or the diagnostics need the track, and the session entered as a Time Trial and
+// has not ended. In the front end the last track read is kept.
 inline bool track_watch_on(bool bridge_on, bool guards_on, bool diag_on, bool session_live, bool time_trial)
 {
     return (bridge_on || guards_on || diag_on) && session_live && time_trial;
@@ -386,18 +420,109 @@ inline bool track_watch_due(bool on, int64_t now_ms, int64_t checked_ms, int64_t
     return on && now_ms - checked_ms >= period_ms;
 }
 
-// The diagnostics tick reads the ghost lap handler out of the storage system and describes it. Every read is guarded (a VirtualQuery
-// each), which costs milliseconds per call on some PCs, and the storage system's onSessionEnter runs for every session kind. The tick
-// therefore runs only while the track watch says a Time Trial session is live, for the bridge or the diagnostics, and at most twice a
-// second: the flow tick runs a few hundred times a second across its threads.
+// A live session's track does not change: another track or car from the Time Trial pause menu loads the session again, and that
+// load enters a new session, which turns the watch off and on and reads the track again. The track is read at the session enter;
+// while a read gives no track it is read again twice a second, at most TRACK_READS times per session, then not until the next one.
+constexpr int TRACK_READS = 10;
+
+inline bool track_read_due(bool on, bool known, int reads, int64_t now_ms, int64_t checked_ms, int max_reads = TRACK_READS,
+                           int64_t period_ms = 500)
+{
+    return !known && reads < max_reads && track_watch_due(on, now_ms, checked_ms, period_ms);
+}
+
+struct TrackReads {
+    std::atomic<bool> known{false};
+    std::atomic<int> reads{0};
+    std::atomic<int64_t> checked_ms{0};
+
+    template <class Read> std::string enter(int64_t now_ms, Read &&read)
+    {
+        checked_ms = now_ms;
+        reads = 1;
+        std::string code = read();
+        known = !code.empty();
+        return code;
+    }
+
+    // The flow tick runs on several threads: one claims a due read and the others skip it. The read's number, or 0 without one.
+    template <class Read> int tick(bool on, int64_t now_ms, Read &&read, std::string &code)
+    {
+        int64_t was = checked_ms.load();
+        if (!track_read_due(on, known.load(), reads.load(), now_ms, was) || !checked_ms.compare_exchange_strong(was, now_ms))
+            return 0;
+        int n = ++reads;
+        code = read();
+        known = !code.empty();
+        return n;
+    }
+};
+
+// The diagnostics tick reads the ghost lap handler out of the storage system and describes it. A fresh guarded read (a VirtualQuery)
+// inside the game's heap costs milliseconds on some PCs (about 10 ms per tick on Windows), and the storage system's onSessionEnter runs
+// for every session kind. The tick therefore runs on the handler watch's own thread, never on a game thread, every WATCH_PERIOD_MS and
+// only while the track watch says a Time Trial session is live, for the bridge or the diagnostics. One thread also keeps one warm
+// VirtualQuery cache: a game flow thread came back to the tick only every few seconds, after its cached answers had expired.
+constexpr uint32_t WATCH_PERIOD_MS = 500;
+
 inline bool diag_tick_on(bool bridge_on, bool diag_on, bool time_trial_live)
 {
     return (bridge_on || diag_on) && time_trial_live;
 }
 
-inline bool diag_tick_due(bool on, int64_t now_ms, int64_t checked_ms, int64_t period_ms = 500)
+// The handler watch describes the ghost lap handler: its own block (HANDLER_BLOCK bytes, one readability check, copied once) and the
+// save checks behind it (a pointer walk of about 40 reads). With SWOFTY_TT_DIAG=1 the full description runs on every diagnostics tick.
+// Otherwise it runs when the handler changes, when the handler fields that the watch line prints change (the key), and at most once
+// every HANDLER_REFRESH_MS between those, so a change in the save checks alone still reaches the log at a lower rate.
+constexpr size_t HANDLER_BLOCK = 0x520;
+constexpr int64_t HANDLER_REFRESH_MS = 10000;
+
+struct HandlerField {
+    uint16_t at;
+    uint8_t size;
+};
+
+inline constexpr HandlerField HANDLER_KEY_FIELDS[] = {{0x18, 8},  {0x60, 7},  {0x94, 8},  {0x9c, 4},  {0x130, 8}, {0x138, 4},
+                                                      {0x1b0, 4}, {0x1d0, 12}, {0x288, 4}, {0x300, 4}, {0x31c, 1}, {0x508, 8}};
+
+inline uint64_t handler_key(const uint8_t *block, size_t n, int32_t finder_state)
 {
-    return track_watch_due(on, now_ms, checked_ms, period_ms);
+    uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&](uint8_t b) { h = (h ^ b) * 0x100000001b3ull; };
+    for (const HandlerField &f : HANDLER_KEY_FIELDS)
+        for (size_t i = 0; i < f.size; i++)
+            mix(block && f.at + i < n ? block[f.at + i] : 0);
+    for (int i = 0; i < 4; i++)
+        mix(uint8_t(uint32_t(finder_state) >> (8 * i)));
+    return h;
+}
+
+struct HandlerWatch {
+    uint64_t handler = 0, key = 0;
+    int64_t full_ms = 0;
+};
+
+inline bool handler_watch_full(bool diag_on, uint64_t handler, uint64_t key, int64_t now_ms, const HandlerWatch &seen, int64_t refresh_ms = HANDLER_REFRESH_MS)
+{
+    if (!handler)
+        return false;
+    return diag_on || handler != seen.handler || key != seen.key || now_ms - seen.full_ms >= refresh_ms;
+}
+
+// The save checks behind handler+0x18 (the pointer walk) are read again only with SWOFTY_TT_DIAG=1, for a new handler, or once
+// SAVE_CHECKS_MS has passed since the last walk. Otherwise the watch line keeps the last walk's text and needs only the block copy.
+constexpr int64_t SAVE_CHECKS_MS = 5000;
+
+struct SaveChecks {
+    uint64_t handler = 0;
+    int64_t read_ms = 0;
+};
+
+inline bool save_checks_due(bool diag_on, uint64_t handler, int64_t now_ms, const SaveChecks &seen, int64_t period_ms = SAVE_CHECKS_MS)
+{
+    if (!handler)
+        return false;
+    return diag_on || handler != seen.handler || now_ms - seen.read_ms >= period_ms;
 }
 
 // One rule for "this board is ours": an addon's descriptor or a custom track. The request redirect and the guards use it.
@@ -425,6 +550,30 @@ inline int garage_node_offset(const uint8_t *bytes, size_t n, uint32_t want = GA
     return -1;
 }
 
+// The garage monitor, the track select's leaderboard button, the leaderboard privilege checks and the session timer matter only in
+// Time Trial (its front end and its sessions). Their hooks return at their first line in a game mode known to be another one (a
+// career, a Grand Prix, story, F1 World); an unknown mode (the main menu, a mode not listed, no read yet) and the diagnostics keep them.
+inline bool tt_hooks_idle(swofty_core::apply::facts::ModeKind kind, bool diag_on)
+{
+    using K = swofty_core::apply::facts::ModeKind;
+    return !diag_on && (kind == K::career || kind == K::other);
+}
+
+// An online-state gate skips the game's checks only for a request of ours whose checks fail, so the op is read (its method, board
+// and route) only when the checks fail and the bridge can answer it, or for the diagnostics.
+inline bool gate_reads_op(bool diag_on, bool bridge_on, bool push_hooked, bool on_result, bool checks_fail)
+{
+    return diag_on || (bridge_on && push_hooked && on_result && checks_fail);
+}
+
+// The garage monitor panel's update runs every frame. A panel that was driven, or that was seen with content that is not ours
+// while the content generation (bumped when the session's track is read and at a session's enter and exit) has not moved, returns
+// at once.
+inline bool garage_update_idle(uint64_t panel, uint64_t driven_panel, uint64_t idle_panel, uint32_t idle_gen, uint32_t gen)
+{
+    return !panel || panel == driven_panel || (panel == idle_panel && idle_gen == gen);
+}
+
 // Driving the garage monitor's `car_monitor_tt_leaderboard_privilege_check` ourselves: allowed once per panel object, only for our content with
 // the bridge on, and only when the panel's tab list (begin/end pointers) is a plausible non-empty list of 8-byte entries.
 inline bool garage_should_drive(bool bridge_on, bool ours_content, uint64_t panel, uint64_t tabs_begin, uint64_t tabs_end, uint64_t driven_panel, uint64_t driven_count = 0)
@@ -448,6 +597,13 @@ inline uint64_t garage_feature_flags(uint64_t flags, bool bridge_on, bool ours_c
 // Replay capture (SWOFTY_TT_REPLAY_CAPTURE=1). A personal best marks a capture pending; the game's own save (ReplayManager::SaveFullReplay) is
 // started once, a short delay later, from the replay system's own tick.
 constexpr uint32_t REPLAY_MAGIC = 0xe32fcaa8u;
+
+// Replays are captured only for Time Trial personal bests, so the replay system hooks act only in a live Time Trial session; a Grand
+// Prix, a career race or the front end keeps the game's replay system to itself.
+inline bool replay_session_on(bool session_live, bool time_trial)
+{
+    return session_live && time_trial;
+}
 
 inline bool replay_capture_due(int64_t pending_ms, int64_t now_ms, int64_t delay_ms)
 {
@@ -499,10 +655,99 @@ inline bool replay_precheck_blocks(bool main_found, uint64_t full_buffer, uint64
     return main_found && (full_buffer == 0 || key_buffer == 0);
 }
 
-// A lap marks a replay save when it is valid (or validity is unknown, -1) and faster than the session's best so far (0 = none yet).
+// A lap is a new session best only when the game itself reported it valid (1) and it is faster than the session's best so far (0 = none
+// yet). A lap of unknown validity (-1, timed by our own clock when the game gave no lap result) is no best: the clock can run over a lap
+// restart or a teleport and time a "lap" of a few seconds.
 inline bool replay_lap_is_best(int64_t lap_ms, int valid, int64_t session_best_ms)
 {
-    return lap_ms > 0 && valid != 0 && (session_best_ms <= 0 || lap_ms < session_best_ms);
+    return lap_ms > 0 && valid == 1 && (session_best_ms <= 0 || lap_ms < session_best_ms);
+}
+
+// What a finished lap does to the recording: `mark` saves the replay, `new_best` makes the lap the session's best, and `restart` restarts
+// the recording at the line. Only a new best lowers the session best; the test switch `capture_any` saves every lap without touching it.
+// A lap that is no best (slower, invalid or of unknown validity) cannot be part of a saved best, so the recording restarts at its line,
+// unless it already restarted before the line on that lap.
+struct ReplayLapOutcome {
+    bool mark = false, new_best = false, restart = false;
+};
+
+inline ReplayLapOutcome replay_lap_outcome(int64_t lap_ms, int valid, int64_t session_best_ms, bool capture_any, bool restarted_early)
+{
+    ReplayLapOutcome o;
+    o.new_best = replay_lap_is_best(lap_ms, valid, session_best_ms);
+    o.mark = o.new_best || (capture_any && lap_ms > 0);
+    o.restart = !o.mark && !restarted_early;
+    return o;
+}
+
+// Why the replay recording restarts: before the line of a lap already slower than the best; at the line after a finished lap that is no
+// best; or at the line where timing starts after an out-lap or a dropped lap (the car was moved or reset, stood still, or the lap was too
+// short), where the recording holds no part of a lap.
+enum ReplayRestart : int { restart_none, restart_before_line, restart_after_lap, restart_timing_starts };
+
+inline const char *replay_restart_when(int why)
+{
+    switch (why) {
+    case restart_before_line: return "before the line";
+    case restart_after_lap: return "at the line";
+    case restart_timing_starts: return "at the line, timing starts";
+    }
+    return "";
+}
+
+// The values the recording restart reads, each at the width the game itself reads it: [sys+0x78] is the byte Ne_Replay_SetState checks
+// before it changes state (the reset body writes the u16 at +0x79 = 1, so a dword read at +0x78 is not 0 after any reset);
+// [queue+0x48] is the dword SaveFullReplay reads as "busy"; [mgr+0x428] is the qword the load start compares with -1.
+struct ReplayRestartView {
+    bool functions = false, capture = false, viewer_idle = false, loading = false, pending = false, saving = false, system_readable = false,
+         system_vtable = false, manager_ok = false, queue_readable = false;
+    uint8_t active89 = 0, external78 = 0, recording6e1 = 0;
+    uint32_t state20 = 0, queue_busy48 = 0;
+    int64_t loaded428 = 0;
+    uint64_t sys = 0, mgr = 0, queue = 0;
+};
+
+// The first guard of the restart that does not hold, as "<name> <value>"; empty when all hold.
+inline std::string replay_restart_blocker(const ReplayRestartView &v)
+{
+    char b[112];
+    auto say = [&](const char *name, unsigned long long value) {
+        snprintf(b, sizeof b, "%s 0x%llx", name, value);
+        return std::string(b);
+    };
+    if (!v.functions)
+        return "the reset functions did not resolve";
+    if (!v.capture)
+        return "replay capture off";
+    if (!v.viewer_idle)
+        return "the replay viewer is in use";
+    if (v.loading)
+        return "a replay is being loaded into the session";
+    if (v.pending)
+        return "a replay save is marked";
+    if (v.saving)
+        return "our replay save is still being copied";
+    if (!v.sys || !v.system_readable)
+        return say("replay system", v.sys);
+    if (!v.system_vtable)
+        return say("replay system without the GameReplaySystem vtable", v.sys);
+    if (v.active89 == 0)
+        return say("[sys+0x89] (recording active)", v.active89);
+    if (v.state20 != 0)
+        return say("[sys+0x20] (state, 0 = Record)", v.state20);
+    if (v.external78 != 0)
+        return say("[sys+0x78] (external control)", v.external78);
+    if (!v.mgr || !v.manager_ok)
+        return say("replay manager", v.mgr);
+    if (v.recording6e1 != 1)
+        return say("[mgr+0x6e1] (recording flag)", v.recording6e1);
+    if (v.loaded428 != -1)
+        return say("[mgr+0x428] (loaded replay, -1 = none)", static_cast<unsigned long long>(v.loaded428));
+    if (!v.queue || !v.queue_readable)
+        return say("job queue [mgr+0x150]", v.queue);
+    if (v.queue_busy48 != 0)
+        return say("[queue+0x48] (job queue busy)", v.queue_busy48);
+    return {};
 }
 
 // The save may be started only with the bridge on, with a replay system whose vtable is the game's and a recording enabled. The content is
@@ -546,6 +791,14 @@ inline uint8_t garage_block_byte(uint8_t block, bool bridge_on, bool ours_conten
 }
 
 inline bool ours(int descriptor, bool track_custom) { return descriptor >= FIRST_ADDON_DESCRIPTOR || track_custom; }
+
+// Whether a board is the bridge's, the same answer for the request hooks and the ghost handler's hooks (write precondition,
+// session token test, rival finder). The board's own track counts as well as the session's content: the session's track is read
+// only once the session is entered, and a custom track's board is in use from the loading screen on.
+inline bool board_ours(const BoardName &b, bool board_track_custom, bool content_ours)
+{
+    return b.ok && ours(b.descriptor, board_track_custom || content_ours);
+}
 
 // Routing
 

@@ -12,6 +12,7 @@
 #include "apply/moments.hpp"
 #include "direct_start_tt.hpp"
 #include "hooks/hooks.hpp"
+#include "perf.hpp"
 
 #include <atomic>
 #include "presence_id_logic.hpp"
@@ -98,6 +99,11 @@ const runtime::Sig S_UPDATE_BINARY{"Game_F1os_OnResult_UpdateLeaderboardEntryBin
 
 const runtime::Sig S_SESSION_ENTER{"Game_GhostLapsStorageSystem_OnSessionEnter",
         "41 57 41 56 41 54 56 57 55 53 48 81 EC 80 00 00 00 48 89 CE 80 3D ?? ?? ?? ?? 01 75 6A B8 62 00 00 00", 0x2f95ee0};
+// In OnSessionEnter right after Ne_StrBuf_Printf("LBV%02u%02d%s") returns: the inline string at [rsp+0x28] holds the session's board
+// key, its char pointer at [rsp+0x38]; the D/W suffix is the game's settings.current_settings.tt_weather (wet -> W). Instruction-identical
+// on the Steam and EA images (sigverify --disp of the function, same rsp offsets).
+const runtime::Sig S_BOARD_KEY{"site_Game_GhostLapsStorageSystem_BoardKeyBuilt",
+        "49 8B 86 78 04 00 00 4C 8B 78 10 4D 85 FF 0F 84 ?? ?? ?? ?? 4D 8B 67 18 4D 3B 67 20", 0x2f961b1};
 const runtime::Sig S_ACCOUNT_ERROR{"Game_F1os_AccountStateError",
         "41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC A8 00 00 00 C5 F8 29 B4 24 90 00 00 00 48 89 CE 48 8B 81 98 00 00 00 48 85 C0 74 16 "
         "48 8B 40 10 48 8B 40 38 48 85 C0 74 09 80 38 00 0F 85 69 05 00 00 0F B6 86 B8 01 00 00", 0x336da00};
@@ -229,7 +235,7 @@ void replay_set_state(uint64_t sys, uint32_t state, uint32_t flag)
 
 bool is_replay_system(uint64_t sys)
 {
-    return game.replay_system_vt && sys && runtime::readable(reinterpret_cast<void *>(sys), 8) && *reinterpret_cast<const uint64_t *>(sys) == game.replay_system_vt;
+    return game.replay_system_vt && sys && swofty::mem::readable(sys, 8) && *reinterpret_cast<const uint64_t *>(sys) == game.replay_system_vt;
 }
 constexpr uintptr_t TS_FLAG_GLOBAL_A = 0, TS_FLAG_GLOBAL_B = 17;
 constexpr int64_t TS_FORCED_WINDOW_MS = 10 * 60 * 1000;
@@ -249,7 +255,7 @@ bool bridge_on = false, boards_on = false, guards_on = false, request_guard = fa
 std::atomic<bool> pb_armed{false};
 std::string last_board, session_code;
 std::atomic<bool> session_custom{false}, track_watch{false}, track_session{false};
-std::atomic<int64_t> track_checked_ms{0}, diag_checked_ms{0};
+tb::TrackReads track_reads;
 std::atomic<bool> unknown_logged{false};
 std::atomic<int> pending_count{0};
 std::deque<std::unique_ptr<tb::Response>> responses;
@@ -265,12 +271,24 @@ std::vector<std::string> seen_methods;
 
 bool diag_on = false;
 bool replay_capture_on = false;
+// Bumped when what content_ours() answers may change: the session's track was read, a session entered or ended.
+std::atomic<uint32_t> content_gen{1};
+std::atomic<uint32_t> method_form{0};
+
+bool outside_tt()
+{
+    return tb::tt_hooks_idle(swofty_core::apply::moments::mode_kind(), diag_on);
+}
 // Replay capture saves and uploads the game replay of a personal best. It needs Time Trial boards (uploads), not the in-game
 // leaderboards bridge; the bridge adds playing other drivers' replays in Theatre.
 bool capture_on() { return replay_capture_on && (bridge_on || boards_on); }
+// Set while a Time Trial session is live; the replay system hooks leave every other session to the game.
+std::atomic<bool> replay_tt_session{false};
 std::atomic<int64_t> replay_pending_ms{0};
 std::atomic<uint32_t> replay_pending_lap{0};
 safetyhook::InlineHook h_rui_start, h_rui_result;
+safetyhook::MidHook h_board_key;
+std::string session_key;
 safetyhook::MidHook h_garage_done, h_garage_cmd, h_garage_update, h_tab_block, h_tab_flags, h_tab_friends, h_tab_build, h_tab_gate, h_replay_tick, h_replay_tick17, h_replay_update, h_replay_frame, h_replay_save, h_replay_job, h_job_component, h_job_wrapper, h_load_session, h_load_slot, h_job_selected, h_job_stores, h_job_alloc, h_finder, h_ts_flag, h_priv, h_select, h_write_token, h_reader_fail, h_rearm, h_trip, h_save_pb, h_reset, h_entry_write, h_xml, h_push, h_upload, h_download, h_racenet, h_pb, h_session_enter, h_account_error;
 
 struct GateHook {
@@ -281,10 +299,10 @@ GateHook gates[5];
 std::atomic<uintptr_t> diag_storage{0};
 uintptr_t ts_global_a = 0, ts_global_b = 0;
 std::atomic<int64_t> ts_forced_ms{0}, enter_ms{0};
-std::string ts_seen, priv_seen, select_seen, ready_seen;
+std::string ts_seen, priv_seen, select_seen, select_walked, ready_seen;
 safetyhook::InlineHook h_write_ready, h_ready;
 safetyhook::MidHook h_garage;
-bool lookup_logged = true;
+std::atomic<bool> lookup_logged{true};
 std::atomic<int> finder_logged{0};
 uintptr_t diag_handler_seen = ~uintptr_t(0);
 std::atomic<int> diag_gate_logged{0}, diag_push_logged{0}, diag_error_logged{0}, diag_bypass_logged{0};
@@ -339,6 +357,22 @@ std::string current_content()
 bool content_ours()
 {
     return session_custom.load(std::memory_order_relaxed) || tb::addon_content(current_content());
+}
+
+tb::BoardTrack board_track_of(const tb::BoardName &bn)
+{
+    std::string code;
+    {
+        std::lock_guard<std::mutex> g(lock);
+        code = session_code;
+    }
+    return tb::request_track(swofty_core::apply::tracks::base(), bn, code);
+}
+
+bool board_ours(const std::string &board)
+{
+    tb::BoardName bn = tb::parse_board(board);
+    return bn.ok && tb::board_ours(bn, board_track_of(bn).custom, content_ours());
 }
 
 std::string hex_dump(const uint8_t *p, size_t n)
@@ -490,7 +524,19 @@ void push_mid(safetyhook::Context &c)
 {
     uint64_t op = c.rcx;
     std::string name;
-    tb::Method m = tb::method_at_op(game_mem(), op, &name);
+    static std::atomic<int> name_reads{0};
+    bool want_name = diag_on || (seen_methods.size() < 40 && name_reads.load(std::memory_order_relaxed) < 200);
+    tb::StrForm form = tb::unpack_form(method_form.load(std::memory_order_relaxed));
+    bool learned = form.ok();
+    tb::Method m = tb::method_with_form(game_mem(), op, form, want_name ? &name : nullptr);
+    if (!learned && form.ok()) {
+        method_form = tb::pack_form(form);
+        swofty::log("[boards] request redirect: method names read as %s; a request is told by one read from now on", tb::form_name(form));
+    }
+    if (want_name && !diag_on && m == tb::Method::none)
+        ++name_reads;
+    if (name.empty() && m != tb::Method::none)
+        name = tb::method_name(m);
     if (diag_on && ++diag_push_logged <= 60) {
         uint64_t sp = peek64(op + tb::OP_SERVICE);
         std::string service = sp ? tb::read_c(game_mem(), sp) : std::string();
@@ -509,13 +555,11 @@ void push_mid(safetyhook::Context &c)
         log_unreadable(op, m, name);
         return;
     }
-    std::string code;
     {
         std::lock_guard<std::mutex> g(lock);
         last_board = a.board_text;
-        code = session_code;
     }
-    tb::BoardTrack track = tb::request_track(swofty_core::apply::tracks::base(), a.board, code);
+    tb::BoardTrack track = board_track_of(a.board);
     tb::Route route = tb::route_of(m, a.board, bridge_on, track.custom || content_ours());
     if (route == tb::Route::local && !request_guard)
         route = tb::Route::pass;
@@ -697,6 +741,8 @@ void gate_mid(int idx, safetyhook::Context &c)
     tb::gate::State st = read_gate_state(c, g, &flags, &user, &session_flag, &token);
     tb::gate::Why why = tb::gate::first_failure(st);
     log_presence_user(user);
+    if (!tb::gate_reads_op(diag_on, bridge_on, push_hooked, found.on_result[int(m)] != 0, why != tb::gate::Why::none))
+        return;
     std::string name;
     tb::Method seen = tb::method_at_op(game_mem(), op, &name);
     tb::Args a;
@@ -705,12 +751,7 @@ void gate_mid(int idx, safetyhook::Context &c)
     if (seen == m) {
         a = tb::decode_args(game_mem(), op, m);
         if (a.ok) {
-            std::string code;
-            {
-                std::lock_guard<std::mutex> lk(lock);
-                code = session_code;
-            }
-            track = tb::request_track(swofty_core::apply::tracks::base(), a.board, code);
+            track = board_track_of(a.board);
             route = tb::route_of(m, a.board, bridge_on, track.custom || content_ours());
             if (route == tb::Route::local && !request_guard)
                 route = tb::Route::pass;
@@ -802,6 +843,21 @@ void session_lookup_tick()
                 name.c_str());
 }
 
+void board_key_mid(safetyhook::Context &c)
+{
+    uint64_t np = peek64(c.rsp + 0x38);
+    std::string key = np ? tb::read_c(game_mem(), np) : std::string();
+    tb::BoardName b = tb::parse_board(key);
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        session_key = b.ok ? key : std::string();
+    }
+    if (b.ok)
+        swofty::log("[boards] session board key %s built by the game at onSessionEnter (%s, from settings tt_weather)", key.c_str(), tb::weather_word(b.weather));
+    else
+        swofty::log("[boards] session board key at onSessionEnter is not a board name ('%s'); the lap recorder gets no dry/wet from it", key.c_str());
+}
+
 
 void finder_mid(safetyhook::Context &c)
 {
@@ -809,8 +865,7 @@ void finder_mid(safetyhook::Context &c)
     uint64_t handler = c.rsi, finder = c.rdi;
     uint64_t ctx = peek64(handler + 0x58), np = ctx ? peek64(ctx + 0x68) : 0;
     std::string board = np ? tb::read_c(game_mem(), np) : std::string();
-    tb::BoardName bn = tb::parse_board(board);
-    bool ours = bn.ok && tb::ours(bn.descriptor, content_ours());
+    bool ours = board_ours(board);
     bool open = user_online && s60 && s64;
     bool bypass = bridge_on && ours && push_hooked && !open;
     char key[96];
@@ -848,6 +903,8 @@ uint8_t flag_byte(uintptr_t global)
 
 void ts_flag_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     uint8_t al = uint8_t(c.rax), joining = flag_byte(ts_global_b), blocked = flag_byte(ts_global_a);
     bool ours = screen_ours(), force = ours && !al;
     if (force) {
@@ -873,6 +930,8 @@ void ts_flag_mid(safetyhook::Context &c)
 
 void priv_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     uint32_t type = uint32_t(c.rbp);
     if (bridge_on && type != 1 && type < 12 && content_ours()) {
         char sw[8] = {};
@@ -947,8 +1006,7 @@ uint64_t write_ready_hook(uint64_t handler)
         return r;
     uint64_t ctx = peek64(handler + 0x58), np = ctx ? peek64(ctx + 0x68) : 0;
     std::string board = np ? tb::read_c(game_mem(), np) : std::string();
-    tb::BoardName bn = tb::parse_board(board);
-    if (!bn.ok || !tb::ours(bn.descriptor, content_ours()))
+    if (!board_ours(board))
         return r;
     {
         std::lock_guard<std::mutex> lk(lock);
@@ -967,8 +1025,7 @@ void write_token_mid(safetyhook::Context &c)
         return;
     uint64_t handler = c.rsi, ctx = peek64(handler + 0x58), np = ctx ? peek64(ctx + 0x68) : 0;
     std::string board = np ? tb::read_c(game_mem(), np) : std::string();
-    tb::BoardName bn = tb::parse_board(board);
-    if (!bn.ok || !tb::ours(bn.descriptor, content_ours()))
+    if (!board_ours(board))
         return;
     c.rcx |= 1;
     static std::atomic<int> logged{0};
@@ -993,6 +1050,8 @@ uint64_t handler_ready_hook(uint64_t handler)
 
 void garage_msg_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static std::atomic<int> logged{0};
     uint64_t msg = peek64(c.rdx);
     uint32_t id = msg ? peek32(msg) : 0;
@@ -1005,6 +1064,8 @@ std::atomic<int> rearm_count{0};
 
 void rearm_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     int n = ++rearm_count;
     if (n <= 6 || n % 200 == 0)
         swofty::log("[boards] session timer (system at handler+0x18): re-armed %d time(s) by a validator reporting activity; object 0x%llx, new limit follows at +0xbd0 = %u s", n,
@@ -1013,6 +1074,8 @@ void rearm_mid(safetyhook::Context &c)
 
 void trip_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static std::atomic<int> logged{0};
     if (++logged <= 6) {
         LARGE_INTEGER q;
@@ -1030,6 +1093,8 @@ void trip_mid(safetyhook::Context &c)
 // nothing in the game.
 void garage_done_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static std::atomic<int> logged{0};
     uint8_t value = runtime::readable(reinterpret_cast<void *>(c.rbx + 8), 1) ? *reinterpret_cast<uint8_t *>(c.rbx + 8) : 0xff;
     uint8_t result = tb::garage_result(value, bridge_on, content_ours());
@@ -1043,6 +1108,8 @@ void garage_done_mid(safetyhook::Context &c)
 
 void garage_cmd_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static std::atomic<int> logged{0};
     static std::mutex m;
     static std::set<uint32_t> seen;
@@ -1065,6 +1132,8 @@ void garage_cmd_mid(safetyhook::Context &c)
 // through readable() for the log. Nothing is written to the game and nothing is called.
 void garage_tab_gate_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static uint8_t buf[0x100] = {};
     static std::atomic<int> logged{0};
     int session = int(uint32_t(c.rbp));
@@ -1082,6 +1151,8 @@ void garage_tab_gate_mid(safetyhook::Context &c)
 
 void garage_tab_block_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static uint8_t zero[0x20] = {};
     static std::atomic<int> logged{0};
     if (!bridge_on || !content_ours())
@@ -1094,6 +1165,8 @@ void garage_tab_block_mid(safetyhook::Context &c)
 
 void garage_tab_flags_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static thread_local uint64_t copy = 0;
     static std::atomic<int> logged{0};
     if (!bridge_on || !content_ours() || !runtime::readable(reinterpret_cast<void *>(c.rax), 8))
@@ -1111,6 +1184,8 @@ void garage_tab_flags_mid(safetyhook::Context &c)
 // Nothing is read or written and nothing is called.
 void garage_friends_tab_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static std::atomic<int> logged{0};
     if (tb::garage_append_tab(1, bridge_on, content_ours()))
         return;
@@ -1771,9 +1846,13 @@ void replay_save_entry_mid(safetyhook::Context &c)
 int64_t replay_after_ms = 0;
 std::atomic<int64_t> replay_session_best_ms{0};
 bool replay_capture_any = false;
+// A lap restarts the game's replay recording (clear + reset) so the next file starts at its line. SWOFTY_TT_REPLAY_RESTART=0 turns it off,
+// and a replay file then keeps the seconds before its lap.
+bool replay_restart_on = true;
 
 std::atomic<double> replay_lap_path{0}, replay_lap_length{0};
-std::atomic<bool> replay_lap_restarted{false};
+// `asked`: the restart before the line was requested on this lap; `restarted`: it ran (set by replay_restart).
+std::atomic<bool> replay_lap_asked{false}, replay_lap_restarted{false};
 extern std::atomic<int> replay_restart_wanted;
 extern std::atomic<bool> replay_saving;
 
@@ -1784,37 +1863,51 @@ void replay_lap_progress(double path_m, double elapsed_s)
     replay_lap_path = path_m;
     double length = replay_lap_length.load();
     int64_t best = replay_session_best_ms.load();
-    if (!capture_on() || length <= 0 || best <= 0 || path_m < length - 250 || path_m > length || replay_lap_restarted.load())
+    if (!capture_on() || length <= 0 || best <= 0 || path_m < length - 250 || path_m > length || replay_lap_asked.load())
         return;
     if (int64_t(elapsed_s * 1000) + 2500 < best)
         return;
-    replay_lap_restarted = true;
-    replay_restart_wanted = 1;
+    replay_lap_asked = true;
+    replay_restart_wanted = tb::restart_before_line;
 }
 
-// Called from the lap recorder (flow thread) after a lap was written: a valid lap faster than the session's best marks a capture pending.
+// Called from the lap recorder (flow thread) after a lap was written: a lap the game reported valid and faster than the session's best
+// marks a capture pending.
 void replay_lap_finished(int64_t lap_ms, int valid)
 {
     if (!capture_on())
         return;
     int64_t best = replay_session_best_ms.load();
-    // SWOFTY_TT_REPLAY_CAPTURE=any is a test switch: every finished lap is saved, valid or not.
-    bool mark = tb::replay_lap_is_best(lap_ms, valid, best) || (replay_capture_any && lap_ms > 0);
-    swofty::log("[replay] capture: lap %lld ms (valid %d), session best %lld ms: %s", (long long)lap_ms, valid, (long long)best, mark ? "marked for a replay save" : "not a new best, no save");
     double path = replay_lap_path.exchange(0);
-    if (path > 1000)
+    if (path > 1000 && valid == 1)
         replay_lap_length = path;
-    bool early = replay_lap_restarted.exchange(false);
-    if (!mark) {
-        if (!early)
-            replay_restart_wanted = 2;
+    replay_lap_asked = false;
+    // SWOFTY_TT_REPLAY_CAPTURE=any is a test switch: every finished lap is saved, valid or not.
+    tb::ReplayLapOutcome o = tb::replay_lap_outcome(lap_ms, valid, best, replay_capture_any, replay_lap_restarted.exchange(false));
+    swofty::log("[replay] capture: lap %lld ms (valid %d), session best %lld ms: %s", (long long)lap_ms, valid, (long long)best,
+                o.new_best ? "marked for a replay save" : o.mark ? "marked for a replay save (SWOFTY_TT_REPLAY_CAPTURE=any), the session best stays"
+                : valid != 1 ? "the game did not report it valid, no save" : "not a new best, no save");
+    if (o.restart)
+        replay_restart_wanted = tb::restart_after_lap;
+    if (!o.mark)
         return;
-    }
-    replay_session_best_ms = lap_ms;
+    if (o.new_best)
+        replay_session_best_ms = lap_ms;
     replay_pending_lap = uint32_t(lap_ms);
     replay_pending_ms = now_ms();
     replay_saved_lap_ms = uint32_t(lap_ms);
     replay_saved_mark_ms = replay_pending_ms.load();
+}
+
+// Called from the line crossing hook when timing starts after an out-lap or a dropped lap: what the recording holds is no part of a lap,
+// so it starts again at this line and the first lap's replay no longer holds the out-lap.
+void replay_lap_started()
+{
+    replay_lap_asked = false;
+    replay_lap_restarted = false;
+    replay_lap_path = 0;
+    if (capture_on())
+        replay_restart_wanted = tb::restart_timing_starts;
 }
 
 // `sys` is the candidate replay system. The per-frame ReplayBuffer::beginFrameWrite hook has no replay system in a register (rcx is the
@@ -2322,6 +2415,8 @@ void replay_view_arm(const std::string &path)
 
 void replay_tick(uint64_t sys, const char *slot)
 {
+    if (!replay_tt_session.load(std::memory_order_relaxed))
+        return;
     static std::atomic<uint64_t> entries[4]{}, ours_entries[4]{};
     static std::atomic<int> guard_logs{0};
     int which = !strcmp(slot, "vslot24") ? 0 : !strcmp(slot, "vslot17") ? 1 : !strcmp(slot, "updateFromModule") ? 2 : 3;
@@ -2511,27 +2606,67 @@ void replay_restart(uint64_t sys)
     int why = replay_restart_wanted.exchange(0);
     if (!why)
         return;
-    uint64_t mgr = replay_manager_ptr.load();
-    bool ok = game.replay_clear && game.replay_reset && capture_on() && view::stage.load() == view::off && !in_session_load.load() && !replay_pending_ms.load() &&
-              !replay_saving.load() && sys && runtime::readable(reinterpret_cast<void *>(sys), 0xc0) && is_replay_system(sys) && (peek32(sys + 0x88) >> 8 & 0xff) != 0 &&
-              peek32(sys + 0x20) == 0 && peek32(sys + 0x78) == 0 && mgr && replay_manager_ok(mgr, sys) && (peek32(mgr + 0x6e0) >> 8 & 0xff) == 1 && int32_t(peek32(mgr + 0x428)) == -1;
-    uint64_t queue = ok ? peek64(mgr + 0x150) : 0;
-    ok = ok && queue && runtime::readable(reinterpret_cast<void *>(queue + 0x48), 8) && peek64(queue + 0x48) == 0;
-    if (!ok) {
-        swofty::log("[replay] restart (%s): not now, a guard does not hold", why == 1 ? "before the line" : "at the line");
+    const char *when = tb::replay_restart_when(why);
+    if (!replay_restart_on) {
+        static bool told = false;
+        if (!told)
+            swofty::log("[replay] restart (%s): off (SWOFTY_TT_REPLAY_RESTART=0), the recording keeps running", when);
+        told = true;
         return;
     }
+    tb::ReplayRestartView v;
+    v.functions = game.replay_clear && game.replay_reset;
+    v.capture = capture_on();
+    v.viewer_idle = view::stage.load() == view::off;
+    v.loading = in_session_load.load();
+    v.pending = replay_pending_ms.load() != 0;
+    v.saving = replay_saving.load();
+    v.sys = sys;
+    v.system_readable = sys && runtime::readable(reinterpret_cast<void *>(sys), 0xc0);
+    v.system_vtable = v.system_readable && is_replay_system(sys);
+    if (v.system_vtable) {
+        v.active89 = *reinterpret_cast<const uint8_t *>(sys + 0x89);
+        v.state20 = peek32(sys + 0x20);
+        v.external78 = *reinterpret_cast<const uint8_t *>(sys + 0x78);
+    }
+    v.mgr = replay_manager_ptr.load();
+    v.manager_ok = v.mgr && v.system_vtable && replay_manager_ok(v.mgr, sys) && runtime::readable(reinterpret_cast<void *>(v.mgr + 0x428), 8);
+    if (v.manager_ok) {
+        v.recording6e1 = *reinterpret_cast<const uint8_t *>(v.mgr + 0x6e1);
+        v.loaded428 = int64_t(peek64(v.mgr + 0x428));
+        v.queue = peek64(v.mgr + 0x150);
+        v.queue_readable = v.queue && runtime::readable(reinterpret_cast<void *>(v.queue + 0x48), 4);
+        if (v.queue_readable)
+            v.queue_busy48 = peek32(v.queue + 0x48);
+    }
+    std::string blocker = tb::replay_restart_blocker(v);
+    if (!blocker.empty()) {
+        swofty::log("[replay] restart (%s): not now, the guard %s does not hold (sys 0x%llx: [+0x89] %u, [+0x20] %u, [+0x78] %u; mgr 0x%llx: [+0x6e1] %u, [+0x428] %lld; "
+                    "queue 0x%llx: [+0x48] %u; viewer %s, loading %d, mark %d, saving %d)",
+                    when, blocker.c_str(), (unsigned long long)sys, unsigned(v.active89), unsigned(v.state20), unsigned(v.external78), (unsigned long long)v.mgr,
+                    unsigned(v.recording6e1), (long long)v.loaded428, (unsigned long long)v.queue, unsigned(v.queue_busy48), v.viewer_idle ? "idle" : "in use",
+                    v.loading ? 1 : 0, v.pending ? 1 : 0, v.saving ? 1 : 0);
+        return;
+    }
+    uint64_t list = peek64(sys + 0x98), module = list && runtime::readable(reinterpret_cast<void *>(list), 8) ? peek64(list) : 0;
+    float held = 0;
+    if (module && runtime::readable(reinterpret_cast<void *>(module + 0xd8), 4))
+        memcpy(&held, reinterpret_cast<const void *>(module + 0xd8), 4);
     auto *cs = reinterpret_cast<CRITICAL_SECTION *>(peek64(sys + 0xb0));
     EnterCriticalSection(cs);
     reinterpret_cast<void (*)(uint64_t)>(game.replay_clear)(sys);
     reinterpret_cast<void (*)(uint64_t, uint32_t, uint8_t)>(game.replay_reset)(sys, 0, 1);
     *reinterpret_cast<uint8_t *>(sys + 0x88) = 1;
     LeaveCriticalSection(cs);
-    swofty::log("[replay] restart (%s): the recording starts again from here", why == 1 ? "before the line" : "at the line");
+    if (why == tb::restart_before_line)
+        replay_lap_restarted = true;
+    swofty::log("[replay] restart (%s): the recording starts again from here (%.1f s of recording dropped)", when, double(held));
 }
 
 void replay_update_mid(safetyhook::Context &c)
 {
+    if (!replay_tt_session.load(std::memory_order_relaxed))
+        return;
     replay_tick(c.rcx, "updateFromModule");
     if (replay_restart_wanted.load())
         replay_restart(c.rcx);
@@ -2568,6 +2703,8 @@ uint64_t replay_find_system(uint64_t buffer, std::string &how)
 
 void replay_frame_mid(safetyhook::Context &c)
 {
+    if (!replay_tt_session.load(std::memory_order_relaxed))
+        return;
     static std::atomic<uint64_t> searched{0};
     if (!replay_system_ptr.load() && searched.exchange(c.rcx) != c.rcx && c.rcx) {
         std::string how;
@@ -2581,13 +2718,16 @@ void replay_frame_mid(safetyhook::Context &c)
     replay_tick(0, "beginFrameWrite");
 }
 
-std::atomic<uint64_t> garage_driven_panel{0}, garage_driven_count{0}, garage_built_ours{0};
+std::atomic<uint64_t> garage_driven_panel{0}, garage_driven_count{0}, garage_built_ours{0}, garage_idle_panel{0};
+std::atomic<uint32_t> garage_idle_gen{0};
 uintptr_t garage_build_fn = 0;
 
 // Read-only: logs every run of the tab builder (panel, session type, tab count before, whether our content was active) and remembers the
 // panel when it ran for our content, so the Update hook does not rebuild it again.
 void garage_build_mid(safetyhook::Context &c)
 {
+    if (outside_tt())
+        return;
     static std::atomic<int> logged{0};
     uint64_t panel = c.rcx, inner = peek64(panel + 0x268), mgr = inner ? peek64(inner + 0x1a8) : 0;
     uint32_t session = mgr ? peek32(mgr + 4) : 0xffffffffu;
@@ -2606,8 +2746,16 @@ uintptr_t garage_priv_sub = 0;
 void garage_update_mid(safetyhook::Context &c)
 {
     uint64_t panel = c.rcx;
-    if (!garage_priv_sub || !bridge_on || garage_driven_panel.load() == panel)
+    if (!garage_priv_sub || !bridge_on || outside_tt())
         return;
+    uint32_t gen = content_gen.load(std::memory_order_relaxed);
+    if (tb::garage_update_idle(panel, garage_driven_panel.load(), garage_idle_panel.load(), garage_idle_gen.load(), gen))
+        return;
+    if (!content_ours()) {
+        garage_idle_gen = gen;
+        garage_idle_panel = panel;
+        return;
+    }
     uint64_t tb_ = 0, te = 0;
     if (!runtime::readable(reinterpret_cast<void *>(panel + 0x408), 16))
         return;
@@ -2615,7 +2763,7 @@ void garage_update_mid(safetyhook::Context &c)
     if (garage_build_fn) {
         uint64_t inner = peek64(panel + 0x268), mgr = inner ? peek64(inner + 0x1a8) : 0;
         int session = mgr ? int(peek32(mgr + 4)) : -1;
-        if (tb::garage_should_rebuild(bridge_on, content_ours(), panel, garage_built_ours.load(), session, te > tb_ ? (te - tb_) / 8 : 0)) {
+        if (tb::garage_should_rebuild(bridge_on, true, panel, garage_built_ours.load(), session, te > tb_ ? (te - tb_) / 8 : 0)) {
             garage_built_ours = panel;
             reinterpret_cast<void (*)(uint64_t)>(garage_build_fn)(panel);
             tb_ = peek64(panel + 0x408), te = peek64(panel + 0x410);
@@ -2623,7 +2771,7 @@ void garage_update_mid(safetyhook::Context &c)
                         (unsigned long long)(te > tb_ ? (te - tb_) / 8 : 0));
         }
     }
-    if (!tb::garage_should_drive(bridge_on, content_ours(), panel, tb_, te, garage_driven_panel.load(), garage_driven_count.load()))
+    if (!tb::garage_should_drive(bridge_on, true, panel, tb_, te, garage_driven_panel.load(), garage_driven_count.load()))
         return;
     garage_driven_panel = panel;
     garage_driven_count = (te - tb_) / 8;
@@ -2671,17 +2819,52 @@ void reader_fail_mid(safetyhook::Context &c)
                 (unsigned long long)c.rcx, (unsigned long long)c.rdx, (unsigned long long)c.r8, (unsigned long long)c.r9, backtrace_text(1, 6).c_str());
 }
 
+std::string watch_seen;
+
+uint64_t cached64(uint64_t at)
+{
+    uint64_t v = 0;
+    swofty::mem::read(uintptr_t(at), v);
+    return v;
+}
+
+uint32_t cached32(uint64_t at)
+{
+    uint32_t v = 0;
+    swofty::mem::read(uintptr_t(at), v);
+    return v;
+}
+
+bool cached_read(void *, uint64_t addr, void *out, size_t n)
+{
+    if (!swofty::mem::readable(uintptr_t(addr), n))
+        return false;
+    memcpy(out, reinterpret_cast<const void *>(addr), n);
+    return true;
+}
+
+tb::Mem cached_mem() { return {&cached_read, nullptr}; }
+
 void select_board_mid(safetyhook::Context &c)
 {
-    uint64_t kp = peek64(c.rsp + 0x38);
-    std::string key = kp ? tb::read_c(game_mem(), kp) : std::string();
-    uint64_t reg = c.rbx, first = reg ? peek64(reg + 0x18) : 0, last = reg ? peek64(reg + 0x20) : 0;
+    swofty::mem::Trust trust(runtime::HEAP_TRUST_MS);
+    uint64_t kp = cached64(c.rsp + 0x38);
+    std::string key = kp ? tb::read_c(cached_mem(), kp) : std::string();
+    uint64_t reg = c.rbx, first = reg ? cached64(reg + 0x18) : 0, last = reg ? cached64(reg + 0x20) : 0;
+    char walk[160];
+    snprintf(walk, sizeof walk, "%s/%llx/%llx/%llx", key.c_str(), (unsigned long long)reg, (unsigned long long)first, (unsigned long long)last);
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        if (select_walked == walk)
+            return;
+        select_walked = walk;
+    }
     size_t listed = first && last >= first ? size_t(std::min<uint64_t>((last - first) / 8, 100000)) : 0, same_descriptor = 0;
     bool found = false;
     std::string prefix = key.size() >= 5 ? key.substr(0, 5) : key, sample;
     for (size_t i = 0; i < listed; i++) {
-        uint64_t board = peek64(first + 8 * i), np = board ? peek64(board + 0x68) : 0;
-        std::string name = np ? tb::read_c(game_mem(), np) : std::string();
+        uint64_t board = cached64(first + 8 * i), np = board ? cached64(board + 0x68) : 0;
+        std::string name = np ? tb::read_c(cached_mem(), np) : std::string();
         if (!_stricmp(name.c_str(), key.c_str()))
             found = true;
         if (name.compare(0, prefix.size(), prefix) == 0) {
@@ -2703,9 +2886,6 @@ void select_board_mid(safetyhook::Context &c)
                 same_descriptor, prefix.c_str(), sample.empty() ? "none" : sample.c_str());
 }
 
-std::string watch_seen;
-int32_t last_state = -1;
-
 void describe_checks(uint64_t handler, const std::string &board)
 {
     static std::atomic<uint64_t> done{0};
@@ -2713,35 +2893,87 @@ void describe_checks(uint64_t handler, const std::string &board)
         return;
     uint64_t base = swofty::api->module_base();
     auto rva = [&](uint64_t a) { return a >= base && a < base + 0x20000000 ? a - base : 0; };
-    uint64_t obj = peek64(handler + 0x18), vt = obj ? peek64(obj) : 0;
+    uint64_t obj = cached64(handler + 0x18), vt = obj ? cached64(obj) : 0;
     std::string list;
-    uint64_t b = obj ? peek64(obj + 0x38) : 0, e = obj ? peek64(obj + 0x40) : 0;
+    uint64_t b = obj ? cached64(obj + 0x38) : 0, e = obj ? cached64(obj + 0x40) : 0;
     size_t n = b && e >= b ? std::min<uint64_t>((e - b) / 16, 32) : 0;
     for (size_t i = 0; i < n; i++) {
-        uint64_t v = peek64(b + 16 * i + 8), vvt = v ? peek64(v) : 0;
+        uint64_t v = cached64(b + 16 * i + 8), vvt = v ? cached64(v) : 0;
         char one[120];
         snprintf(one, sizeof one, "%s[object 0x%llx vtable base+0x%llx, +0x88 -> base+0x%llx]", i ? ", " : "", (unsigned long long)v, (unsigned long long)rva(vvt),
-                 (unsigned long long)rva(vvt ? peek64(vvt + 0x88) : 0));
+                 (unsigned long long)rva(vvt ? cached64(vvt + 0x88) : 0));
         list += one;
     }
     swofty::log("[boards] first-lap save checks of handler 0x%llx board %s: the system at handler+0x18 is object 0x%llx, vtable base+0x%llx, +0x130 check -> base+0x%llx; "
                 "%zu validator(s) at +0x38: %s",
-                (unsigned long long)handler, board.c_str(), (unsigned long long)obj, (unsigned long long)rva(vt), (unsigned long long)rva(vt ? peek64(vt + 0x130) : 0), n,
+                (unsigned long long)handler, board.c_str(), (unsigned long long)obj, (unsigned long long)rva(vt), (unsigned long long)rva(vt ? cached64(vt + 0x130) : 0), n,
                 list.empty() ? "none" : list.c_str());
 }
 
-void handler_watch(uint64_t handler, const std::string &board)
+// The save checks behind handler+0x18 (block+0x18 is that system's pointer): a walk of about 35 guarded reads.
+std::string save_checks(const uint8_t *block)
 {
-    describe_checks(handler, board);
-    auto b = [&](uint64_t off) { return unsigned(peek32(handler + off) & 0xff); };
-    auto w = [&](uint64_t off) { return unsigned(peek32(handler + off)); };
-    uint64_t finder = peek64(handler + 0x508);
+    uint64_t sysobj = 0;
+    memcpy(&sysobj, block + 0x18, 8);
+    uint64_t flag_mask = sysobj ? cached64(sysobj + 0xba8) : 0;
+    unsigned flag = sysobj ? unsigned(cached32(sysobj + 0xba0) & 0xff) : 0, limit = sysobj ? cached32(sysobj + 0xbd0) : 0;
+    bool check1 = sysobj && ((flag_mask & 1) == flag);
+    uint64_t lst = sysobj ? cached64(sysobj + 0x38) : 0, v0 = lst ? cached64(lst + 8) : 0, p1 = v0 ? cached64(v0 + 8) : 0, p2 = p1 ? cached64(p1 + 0x1a8) : 0,
+             p3 = p2 ? cached64(p2 + 0x30) : 0;
+    float floor_s = 0;
+    if (p3) {
+        uint32_t m = cached32(p3 + 0x2a0) ^ cached32(p3 + 0x2a8);
+        memcpy(&floor_s, &m, 4);
+    }
+    std::string active;
+    if (sysobj && lst) {
+        uint64_t end = cached64(sysobj + 0x40);
+        size_t count = end >= lst ? std::min<uint64_t>((end - lst) / 16, 6) : 0;
+        static const uint32_t offs[6] = {0x88, 0x40, 0x38, 0x18, 0x28, 0};
+        for (size_t i = 0; i < count; i++) {
+            uint64_t v = cached64(lst + 16 * i + 8);
+            if (!v || !offs[i]) {
+                active += std::string(i ? " " : "") + "?";
+                continue;
+            }
+            bool on = (cached64(v + offs[i] + 8) & 1) != (cached32(v + offs[i]) & 0xff);
+            active += std::string(i ? " " : "") + (on ? "1" : "0");
+        }
+    }
+    bool a_ok = sysobj && ((cached64(sysobj + 0x170) & 1) == (cached32(sysobj + 0x168) & 0xff));
+    char checks[400];
+    snprintf(checks, sizeof checks,
+             "check 1 (session timer flag) %s [limit %u s, flag 2 %s, system flag A %s, +0x198 object %s], validators reporting activity (0 1 2 3 4 5): %s, validator 0 minimum lap floor %.3f s%s",
+             check1 ? "ok" : "TRIPPED", limit, sysobj && ((cached64(sysobj + 0xbc8) & 1) == (cached32(sysobj + 0xbc0) & 0xff)) ? "ok" : "off", a_ok ? "ok" : "off",
+             sysobj && cached64(sysobj + 0x198) ? "present" : "absent", active.empty() ? "?" : active.c_str(), floor_s, p3 ? "" : " (not readable)");
+    return checks;
+}
+
+tb::SaveChecks checks_last;
+std::string checks_text;
+
+// block is a copy of the handler's first tb::HANDLER_BLOCK bytes, taken by diag_tick after one readability check. The save checks
+// behind handler+0x18 are walked only as tb::save_checks_due says; between walks the line keeps the last walk's text.
+void handler_watch(uint64_t handler, const uint8_t *block, int finder_state, const std::string &board, int64_t now)
+{
+    if (tb::save_checks_due(diag_on, handler, now, checks_last)) {
+        checks_last = {handler, now};
+        describe_checks(handler, board);
+        checks_text = save_checks(block);
+    }
+    auto w = [&](uint64_t off) {
+        uint32_t v;
+        memcpy(&v, block + off, 4);
+        return unsigned(v);
+    };
+    auto b = [&](uint64_t off) { return unsigned(block[off]); };
     int32_t state = int32_t(w(0x1d8));
-    int finder_state = finder ? int(peek32(finder + 0xa0)) : -1;
-    tb::BoardName bn = tb::parse_board(board);
-    bool ours = bridge_on && bn.ok && tb::ours(bn.descriptor, content_ours());
-    char force[8] = {};
-    bool forced = ours && state == 4 && GetEnvironmentVariableA("SWOFTY_TT_FORCE_EMPTY", force, sizeof force) && force[0] == '1';
+    bool ours = bridge_on && board_ours(board);
+    static const bool force_empty = [] {
+        char force[8] = {};
+        return GetEnvironmentVariableA("SWOFTY_TT_FORCE_EMPTY", force, sizeof force) && force[0] == '1';
+    }();
+    bool forced = ours && state == 4 && force_empty;
     if (forced) {
         *reinterpret_cast<uint32_t *>(handler + 0x1d8) = 1;
         state = 1;
@@ -2760,37 +2992,7 @@ void handler_watch(uint64_t handler, const std::string &board)
     need(!task_out, "a leaderboard task is out (+0x1d0/+0x1d4)");
     need(b(0x66) == 0, "+0x66 set (personal best save pending)");
     need(finder_state - 2 < 0 || finder_state - 2 > 7, "the rival finder is mid-search");
-    uint64_t sysobj = peek64(handler + 0x18), flag_mask = sysobj ? peek64(sysobj + 0xba8) : 0;
-    unsigned flag = sysobj ? unsigned(peek32(sysobj + 0xba0) & 0xff) : 0, limit = sysobj ? peek32(sysobj + 0xbd0) : 0;
-    bool check1 = sysobj && ((flag_mask & 1) == flag);
-    uint64_t lst = sysobj ? peek64(sysobj + 0x38) : 0, v0 = lst ? peek64(lst + 8) : 0, p1 = v0 ? peek64(v0 + 8) : 0, p2 = p1 ? peek64(p1 + 0x1a8) : 0, p3 = p2 ? peek64(p2 + 0x30) : 0;
-    float floor_s = 0;
-    if (p3) {
-        uint32_t m = peek32(p3 + 0x2a0) ^ peek32(p3 + 0x2a8);
-        memcpy(&floor_s, &m, 4);
-    }
-    std::string active;
-    if (sysobj && lst) {
-        uint64_t end = peek64(sysobj + 0x40);
-        size_t count = end >= lst ? std::min<uint64_t>((end - lst) / 16, 6) : 0;
-        static const uint32_t offs[6] = {0x88, 0x40, 0x38, 0x18, 0x28, 0};
-        for (size_t i = 0; i < count; i++) {
-            uint64_t v = peek64(lst + 16 * i + 8);
-            if (!v || !offs[i]) {
-                active += std::string(i ? " " : "") + "?";
-                continue;
-            }
-            bool on = (peek64(v + offs[i] + 8) & 1) != (peek32(v + offs[i]) & 0xff);
-            active += std::string(i ? " " : "") + (on ? "1" : "0");
-        }
-    }
-    bool a_ok = sysobj && ((peek64(sysobj + 0x170) & 1) == (peek32(sysobj + 0x168) & 0xff));
-    char checks[400];
-    snprintf(checks, sizeof checks,
-             "check 1 (session timer flag) %s [limit %u s, flag 2 %s, system flag A %s, +0x198 object %s], validators reporting activity (0 1 2 3 4 5): %s, validator 0 minimum lap floor %.3f s%s",
-             check1 ? "ok" : "TRIPPED", limit, sysobj && ((peek64(sysobj + 0xbc8) & 1) == (peek32(sysobj + 0xbc0) & 0xff)) ? "ok" : "off", a_ok ? "ok" : "off",
-             sysobj && peek64(sysobj + 0x198) ? "present" : "absent", active.empty() ? "?" : active.c_str(), floor_s, p3 ? "" : " (not readable)");
-    blockers += std::string(blockers.empty() ? "" : "; ") + checks;
+    blockers += std::string(blockers.empty() ? "" : "; ") + checks_text;
     char t[640];
     snprintf(t, sizeof t,
              "entry state %d (0 reading, 1 entry known, 2 entry unusable, 4 no entry)%s, task out %d, download %u, flags 60..66 %u %u %u %u %u %u %u, memory pb valid +0x288 %u, "
@@ -2806,29 +3008,73 @@ void handler_watch(uint64_t handler, const std::string &board)
     }
 }
 
+tb::HandlerWatch watch_last;
+uint64_t watch_name_ctx = 0;
+int64_t watch_enter_ms = 0;
+std::string watch_board;
+
+// Runs only on the handler watch thread (watch_main), never on a game thread. Every read goes through swofty::mem under a Trust, so
+// that one thread pays the VirtualQuery of a big heap region once per HEAP_TRUST_MS; outside SWOFTY_TT_DIAG=1 the handler is described
+// only as tb::handler_watch_full says, and its save checks are walked only as tb::save_checks_due says.
 void diag_tick()
 {
     session_lookup_tick();
     uintptr_t sys = diag_storage.load();
     if (!sys)
         return;
-    uint64_t handler = peek64(sys + 0x278);
-    // Reading the handler, the board name and describing the handler are guarded reads; tt_bridge_tick runs this at most twice a
-    // second and only while a Time Trial session is live (tb::diag_tick_on, tb::diag_tick_due).
-    std::string name;
-    if (handler) {
-        uint64_t ctx = peek64(handler + 0x58);
-        uint64_t np = ctx ? peek64(ctx + 0x68) : 0;
-        name = np ? tb::read_c(game_mem(), np) : std::string();
-        if (runtime::readable(reinterpret_cast<void *>(handler), 0x520))
-            handler_watch(handler, name);
+    int64_t entered = enter_ms.load();
+    if (entered != watch_enter_ms) {
+        watch_enter_ms = entered;
+        watch_last = {};
+        checks_last = {};
+        watch_name_ctx = 0;
+        watch_board.clear();
+        diag_handler_seen = ~uintptr_t(0);
     }
-    if (handler == diag_handler_seen)
+    swofty::mem::Trust trust(runtime::HEAP_TRUST_MS);
+    uint64_t handler = cached64(sys + 0x278);
+    alignas(8) uint8_t block[tb::HANDLER_BLOCK];
+    bool have_block = handler && swofty::mem::readable(uintptr_t(handler), sizeof block);
+    if (have_block)
+        memcpy(block, reinterpret_cast<const void *>(handler), sizeof block);
+    uint64_t ctx = 0;
+    if (have_block)
+        memcpy(&ctx, block + 0x58, 8);
+    if (handler != diag_handler_seen || ctx != watch_name_ctx) {
+        watch_name_ctx = ctx;
+        uint64_t np = ctx ? cached64(ctx + 0x68) : 0;
+        watch_board = np ? tb::read_c(cached_mem(), np) : std::string();
+    }
+    if (handler != diag_handler_seen) {
+        diag_handler_seen = handler;
+        if (diag_on)
+            swofty::log("[boards] diag: ghost lap handler of storage system 0x%llx is now 0x%llx%s%s", (unsigned long long)sys, (unsigned long long)handler,
+                        watch_board.empty() ? "" : ", board ", watch_board.c_str());
+    }
+    if (!have_block)
         return;
-    diag_handler_seen = handler;
-    if (diag_on)
-        swofty::log("[boards] diag: ghost lap handler of storage system 0x%llx is now 0x%llx%s%s", (unsigned long long)sys, (unsigned long long)handler,
-                    name.empty() ? "" : ", board ", name.c_str());
+    uint64_t finder = 0;
+    memcpy(&finder, block + 0x508, 8);
+    int finder_state = finder ? int(cached32(finder + 0xa0)) : -1;
+    uint64_t key = tb::handler_key(block, sizeof block, finder_state);
+    int64_t t = now_ms();
+    if (!tb::handler_watch_full(diag_on, handler, key, t, watch_last))
+        return;
+    watch_last = {handler, key, t};
+    handler_watch(handler, block, finder_state, watch_board, t);
+}
+
+void watch_main()
+{
+    perf::background();
+    static const uint32_t probe = perf::probe("core", "tt_bridge handler watch");
+    for (;;) {
+        Sleep(tb::WATCH_PERIOD_MS);
+        if (!tb::diag_tick_on(bridge_on, diag_on, track_session.load(std::memory_order_relaxed)))
+            continue;
+        perf::Scope timed(probe);
+        diag_tick();
+    }
 }
 
 bool section_of(const char *want, const uint8_t **begin, size_t *size)
@@ -3016,7 +3262,7 @@ void arm_replay(bool playback)
         if (uintptr_t fr = runtime::find(S_REPLAY_FRAME, "boards", "boards"))
             hook_mid(h_replay_frame, fr, replay_frame_mid, "replay buffer beginFrameWrite");
         std::thread(replay_inbox).detach();
-        swofty::log("[replay] capture armed (SWOFTY_TT_REPLAY_CAPTURE=1): tick at base+0x%llx, save at base+0x%llx, path builder at base+0x%llx", (unsigned long long)(tick - swofty::api->module_base()),
+        swofty::log("[replay] capture armed (SWOFTY_TT_REPLAY_CAPTURE=1, Time Trial sessions only): tick at base+0x%llx, save at base+0x%llx, path builder at base+0x%llx", (unsigned long long)(tick - swofty::api->module_base()),
                     (unsigned long long)(save_fn - swofty::api->module_base()), (unsigned long long)(path_fn - swofty::api->module_base()));
     } else
         swofty::log("[replay] capture: off, a signature or the tick hook failed");
@@ -3032,6 +3278,7 @@ void setup()
         return;
     }
     resolve_game();
+    swofty_core::apply::moments::mode_watch();
     char gv[16] = {};
     DWORD gn = GetEnvironmentVariableA("SWOFTY_TT_GUARDS", gv, sizeof gv);
     guards_on = (gate.is_object() && gate["tt_guards"].as_bool(false)) || (gn && gn < sizeof gv && !strcmp(gv, "1"));
@@ -3044,6 +3291,9 @@ void setup()
         DWORD rn = GetEnvironmentVariableA("SWOFTY_TT_REPLAY_CAPTURE", rv, sizeof rv);
         replay_capture_on = !(rn && rn < sizeof rv && !strcmp(rv, "0"));
         replay_capture_any = rn && rn < sizeof rv && !strcmp(rv, "any");
+        char sv[8] = {};
+        DWORD sn = GetEnvironmentVariableA("SWOFTY_TT_REPLAY_RESTART", sv, sizeof sv);
+        replay_restart_on = !(sn && sn < sizeof sv && !strcmp(sv, "0"));
         char av[8] = {};
         DWORD an = GetEnvironmentVariableA("SWOFTY_TT_REPLAY_AFTER", av, sizeof av);
         replay_after_ms = an && an < sizeof av ? int64_t(atoi(av)) * 1000 : 0;
@@ -3201,8 +3451,19 @@ void setup()
     }
     if (bridge_on || diag_on)
         if (uintptr_t at = runtime::find(S_SESSION_ENTER, "boards", "boards"))
-            if (hook_mid(h_session_enter, at, session_enter_mid, "storage system session enter"))
-                swofty::log("[boards] storage system onSessionEnter hooked at base+0x%llx (handler watch)", (unsigned long long)(at - swofty::api->module_base()));
+            if (hook_mid(h_session_enter, at, session_enter_mid, "storage system session enter")) {
+                std::thread(watch_main).detach();
+                swofty::log("[boards] storage system onSessionEnter hooked at base+0x%llx (handler watch, on its own thread every %u ms while a Time Trial session is live)",
+                            (unsigned long long)(at - swofty::api->module_base()), tb::WATCH_PERIOD_MS);
+            }
+    if (bridge_on || diag_on || boards_on) {
+        if (uintptr_t at = runtime::find(S_BOARD_KEY, "boards", "boards")) {
+            if (hook_mid(h_board_key, at, board_key_mid, "session board key"))
+                swofty::log("[boards] session board key read armed at base+0x%llx (the game's dry/wet of the Time Trial, a fallback for the lap recorder)",
+                            (unsigned long long)(at - swofty::api->module_base()));
+        } else
+            swofty::log("[boards] session board key read: off, needs %s (byte signature matched nothing unique)", S_BOARD_KEY.what);
+    }
 
     char xv[8] = {};
     DWORD xn = GetEnvironmentVariableA("SWOFTY_TT_BOARD_XML", xv, sizeof xv);
@@ -3318,6 +3579,7 @@ std::string read_session_track()
 {
     std::string code = runtime::lower(runtime::direct_start::tt::session_track());
     session_custom = tb::board_track(swofty_core::apply::tracks::base(), code).custom;
+    ++content_gen;
     std::lock_guard<std::mutex> g(lock);
     session_code = code;
     return code;
@@ -3329,14 +3591,20 @@ namespace runtime {
 
 void tt_bridge_track_watch(bool session_live)
 {
+    ++content_gen;
     bool time_trial = session_live && swofty_core::apply::moments::session_mode_track().first == "time_trial";
+    bool replay_on = tb::replay_session_on(session_live, time_trial);
+    if (replay_tt_session.exchange(replay_on) != replay_on && (h_replay_tick || h_replay_update || h_replay_frame))
+        swofty::log("[replay] system hooks %s", replay_on ? "on (a Time Trial session is live)" : "off (no Time Trial session: the game's replay system runs untouched)");
     bool on = tb::track_watch_on(bridge_on, guards_on, diag_on, session_live, time_trial);
     if (track_session.exchange(on) == on)
         return;
     if (on) {
-        track_checked_ms = now_ms();
-        std::string code = read_session_track();
-        swofty::log("[boards] track watch on: Time Trial session entered on track '%s'; the track is read twice a second until the session ends", code.c_str());
+        std::string code = track_reads.enter(now_ms(), read_session_track);
+        if (code.empty())
+            swofty::log("[boards] track watch on: Time Trial session entered with no track yet; it is read again twice a second, at most %d reads in all", tb::TRACK_READS);
+        else
+            swofty::log("[boards] track watch on: Time Trial session entered on track '%s'; it is not read again until the next session", code.c_str());
         return;
     }
     std::string code;
@@ -3352,13 +3620,12 @@ void tt_bridge_tick()
     replay_load_tick();
     int64_t t = now_ms();
     bool time_trial_live = track_session.load(std::memory_order_relaxed);
-    if (tb::diag_tick_due(tb::diag_tick_on(bridge_on, diag_on, time_trial_live), t, diag_checked_ms.load())) {
-        diag_checked_ms = t;
-        diag_tick();
-    }
-    if (tb::track_watch_due(track_watch.load(std::memory_order_relaxed) && time_trial_live, t, track_checked_ms.load())) {
-        track_checked_ms = t;
-        read_session_track();
+    std::string code;
+    if (int n = track_reads.tick(track_watch.load(std::memory_order_relaxed) && time_trial_live, t, read_session_track, code)) {
+        if (!code.empty())
+            swofty::log("[boards] track watch: track '%s' read on attempt %d; it is not read again until the next session", code.c_str(), n);
+        else if (n >= tb::TRACK_READS)
+            swofty::log("[boards] track watch: still no track after %d reads; it is not read again until the next session", n);
     }
     if (!pending_count.load(std::memory_order_relaxed))
         return;
@@ -3412,6 +3679,7 @@ void tt_bridge_tick()
 bool tt_bridge_pb_armed() { return pb_armed.load(); }
 void tt_bridge_lap_finished(int64_t lap_ms, int valid) { replay_lap_finished(lap_ms, valid); }
 void tt_bridge_lap_progress(double path_m, double elapsed_s) { replay_lap_progress(path_m, elapsed_s); }
+void tt_bridge_lap_started() { replay_lap_started(); }
 
 tt_bridge::BoardTrack tt_bridge_board_track(const std::string &code, int stat_hint)
 {
@@ -3429,12 +3697,42 @@ std::string tt_bridge_last_board()
     return last_board;
 }
 
+bool tt_bridge_session_track(std::string &code)
+{
+    if (!track_session.load(std::memory_order_relaxed) || !track_reads.known.load())
+        return false;
+    std::lock_guard<std::mutex> g(lock);
+    if (session_code.empty())
+        return false;
+    code = session_code;
+    return true;
+}
+
+std::string tt_bridge_session_board()
+{
+    std::lock_guard<std::mutex> g(lock);
+    return session_key;
+}
+
+void tt_bridge_session_exit()
+{
+    ++content_gen;
+    std::lock_guard<std::mutex> g(lock);
+    session_key.clear();
+}
+
 void tt_bridge_session_enter()
 {
+    ++content_gen;
     std::lock_guard<std::mutex> g(lock);
     last_board.clear();
     replay_session_best_ms = 0;
     replay_pending_ms = 0;
+    replay_restart_wanted = 0;
+    replay_lap_asked = false;
+    replay_lap_restarted = false;
+    replay_lap_path = 0;
+    replay_lap_length = 0;
 }
 
 bool tt_bridge_ours_session()

@@ -117,6 +117,11 @@ void events_drop_module(void *module);
 size_t events_fire(const char *event, int64_t a, int64_t b, const void *data);
 void session_emit(const session_life::Emit &e);
 void session_flow(const char *known, int to);
+// The live session's session_life::Kind and a counter that moves on every change of it; both are atomic loads.
+int session_kind();
+uint64_t session_serial();
+// Arms or drops the Time Trial player name rename for the live session (player_name.cpp).
+void player_name_session();
 
 struct CoreMixins {
     const char *name;
@@ -257,6 +262,11 @@ void replay_grid_guard_commit();
 std::vector<CoreMixins> watchdog_grace_mixins();
 void watchdog_grace_commit();
 void watchdog_flow(uint32_t hash, uint32_t to, const char *name);
+void load_stall_flow(uint32_t hash, uint32_t to, const char *name);
+void load_stall_screen(const char *name);
+void load_stall_signal(uint32_t trigger, uint64_t detail_ms);
+void load_stall_game_line(const char *line);
+void load_stall_setup();
 std::vector<CoreMixins> tyre_slots_mixins();
 void tyre_slots_commit();
 std::vector<CoreMixins> tyre_models_mixins();
@@ -300,6 +310,8 @@ void leaderboard_guard_commit();
 std::vector<CoreMixins> thrustmaster_lcd_mixins();
 void thrustmaster_lcd_commit();
 std::vector<CoreMixins> estimate_laptime_mixins();
+std::vector<CoreMixins> gp_continue_mixins();
+void gp_continue_commit();
 void estimate_laptime_commit();
 std::vector<CoreMixins> garage_setup_mixins();
 void garage_setup_commit();
@@ -330,7 +342,11 @@ bool tt_bridge_pb_armed();
 bool tt_bridge_ours_session();
 void tt_bridge_lap_finished(int64_t lap_ms, int valid);
 void tt_bridge_lap_progress(double path_m, double elapsed_s);
+void tt_bridge_lap_started();
 std::string tt_bridge_last_board();
+std::string tt_bridge_session_board();
+bool tt_bridge_session_track(std::string &code);
+void tt_bridge_session_exit();
 void tt_bridge_session_enter();
 void tt_bridge_track_watch(bool session_live);
 void lap_rec_ghost(uintptr_t handler);

@@ -2,11 +2,13 @@
 
 #include "main_menu.hpp"
 #include "main_menu_logic.hpp"
+#include "apply/moments.hpp"
 #include <safetyhook.hpp>
 #include "virtual_pad.hpp"
 #include "json.hpp"
 
 #include <swofty/game.hpp>
+#include <swofty/mem.hpp>
 #include <swofty/mixin.hpp>
 
 #include <algorithm>
@@ -52,7 +54,8 @@ bool ui_vm_set_path(const std::string &path, int type, const void *value);
 // it for swofty_back_home (the container's home route behind the standard wipe) or swofty_home (the hub's back_1). Every Migrate the game runs is logged with its flow and entry
 // (nav:), the last accepted flow is kept, and a screen that does not open in time is recovered. A session that
 // started from a card hands over (frontend_transition.ui, swofty_enter_return) to the bare activity container, where
-// the card's command is raised.
+// the card's command is raised; session_enter swaps the card's mode for the mode of the session that loaded, as the
+// container's tabs can start a Time Trial after a Grand Prix card press (or the other way round).
 //
 // SWOFTY_MAIN_MENU=0 turns the whole feature off. SWOFTY_MAIN_MENU_NAV=single|rows picks the navigation
 // layout; only single (one spawner, tile order) exists so far, and rows is logged as not built.
@@ -454,14 +457,20 @@ bool fire_in_group(const char *group, const char *route, const char *why);
 std::atomic<uintptr_t> entry_point_addr{0};
 std::atomic<bool> entry_point_told{false};
 
-bool writable(const void *p, size_t n)
+// The entry point is a global in the game image, whose protection never changes: it is queried once per address.
+std::atomic<uintptr_t> entry_point_checked{0};
+std::atomic<bool> entry_point_rw{false};
+
+bool entry_point_writable(uintptr_t at)
 {
+    if (at && entry_point_checked.load() == at)
+        return entry_point_rw.load();
     MEMORY_BASIC_INFORMATION m{};
-    if (!p || !VirtualQuery(p, &m, sizeof m) || m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-        return false;
-    if (!(m.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-        return false;
-    return uintptr_t(p) + n <= uintptr_t(m.BaseAddress) + m.RegionSize;
+    bool ok = at && VirtualQuery(reinterpret_cast<const void *>(at), &m, sizeof m) == sizeof m &&
+              logic::region_writable(m.State == MEM_COMMIT, m.Protect, uintptr_t(m.BaseAddress), m.RegionSize, at, 4);
+    entry_point_rw = ok;
+    entry_point_checked = at;
+    return ok;
 }
 
 void clear_entry_point(const char *why)
@@ -472,7 +481,7 @@ void clear_entry_point(const char *why)
         entry_point_addr = at;
     }
     auto entry = reinterpret_cast<uint32_t *>(at);
-    switch (logic::entry_point_write(at, at && writable(entry, 4))) {
+    switch (logic::entry_point_write(at, at && entry_point_writable(at))) {
     case logic::EntryPointWrite::write:
         *entry = 0;
         return;
@@ -626,8 +635,9 @@ safetyhook::InlineHook h_migrate;
 NeStr **migrate_detour(void *cmd, NeStr **out, void *node)
 {
     NeStr **r = h_migrate.call<NeStr **>(cmd, out, node);
+    swofty::mem::Trust trust(runtime::HEAP_TRUST_MS);
     auto base = static_cast<uint8_t *>(cmd);
-    std::string flow, entry, result;
+    std::string flow, entry, result, before = get_flow();
     if (runtime::readable(base + 0xc8, 16)) {
         flow = ne_text(*reinterpret_cast<NeStr **>(base + 0xc8));
         entry = ne_text(*reinterpret_cast<NeStr **>(base + 0xd0));
@@ -655,8 +665,9 @@ NeStr **migrate_detour(void *cmd, NeStr **out, void *node)
         if (pending)
             cover_up("the container is about to open");
     }
-    swofty::log("[main-menu] nav: Migrate command: flow '%s' entry '%s' -> %s%s%s; the flow the game last accepted is now %s", flow.c_str(),
-                entry.empty() ? "(none)" : entry.c_str(), failed ? "FAILED: " : "accepted", failed ? result.c_str() : "", "", get_flow().c_str());
+    if (logic::migrate_logged(failed, flow, before))
+        swofty::log("[main-menu] nav: Migrate command: flow '%s' entry '%s' -> %s%s%s; the flow the game last accepted is now %s", flow.c_str(),
+                    entry.empty() ? "(none)" : entry.c_str(), failed ? "FAILED: " : "accepted", failed ? result.c_str() : "", "", get_flow().c_str());
     return r;
 }
 
@@ -685,7 +696,12 @@ void fire_detour(void *router, void *vm, NeStr **name, uint64_t a4)
 {
     last_router = router;
     const char *text = name && *name ? reinterpret_cast<const char *>(*name) + NESTR_CHARS : "";
-    uint32_t gid = runtime::readable(static_cast<uint8_t *>(vm) + 0x250, 4) ? *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(vm) + 0x250) : 0;
+    uint32_t gid = 0;
+    {
+        swofty::mem::Trust trust(runtime::HEAP_TRUST_MS);
+        if (!vm || !swofty::mem::read(reinterpret_cast<uintptr_t>(vm) + 0x250, gid))
+            gid = 0;
+    }
     if (home_open.load() && gid == logic::djb2("fe_home") && logic::hides_panel(text)) {
         std::lock_guard<std::mutex> g(view_lock);
         home_view.left();
@@ -1360,6 +1376,25 @@ void tick()
     }
 }
 
+void session_enter()
+{
+    logic::Mode pressed = logic::Mode(nav.mode.load());
+    if (pressed == logic::Mode::none)
+        return;
+    std::string mode = swofty_core::apply::moments::session_mode_track().first;
+    logic::Mode driven = logic::driven_mode(pressed, mode);
+    if (driven == pressed)
+        return;
+    nav.mode = int(driven);
+    const char *card = pressed == logic::Mode::time_trial ? "Time Trial" : "Grand Prix";
+    if (driven == logic::Mode::none)
+        swofty::log("[main-menu] nav: the session that loaded (game mode %s) is not the %s the card opened, nor the other card's mode; the session-end hand-over raises no command",
+                    mode.c_str(), card);
+    else
+        swofty::log("[main-menu] nav: the session that loaded is a %s (game mode %s), not the %s the card opened; the session-end hand-over raises '%s'",
+                    driven == logic::Mode::time_trial ? "Time Trial" : "Grand Prix", mode.c_str(), card, logic::return_command(driven));
+}
+
 void screen(const char *name)
 {
     if (!name)
@@ -1692,7 +1727,8 @@ void paint(hud::Frame &f, uint64_t now)
     if (!std::exchange(told_drawn, true))
         swofty::log("[main-menu] panel: first draw on a %.0fx%.0f frame; video card %s, avatar %s", double(W), double(H),
                     p->video_slot >= 0 ? "yes" : "no", p->avatar_slot >= 0 ? "yes" : "no");
-    const float k = H / 1028.0f;
+    const float k = logic::panel_scale(W, H);
+    const float band_top = logic::ui_band(W, H).top;
     auto anchor = logic::scene_to_px(logic::CARD_RIGHT_X, logic::CARD_BOTTOM_Y, W, H);
     const float right = anchor.x;
     {
@@ -1707,7 +1743,7 @@ void paint(hud::Frame &f, uint64_t now)
         float block_h = name_style.px * 1.3f;
         float ph = avatar + 2 * pad;
         float pw = std::max(190 * k, pad + avatar + gap + 3 * k + 9 * k + nw + 20 * k);
-        float px = right - pw, py = 44 * k;
+        float px = right - pw, py = band_top + 44 * k;
         fade_panel(f, px - 110 * k, py, pw + 110 * k, ph, 0.45f, 0.04f, k);
         float ax = px + pad, ay = py + pad;
         if (p->avatar_slot >= 0) {
