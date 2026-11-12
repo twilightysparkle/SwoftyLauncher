@@ -86,6 +86,7 @@ t "Direct start unit test" native/test/run_direct_start_test.sh
 t "Direct start Time Trial unit test" native/test/run_direct_start_tt_test.sh
 t "Thrustmaster LCD guard unit test" native/test/run_thrustmaster_lcd_test.sh
 t "Estimate lap time guard unit test" native/test/run_estimate_laptime_test.sh
+t "Career calendar track list guard unit test" native/test/run_track_list_guard_test.sh
 t "Garage setup guard unit test" native/test/run_garage_setup_test.sh
 t "Theatre list guard unit test" native/test/run_theatre_list_test.sh
 t "Core site names exported (host-only)" native/test/run_core_sites_exported_test.sh
@@ -109,8 +110,10 @@ t "Ghost request file unit test" native/test/run_ghost_request_test.sh
 t "Front-end tile list guard unit test" native/test/run_fe_tile_guard_test.sh
 t "Stock game message log unit test" native/test/run_game_message_log_test.sh
 t "My Team vehicle base guard unit test" native/test/run_myteam_vehicle_guard_test.sh
+t "My Team vehicle heal unit test" native/test/run_myteam_vehicle_heal_test.sh
 t "Main menu logic unit test" native/test/run_main_menu_test.sh
 t "Grand Prix remembered-track fallback unit test" native/test/run_gp_track_test.sh
+t "Grand Prix weekend track guard unit test" native/test/run_gp_weekend_track_test.sh
 t "Session enter guard unit test" native/test/run_session_enter_test.sh
 t "AI line set guard unit test" native/test/run_ai_line_set_test.sh
 t "Audio job queue fix unit test" native/test/run_audio_queue_test.sh

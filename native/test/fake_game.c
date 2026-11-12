@@ -735,6 +735,396 @@ static void test_myteam_vehicle_guard(int on)
     expect(mtv_ai_calls == 2, "myteam vehicle: only the bases with a row build an AI config");
 }
 
+// Career_ScheduleComponent_Load's custom_track_list loop (0x141272c60..0x141272d3f) and the calendar read of
+// Career_ScheduleComponent_Save (0x141272150..0x141272161), with the byte runs core's career calendar track list guard
+// resolves copied byte for byte from the Steam build. The save bag reads are replaced: the stored array is
+// {u16 count +0x10, u8 *ids +0x18}. rsi = the schedule component, rdi = the array, r14 = component + 0x2a8; the push
+// goes to fake_tl_push. Both return the calendar's size in bytes.
+__asm__(
+    ".section .xtls,\"xr\"\n"
+    ".globl fake_tl_load\n"
+    ".def fake_tl_load; .scl 2; .type 32; .endef\n"
+    ".seh_proc fake_tl_load\n"
+    "fake_tl_load:\n"
+    "push %rbx\n.seh_pushreg %rbx\n"
+    "push %rbp\n.seh_pushreg %rbp\n"
+    "push %rdi\n.seh_pushreg %rdi\n"
+    "push %rsi\n.seh_pushreg %rsi\n"
+    "push %r12\n.seh_pushreg %r12\n"
+    "push %r13\n.seh_pushreg %r13\n"
+    "push %r14\n.seh_pushreg %r14\n"
+    "push %r15\n.seh_pushreg %r15\n"
+    "sub $0x48,%rsp\n.seh_stackalloc 0x48\n"
+    ".seh_endprologue\n"
+    "mov %rcx,%rsi\n"
+    "mov %rdx,%rdi\n"
+    "cmpw $0,0x10(%rdi)\n"
+    "je 9f\n"
+    "lea 0x2a8(%rsi),%r14\n"
+    "xor %r15d,%r15d\n"
+    "jmp 2f\n"
+    "1:\n"
+    ".byte 0x49,0xFF,0xC7,0x0F,0xB7,0x47,0x10,0x49,0x39,0xC7,0x4C,0x8B,0x6C,0x24,0x38,0x0F,0x83\n"
+    ".long 9f - (. + 4)\n"
+    "2:\n"
+    "mov 0x18(%rdi),%rax\n"
+    "add %r15,%rax\n"
+    "mov 0x278(%rsi),%rcx\n"
+    "mov 0xf58(%rcx),%rcx\n"
+    "mov 0x138(%rcx),%rcx\n"
+    "mov 0x8(%rcx),%rbx\n"
+    "mov 0x10(%rcx),%rbp\n"
+    "cmp %rbp,%rbx\n"
+    "je 1b\n"
+    "movzbl (%rax),%r13d\n"
+    "jmp 4f\n"
+    "3:\n"
+    ".byte 0x48,0x83,0xC3,0x28,0x48,0x39,0xEB,0x0F,0x84\n"
+    ".long 1b - (. + 4)\n"
+    "4:\n"
+    ".byte 0x44,0x38,0x6B,0x08,0x75,0xED,0x4C,0x89,0xF1,0x48,0x89,0xDA\n"
+    "call fake_tl_push\n"
+    ".byte 0xEB,0xE0\n"
+    "9:\n"
+    "mov 0x2b8(%rsi),%rax\n"
+    "sub 0x2b0(%rsi),%rax\n"
+    "add $0x48,%rsp\n"
+    "pop %r15\n"
+    "pop %r14\n"
+    "pop %r13\n"
+    "pop %r12\n"
+    "pop %rsi\n"
+    "pop %rdi\n"
+    "pop %rbp\n"
+    "pop %rbx\n"
+    "ret\n"
+    ".seh_endproc\n"
+    ".globl fake_tl_save\n"
+    ".def fake_tl_save; .scl 2; .type 32; .endef\n"
+    ".seh_proc fake_tl_save\n"
+    "fake_tl_save:\n"
+    "push %rsi\n.seh_pushreg %rsi\n"
+    "push %rdi\n.seh_pushreg %rdi\n"
+    "push %r12\n.seh_pushreg %r12\n"
+    "push %r14\n.seh_pushreg %r14\n"
+    "sub $0x28,%rsp\n.seh_stackalloc 0x28\n"
+    ".seh_endprologue\n"
+    "mov %rcx,%r14\n"
+    "lea fake_tl_bag(%rip),%rdi\n"
+    "xor %esi,%esi\n"
+    ".byte 0x66,0x89,0x77,0x12,0x4D,0x8B,0xA6,0xB0,0x02,0x00,0x00,0x4D,0x39,0xA6,0xB8,0x02,0x00,0x00\n"
+    "mov 0x2b8(%r14),%rax\n"
+    "sub %r12,%rax\n"
+    "add $0x28,%rsp\n"
+    "pop %r14\n"
+    "pop %r12\n"
+    "pop %rdi\n"
+    "pop %rsi\n"
+    "ret\n"
+    ".seh_endproc\n"
+    ".section .drectve\n"
+    ".ascii \" -export:fake_tl_load -export:fake_tl_save\"\n"
+    ".text\n");
+uint64_t fake_tl_load(void *component, void *array);
+uint64_t fake_tl_save(void *component);
+
+uint8_t fake_tl_bag[0x20];
+
+enum { TL_ENTRY = 0x28, TL_SEASONS = 10, TL_IDS = 24, TL_CAP = 6000 };
+static uint8_t tl_rows[TL_SEASONS * TL_IDS + 1][TL_ENTRY];
+static uint8_t tl_component[0x300], tl_career[0x1000], tl_events[0x140], tl_list[0x18], tl_array[0x20];
+static uint8_t tl_calendar[TL_CAP * TL_ENTRY];
+static uint8_t tl_ids[65536];
+static int tl_full;
+
+__attribute__((used, noinline)) void fake_tl_push(uint8_t *vec, const uint8_t *row)
+{
+    uint8_t **end = (uint8_t **)(vec + 0x10);
+    if (*end >= tl_calendar + sizeof tl_calendar) {
+        tl_full = 1;
+        return;
+    }
+    memcpy(*end, row, TL_ENTRY);
+    *end += TL_ENTRY;
+}
+
+static void tl_setup(void)
+{
+    for (int s = 0; s < TL_SEASONS; s++)
+        for (int id = 0; id < TL_IDS; id++) {
+            uint8_t *row = tl_rows[s * TL_IDS + id];
+            row[8] = (uint8_t)id;
+            row[0x10] = (uint8_t)s;
+        }
+    tl_rows[TL_SEASONS * TL_IDS][8] = 40;
+    *(uint8_t **)(tl_component + 0x278) = tl_career;
+    *(uint8_t **)(tl_career + 0xf58) = tl_events;
+    *(uint8_t **)(tl_events + 0x138) = tl_list;
+    *(uint8_t **)(tl_list + 8) = tl_rows[0];
+    *(uint8_t **)(tl_list + 0x10) = tl_rows[0] + sizeof tl_rows;
+    *(uint8_t **)(tl_component + 0x2b0) = tl_calendar;
+    *(uint8_t **)(tl_component + 0x2b8) = tl_calendar;
+    *(uint64_t *)(tl_component + 0x2c0) = TL_CAP;
+    *(uint32_t *)(tl_component + 0x2c8) = 5;
+}
+
+static size_t tl_load(size_t stored)
+{
+    *(uint8_t **)(tl_component + 0x2b8) = tl_calendar;
+    *(uint16_t *)(tl_array + 0x10) = (uint16_t)stored;
+    *(uint8_t **)(tl_array + 0x18) = tl_ids;
+    return fake_tl_load(tl_component, tl_array) / TL_ENTRY;
+}
+
+static size_t tl_save(void)
+{
+    size_t n = fake_tl_save(tl_component) / TL_ENTRY;
+    for (size_t i = 0; i < n && i < sizeof tl_ids; i++)
+        tl_ids[i] = tl_calendar[i * TL_ENTRY + 8];
+    return n;
+}
+
+static int tl_rows_once(size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = i + 1; j < n; j++)
+            if (!memcmp(tl_calendar + i * TL_ENTRY, tl_calendar + j * TL_ENTRY, TL_ENTRY))
+                return 0;
+    return 1;
+}
+
+static void test_track_list_guard(int on)
+{
+    static const uint8_t calendar[5] = {0, 3, 7, 12, 23};
+    tl_setup();
+    memcpy(tl_ids, calendar, sizeof calendar);
+    size_t stored = sizeof calendar, sizes[5] = {0};
+    for (int cycle = 0; cycle < (on ? 5 : 3); cycle++) {
+        sizes[cycle] = tl_load(stored);
+        stored = tl_save();
+        printf("      track list %s: cycle %d loaded %zu calendar events, saved %zu\n", on ? "on" : "off", cycle + 1, sizes[cycle], stored);
+    }
+    if (!on) {
+        expect(sizes[0] == 50 && sizes[1] == 500 && sizes[2] == 5000 && !tl_full,
+               "track list off: 10 seasons sharing ids multiply the calendar 10x per save and load (50, 500, 5000)");
+        return;
+    }
+    expect(sizes[0] == 5 && sizes[1] == 5 && sizes[2] == 5 && sizes[3] == 5 && sizes[4] == 5,
+           "track list on: 10 seasons sharing ids keep the calendar at its 5 events over 5 save and load cycles");
+    expect(tl_rows_once(sizes[4]) && tl_calendar[0x10] == 0, "track list on: each entry loads one event, the first season's row");
+    static const uint8_t twice[4] = {0, 40, 40, 7};
+    memcpy(tl_ids, twice, sizeof twice);
+    *(uint32_t *)(tl_component + 0x2c8) = 4;
+    size_t doubled = tl_load(4);
+    printf("      track list on: a calendar with a track twice (one event row) loaded %zu calendar events\n", doubled);
+    expect(doubled == 4 && tl_calendar[1 * TL_ENTRY + 8] == 40 && tl_calendar[2 * TL_ENTRY + 8] == 40,
+           "track list on: a track twice in one season with one event row loads both races");
+    expect(tl_save() == 4 && tl_load(4) == 4, "track list on: the double header saves and loads with both races");
+    *(uint32_t *)(tl_component + 0x2c8) = 5;
+    for (size_t i = 0; i < 65535; i++)
+        tl_ids[i] = calendar[i * 5 / 65535];
+    size_t healed = tl_load(65535);
+    printf("      track list on: a 65535-entry custom_track_list loaded %zu calendar events\n", healed);
+    expect(healed == 5 && tl_rows_once(healed) && !tl_full, "track list on: a blown-up save (65,535 entries) loads back to the season's 5 events");
+    for (int i = 0; i < 5; i++)
+        if (tl_calendar[i * TL_ENTRY + 8] != calendar[i])
+            healed = 0;
+    expect(healed == 5, "track list on: the healed calendar keeps the season's order");
+    expect(tl_save() == 5 && tl_load(5) == 5, "track list on: the healed calendar saves and loads unchanged");
+}
+
+// Sess_Build_SessionVehicleClassLists's first walk of the session entrants (0x14098f6f0..0x14098f736), copied byte for
+// byte from the Steam build, so core's My Team vehicle heal resolves site_Sess_SessionEnter_VehicleLookup here: rbx the
+// entrants system, rsi the entrant, r12 the end, rdi the list holder +0x18 ([rdi+8] the first entrant), r13 the class
+// table. fake_sv_find stands in for Sess_ResolveEntityHandle and fake_sv_class for 0x142506d20. After the walk,
+// fake_sv_classify reads [vehicle+0xcea] of every entrant without a zero check, as 0x142458710 does at 0x142458792.
+// fake_mtv_replace carries Ent_EntrantsSystem_ReplaceVehicle's prologue so core resolves it, and stores a copy of the
+// source vehicle in the kind 1 table the way the game's record build does (handle at +0, the data from +0x10).
+__asm__(
+    ".section .xtls,\"xr\"\n"
+    ".globl fake_sv_classes\n"
+    ".def fake_sv_classes; .scl 2; .type 32; .endef\n"
+    ".seh_proc fake_sv_classes\n"
+    "fake_sv_classes:\n"
+    "push %rbx\n.seh_pushreg %rbx\n"
+    "push %rbp\n.seh_pushreg %rbp\n"
+    "push %rdi\n.seh_pushreg %rdi\n"
+    "push %rsi\n.seh_pushreg %rsi\n"
+    "push %r12\n.seh_pushreg %r12\n"
+    "push %r13\n.seh_pushreg %r13\n"
+    "push %r14\n.seh_pushreg %r14\n"
+    "push %r15\n.seh_pushreg %r15\n"
+    "sub $0x88,%rsp\n.seh_stackalloc 0x88\n"
+    ".seh_endprologue\n"
+    "mov %rcx,%rbx\n"
+    "mov %rdx,%rdi\n"
+    "mov 0x20(%rdi),%rsi\n"
+    "mov 0x28(%rdi),%r12\n"
+    "cmp %r12,%rsi\n"
+    "je 2f\n"
+    "add $0x18,%rdi\n"
+    "lea fake_sv_class_table(%rip),%r13\n"
+    "lea 0x30(%rsp),%r14\n"
+    "lea 0x58(%rsp),%r15\n"
+    "jmp 1f\n"
+    "0:\n"
+    ".byte 0x89,0x44,0x24,0x58,0x4C,0x89,0xF1,0x4C,0x89,0xFA\n"
+    "call fake_sv_class\n"
+    ".byte 0x48,0x81,0xC6,0x88,0x00,0x00,0x00,0x4C,0x39,0xE6,0x74,0x2B\n"
+    "1:\n"
+    ".byte 0x48,0x8D,0x56,0x5C,0x48,0x89,0xD9\n"
+    "call fake_sv_find\n"
+    ".byte 0x48,0x85,0xC0,0x74,0xE3,0x48,0x0F,0xBE,0x88,0xEA,0x0C,0x00,0x00,0xB8,0xFF,0xFF,0xFF,0xFF,0x48,0x83,0xF9,0x03,0x77,0xC1\n"
+    ".byte 0x41,0x8B,0x44,0x8D,0x00,0xEB,0xBA\n"
+    "mov %rbx,%rcx\n"
+    "lea -0x18(%rdi),%rdx\n"
+    "call fake_sv_classify\n"
+    "2:\n"
+    "add $0x88,%rsp\n"
+    "pop %r15\n"
+    "pop %r14\n"
+    "pop %r13\n"
+    "pop %r12\n"
+    "pop %rsi\n"
+    "pop %rdi\n"
+    "pop %rbp\n"
+    "pop %rbx\n"
+    "ret\n"
+    ".seh_endproc\n"
+    ".globl fake_mtv_replace\n"
+    ".def fake_mtv_replace; .scl 2; .type 32; .endef\n"
+    ".seh_proc fake_mtv_replace\n"
+    "fake_mtv_replace:\n"
+    "push %r15\n.seh_pushreg %r15\n"
+    "push %r14\n.seh_pushreg %r14\n"
+    "push %r13\n.seh_pushreg %r13\n"
+    "push %r12\n.seh_pushreg %r12\n"
+    "push %rsi\n.seh_pushreg %rsi\n"
+    "push %rdi\n.seh_pushreg %rdi\n"
+    "push %rbp\n.seh_pushreg %rbp\n"
+    "push %rbx\n.seh_pushreg %rbx\n"
+    "sub $0xd38,%rsp\n.seh_stackalloc 0xd38\n"
+    ".seh_endprologue\n"
+    "mov %edx,0x28(%rsp)\n"
+    "call fake_mtv_replace_impl\n"
+    "add $0xd38,%rsp\n"
+    "pop %rbx\n"
+    "pop %rbp\n"
+    "pop %rdi\n"
+    "pop %rsi\n"
+    "pop %r12\n"
+    "pop %r13\n"
+    "pop %r14\n"
+    "pop %r15\n"
+    "ret\n"
+    ".seh_endproc\n"
+    ".section .drectve\n"
+    ".ascii \" -export:fake_sv_classes -export:fake_mtv_replace\"\n"
+    ".text\n");
+void fake_sv_classes(void *entrants, void *holder);
+
+#define SV_CAR 0xd10
+#define SV_STOCK 6
+#define SV_CUSTOM 4
+static uint8_t sv_cars[SV_STOCK][SV_CAR], sv_custom_cars[SV_CUSTOM][SV_CAR];
+static uint64_t sv_stock_slots[SV_STOCK][2], sv_custom_slots[SV_CUSTOM][2];
+static uint64_t sv_stock_table[3], sv_custom_table[3];
+static uint8_t sv_entrants_system[0x360];
+static uint8_t sv_list[4][0x88];
+static uint64_t sv_holder[6];
+static const char *const sv_labels[SV_STOCK] = {"ferrari_2026", "mercedes_2026", "myteam_mercedes", "myteam_mes_porsche_2026",
+                                               "myteam_honda_2026", "myteam_mercedes_2026"};
+const int32_t fake_sv_class_table[4] = {0, 1, 2, 3};
+static int sv_classes, sv_classified, sv_replaced;
+
+__attribute__((used, noinline)) uint64_t fake_sv_find(const uint8_t *entrants, const uint8_t *handle)
+{
+    uint8_t kind = handle[0];
+    uint16_t id = *(const uint16_t *)(handle + 2);
+    if (kind >= 3)
+        return 0;
+    const uint64_t *table = *(uint64_t *const *)(entrants + 0x328 + kind * 0x10);
+    if (!table || id >= (table[2] - table[1]) / 16)
+        return 0;
+    return ((const uint64_t *)(uintptr_t)table[1])[id * 2 + 1];
+}
+
+__attribute__((used, noinline)) void fake_sv_class(void *out, const int32_t *cls)
+{
+    (void)out;
+    (void)cls;
+    sv_classes++;
+}
+
+__attribute__((used, noinline)) void fake_sv_classify(const uint8_t *entrants, const uint64_t *holder)
+{
+    for (const uint8_t *e = (const uint8_t *)(uintptr_t)holder[4]; e != (const uint8_t *)(uintptr_t)holder[5]; e += 0x88) {
+        uint64_t v = fake_sv_find(entrants, e + 0x5c);
+        volatile int8_t cls = *(volatile const int8_t *)(uintptr_t)(v + 0xcea);
+        (void)cls;
+        sv_classified++;
+    }
+}
+
+__attribute__((used, noinline)) int fake_mtv_replace_impl(uint8_t *entrants, uint32_t handle, const uint8_t *vehicle)
+{
+    uint8_t kind = handle & 0xff;
+    uint16_t id = handle >> 16;
+    if (!kind)
+        return 5;
+    uint64_t *table = *(uint64_t **)(entrants + 0x328 + kind * 0x10);
+    if (!table || kind != 1 || id >= SV_CUSTOM)
+        return 1;
+    uint8_t *car = sv_custom_cars[id];
+    memset(car, 0, SV_CAR);
+    *(uint32_t *)car = handle;
+    memcpy(car + 0x10, vehicle, SV_CAR - 0x10);
+    uint64_t *slots = (uint64_t *)(uintptr_t)table[1];
+    size_t n = (table[2] - table[1]) / 16;
+    if (id >= n)
+        table[2] = table[1] + (uint64_t)(id + 1) * 16;
+    slots[id * 2] = (uint64_t)(uintptr_t)table;
+    slots[id * 2 + 1] = (uint64_t)(uintptr_t)car;
+    sv_replaced++;
+    return id >= n ? 2 : 0;
+}
+
+static void test_myteam_vehicle_heal(int on)
+{
+    SetErrorMode(SEM_NOGPFAULTERRORBOX);
+    memset(sv_custom_slots, 0, sizeof sv_custom_slots);
+    for (int i = 0; i < SV_STOCK; i++) {
+        memset(sv_cars[i], 0, SV_CAR);
+        *(uint32_t *)sv_cars[i] = (uint32_t)i << 16;
+        snprintf((char *)sv_cars[i] + 0x70, 0x100, "%s", sv_labels[i]);
+        sv_cars[i][0xcea] = 1;
+        sv_stock_slots[i][0] = (uint64_t)(uintptr_t)sv_stock_table;
+        sv_stock_slots[i][1] = (uint64_t)(uintptr_t)sv_cars[i];
+    }
+    sv_stock_table[1] = (uint64_t)(uintptr_t)sv_stock_slots;
+    sv_stock_table[2] = sv_stock_table[1] + sizeof sv_stock_slots;
+    sv_custom_table[1] = (uint64_t)(uintptr_t)sv_custom_slots;
+    sv_custom_table[2] = sv_custom_table[1] + 16;
+    *(uint64_t **)(sv_entrants_system + 0x328) = sv_stock_table;
+    *(uint64_t **)(sv_entrants_system + 0x338) = sv_custom_table;
+    uint32_t handles[4] = {0u << 16, 1u << 16, 2u << 16 | 1, 2u << 16 | 1};
+    for (int i = 0; i < 4; i++)
+        *(uint32_t *)(sv_list[i] + 0x5c) = handles[i];
+    sv_holder[4] = (uint64_t)(uintptr_t)sv_list[0];
+    sv_holder[5] = (uint64_t)(uintptr_t)sv_list[4];
+    sv_classes = sv_classified = sv_replaced = 0;
+    printf("      myteam heal %s: entering a session whose My Team car (custom vehicle 2) the save lost\n", on ? "on" : "off");
+    fflush(stdout);
+    fake_sv_classes(sv_entrants_system, sv_holder);
+    const char *label = (const char *)sv_custom_cars[2] + 0x70;
+    printf("      myteam heal %s: the session entered, %d classes, %d entrants classified, %d rebuilt, custom vehicle 2 is '%s'\n",
+           on ? "on" : "off", sv_classes, sv_classified, sv_replaced, label);
+    fflush(stdout);
+    expect(sv_replaced == 1, "myteam heal: the lost car is rebuilt once for both of its entrants");
+    expect(!strcmp(label, "myteam_mercedes_2026"), "myteam heal: a 2026 session rebuilds it from myteam_mercedes_2026");
+    expect(sv_classes == 4 && sv_classified == 4, "myteam heal: every entrant gets its class");
+}
+
 static void crash_leaderboard_guard(void)
 {
     static uint8_t screen[0x900];
@@ -3241,8 +3631,16 @@ int main(int argc, char **argv)
         const char *off = getenv("SWOFTY_MYTEAM_VEHICLE_GUARD");
         test_myteam_vehicle_guard(!(off && *off));
     }
+    if (argc > 1 && !strcmp(argv[1], "myteam_heal")) {
+        const char *off = getenv("SWOFTY_MYTEAM_VEHICLE_HEAL");
+        test_myteam_vehicle_heal(!(off && *off));
+    }
     if (argc > 1 && !strcmp(argv[1], "leaderboard"))
         crash_leaderboard_guard();
+    if (argc > 1 && !strcmp(argv[1], "track_list")) {
+        const char *off = getenv("SWOFTY_TRACK_LIST_GUARD");
+        test_track_list_guard(!(off && *off));
+    }
     if (argc > 1 && !strcmp(argv[1], "heap")) {
         SetErrorMode(SEM_NOGPFAULTERRORBOX);
         for (int i = 0; i < 3; i++)
