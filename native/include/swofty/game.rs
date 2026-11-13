@@ -3435,6 +3435,7 @@ pub type Game_EntrantsUi_OnCharacterListLoaded_t =
     unsafe extern "C" fn(ctx: *mut c_void, message: *const c_void) -> i64;
 pub type Game_F1WorldActivityContainer_SelectEntrantList_t =
     unsafe extern "C" fn(container: *mut c_void, entrant_list: *const c_char);
+pub type Game_Fill_PerformanceComparison_t = unsafe extern "C" fn(comparison: *mut c_void);
 pub type Game_Game_SetCurrentGameMode_t =
     unsafe extern "C" fn(mode_context: *mut c_void, mode: *mut c_void) -> u64;
 pub type Game_Get_ModelNodeId_t = unsafe extern "C" fn(name: *const c_char) -> u32;
@@ -3549,6 +3550,14 @@ pub type Game_TrackData_GetTrack_t =
     unsafe extern "C" fn(system: *mut c_void, track_ref: *const c_void, query: *const u8) -> *mut c_void;
 pub type Game_TyreAllocationComponent_SetPresetChoiceForHumanDriver_t =
     unsafe extern "C" fn(component: *mut c_void, preset: u32, local_player: c_int);
+pub type Game_Vfx_UpdateWheelTyreInstance_t = unsafe extern "C" fn(
+    studio: *mut c_void,
+    vehicle_id: u8,
+    wheel: u32,
+    tyre_vis: *mut c_void,
+    tyre_asset: *mut c_void,
+    wheel_params: *const c_void,
+);
 pub type Gdb_HashMap_Rehash_t = unsafe extern "C" fn(map: *mut GdbValueMap, num_buckets: u64);
 pub type Gdb_Load_GameDatabase_t =
     unsafe extern "C" fn(db: *mut GdbDatabase, cfg: *mut c_void) -> *mut GdbDatabase;
@@ -6079,6 +6088,11 @@ pub mod bindings {
     };
     pub const Game_FanzonesOnboardingVM_FadeIn: Binding = Binding {
         id: "Game_FanzonesOnboardingVM_FadeIn",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Game_Fill_PerformanceComparison: Binding = Binding {
+        id: "Game_Fill_PerformanceComparison",
         kind: "func",
         status: Status::Experimental,
     };
@@ -8644,6 +8658,11 @@ pub mod bindings {
     };
     pub const Game_VfxManager_Initialise: Binding = Binding {
         id: "Game_VfxManager_Initialise",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Game_Vfx_UpdateWheelTyreInstance: Binding = Binding {
+        id: "Game_Vfx_UpdateWheelTyreInstance",
         kind: "func",
         status: Status::Experimental,
     };
@@ -15007,6 +15026,11 @@ pub mod bindings {
         kind: "data",
         status: Status::Experimental,
     };
+    pub const g_Ne_InlineStr128Vtable: Binding = Binding {
+        id: "g_Ne_InlineStr128Vtable",
+        kind: "data",
+        status: Status::Experimental,
+    };
     pub const g_Ne_LogGate: Binding = Binding {
         id: "g_Ne_LogGate",
         kind: "data",
@@ -16442,8 +16466,23 @@ pub mod bindings {
         kind: "site",
         status: Status::Experimental,
     };
+    pub const site_Game_TheatreList_EntryStepAlt: Binding = Binding {
+        id: "site_Game_TheatreList_EntryStepAlt",
+        kind: "site",
+        status: Status::Experimental,
+    };
     pub const site_Game_TheatreList_NoSlot: Binding = Binding {
         id: "site_Game_TheatreList_NoSlot",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_TheatreList_NoSlotAlt: Binding = Binding {
+        id: "site_Game_TheatreList_NoSlotAlt",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_TheatreRows_RowOffset: Binding = Binding {
+        id: "site_Game_TheatreRows_RowOffset",
         kind: "site",
         status: Status::Experimental,
     };
@@ -16715,6 +16754,16 @@ pub mod bindings {
     pub const site_Sess_InGamePlayerFinishedAiCall: Binding = Binding {
         id: "site_Sess_InGamePlayerFinishedAiCall",
         kind: "call",
+        status: Status::Experimental,
+    };
+    pub const site_Sess_InGameRaceRetirementDriver: Binding = Binding {
+        id: "site_Sess_InGameRaceRetirementDriver",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Sess_InGameRaceRetirementDriverJoin: Binding = Binding {
+        id: "site_Sess_InGameRaceRetirementDriverJoin",
+        kind: "site",
         status: Status::Experimental,
     };
     pub const site_Sess_InGameSessionCompleteAiCall: Binding = Binding {

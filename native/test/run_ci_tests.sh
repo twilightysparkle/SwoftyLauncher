@@ -71,6 +71,7 @@ t "Round track record guard unit test" native/test/run_track_record_test.sh
 t "Team HQ track guard unit test" native/test/run_teamhq_track_test.sh
 t "Activity resume guard unit test" native/test/run_activity_resume_test.sh
 t "Events sequencer record guard unit test" native/test/run_sequencer_records_test.sh
+t "Race retirement driver guard unit test" native/test/run_race_retirement_test.sh
 t "Standings dropped scores unit test" native/test/run_standings_drop_test.sh
 t "AI team curves guard unit test" native/test/run_ai_curves_test.sh
 t "Teammate pairs guard unit test" native/test/run_teammate_pairs_test.sh
@@ -125,6 +126,8 @@ t "Profiler minute summary unit test" native/test/run_perf_logic_test.sh
 t "Save temp heap size unit test" native/test/run_save_heap_test.sh
 t "Boot watchdog grace unit test" native/test/run_watchdog_grace_test.sh
 t "Load-stall watchdog trigger unit test" native/test/run_load_stall_test.sh
+t "Load-stall report running-threads order unit test" native/test/run_stall_order_test.sh
+t "Session job list scan probe unit test" native/test/run_session_job_probe_test.sh
 t "Pattern scan and scan cache unit test" native/test/run_scan_test.sh
 t "Telemetry feed unit test" "$(zig_test "-I packages/sdk/include native/test/telemetry_feed_test.cpp" telemetry_feed_test)"
 t "Save diagnostics log formatting unit test" "$(zig_test "-I packages/sdk/include native/test/save_diag_test.cpp" save_diag_test)"
