@@ -7005,7 +7005,8 @@
     "addons/career-editor/native/src/components.cpp",
     "native/src/core/career.cpp",
     "native/src/core/netplay_room.cpp",
-    "native/src/core/testagent/agent.cpp"
+    "native/src/core/testagent/agent.cpp",
+    "native/src/core/myteam_vehicle_keep.cpp"
    ]
   },
   {
@@ -12163,6 +12164,30 @@
      "build": "d873a1c8d2044cef",
      "date": "2026-10-29",
      "by": "carlive-verify",
+     "how": "static"
+    }
+   ],
+   "used_by": []
+  },
+  {
+   "id": "car.suspension_damage_on_collision",
+   "section": ".xtls",
+   "pattern": "56 57 53 48 83 EC 40 C5 F8 29 74 24 30 48 8B 41 08 F6 80 30 01 00 00 01",
+   "match": "0x144654d10",
+   "anchor": "0x0",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x144654d10",
+   "kind": "func_start",
+   "names": [
+    "Car_SuspensionDamage_OnCollision"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-13",
+     "by": "susp-collision",
      "how": "static"
     }
    ],
@@ -164041,7 +164066,8 @@
     }
    ],
    "used_by": [
-    "native/src/core/myteam_vehicle_guard.cpp"
+    "native/src/core/myteam_vehicle_guard.cpp",
+    "native/src/core/myteam_vehicle_keep.cpp"
    ]
   },
   {
@@ -164068,7 +164094,8 @@
     }
    ],
    "used_by": [
-    "native/src/core/myteam_vehicle_guard.cpp"
+    "native/src/core/myteam_vehicle_guard.cpp",
+    "native/src/core/myteam_vehicle_keep.cpp"
    ]
   },
   {
@@ -164340,6 +164367,141 @@
    "used_by": [
     "native/src/core/myteam_vehicle_heal.cpp"
    ]
+  },
+  {
+   "id": "game.myteam_vehicle_bases_save_record",
+   "section": ".xtls",
+   "pattern": "8B 6C 24 38 85 ED 0F 85 ?? ?? ?? ?? 41 8B 06 C1 E0 0E 66 41 0B 46 02",
+   "match": "0x1425070b3",
+   "anchor": "0xc",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x1425070bf",
+   "kind": "mid",
+   "expect": "41 8B 06 C1",
+   "names": [
+    "site_Game_MyTeamVehicleBases_SaveRecord"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-13",
+     "by": "myteam-keep",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/myteam_vehicle_keep.cpp"
+   ]
+  },
+  {
+   "id": "game.career_events_sequencer_team_mate_driver",
+   "section": ".xtls",
+   "pattern": "48 8B 4C 24 38 4C 89 EA 49 89 C0 E8",
+   "match": "0x140c72eaf",
+   "anchor": "0x8",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x140c72eb7",
+   "kind": "mid",
+   "expect": "49 89 C0 E8",
+   "names": [
+    "site_Game_CareerEventsSequencerTeamMateDriver"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-13",
+     "by": "seqmate",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/sequencer_records_guard.cpp"
+   ]
+  },
+  {
+   "id": "game.career_events_sequencer_team_mate_driver_join",
+   "section": ".xtls",
+   "pattern": "49 89 C0 E8 ?? ?? ?? ?? 48 8B 94 24 A0 00 00 00",
+   "match": "0x140c72eb7",
+   "anchor": "0x8",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x140c72ebf",
+   "kind": "mid",
+   "expect": "48 8B 94 24",
+   "names": [
+    "site_Game_CareerEventsSequencerTeamMateDriverJoin"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-13",
+     "by": "seqmate",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/sequencer_records_guard.cpp"
+   ]
+  },
+  {
+   "id": "game.career_events_sequencer_player_driver",
+   "section": ".xtls",
+   "pattern": "48 8B 4C 24 38 4C 89 FA 49 89 C0 E8",
+   "match": "0x140c73109",
+   "anchor": "0x8",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x140c73111",
+   "kind": "mid",
+   "expect": "49 89 C0 E8",
+   "names": [
+    "site_Game_CareerEventsSequencerPlayerDriver"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-13",
+     "by": "seqmate",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/sequencer_records_guard.cpp"
+   ]
+  },
+  {
+   "id": "game.career_events_sequencer_player_driver_join",
+   "section": ".xtls",
+   "pattern": "49 89 C0 E8 ?? ?? ?? ?? C6 83 E4 05 00 00 01",
+   "match": "0x140c73111",
+   "anchor": "0x8",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x140c73119",
+   "kind": "mid",
+   "names": [
+    "site_Game_CareerEventsSequencerPlayerDriverJoin"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-13",
+     "by": "seqmate",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/sequencer_records_guard.cpp"
+   ],
+   "expect": "C6 83 E4 05"
   }
  ]
 }

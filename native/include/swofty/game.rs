@@ -3217,6 +3217,8 @@ pub type Car_Register_DetachablePart_Thunk_t = unsafe extern "C" fn(
     k: f32,
 );
 pub type Car_Reset_LastFittedUpgrade_t = unsafe extern "C" fn(inst: *mut c_void);
+pub type Car_SuspensionDamage_OnCollision_t =
+    unsafe extern "C" fn(susp_damage: *mut c_void, contact: *mut c_void);
 pub type Car_Tyre_SetWearFactor_t =
     unsafe extern "C" fn(tyre_component: *mut c_void, apply_set: bool, force: u16);
 pub type Career_Add_SeasonWeekend_t = unsafe extern "C" fn(season: *mut c_void, weekend: *mut c_void) -> u64;
@@ -3681,6 +3683,8 @@ pub type Sess_Tyres_ClosestAvailableCompound_t = unsafe extern "C" fn(
     preference: *const u32,
     wear_scale: f32,
 ) -> u32;
+pub type Sess_VehicleTable_EmplaceAt_t =
+    unsafe extern "C" fn(table: *mut c_void, record: *const c_void) -> *mut c_void;
 pub type Sess_WeatherComponent_SetSystemRandomSeed_t = unsafe extern "C" fn(component: *mut c_void);
 pub type Sess_Weekend_Start_t =
     unsafe extern "C" fn(weekend: *mut c_void, entrants: *const c_void, begin: bool);
@@ -3930,6 +3934,11 @@ pub mod bindings {
     };
     pub const Car_SteeringWheelLeds_Update: Binding = Binding {
         id: "Car_SteeringWheelLeds_Update",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Car_SuspensionDamage_OnCollision: Binding = Binding {
+        id: "Car_SuspensionDamage_OnCollision",
         kind: "func",
         status: Status::Experimental,
     };
@@ -14698,6 +14707,11 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Sess_VehicleTable_EmplaceAt: Binding = Binding {
+        id: "Sess_VehicleTable_EmplaceAt",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Sess_ViewReplay_EnterPhotoMode: Binding = Binding {
         id: "Sess_ViewReplay_EnterPhotoMode",
         kind: "func",
@@ -16238,8 +16252,28 @@ pub mod bindings {
         kind: "site",
         status: Status::Experimental,
     };
+    pub const site_Game_CareerEventsSequencerPlayerDriver: Binding = Binding {
+        id: "site_Game_CareerEventsSequencerPlayerDriver",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_CareerEventsSequencerPlayerDriverJoin: Binding = Binding {
+        id: "site_Game_CareerEventsSequencerPlayerDriverJoin",
+        kind: "site",
+        status: Status::Experimental,
+    };
     pub const site_Game_CareerEventsSequencerRecordsJoin: Binding = Binding {
         id: "site_Game_CareerEventsSequencerRecordsJoin",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_CareerEventsSequencerTeamMateDriver: Binding = Binding {
+        id: "site_Game_CareerEventsSequencerTeamMateDriver",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_CareerEventsSequencerTeamMateDriverJoin: Binding = Binding {
+        id: "site_Game_CareerEventsSequencerTeamMateDriverJoin",
         kind: "site",
         status: Status::Experimental,
     };
@@ -16340,6 +16374,11 @@ pub mod bindings {
     };
     pub const site_Game_MyTeamVehicleBases_NextBase: Binding = Binding {
         id: "site_Game_MyTeamVehicleBases_NextBase",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Game_MyTeamVehicleBases_SaveRecord: Binding = Binding {
+        id: "site_Game_MyTeamVehicleBases_SaveRecord",
         kind: "site",
         status: Status::Experimental,
     };

@@ -1105,7 +1105,11 @@ inline constexpr site<"site_Game_AcclimPenalty_Entry"> site_Game_AcclimPenalty_E
 inline constexpr site<"site_Game_AcclimPenalty_Return"> site_Game_AcclimPenalty_Return{}; // L2 experimental
 inline constexpr call<"site_Game_CareerContinue_DriverSlotTitle"> site_Game_CareerContinue_DriverSlotTitle{}; // L2 experimental
 inline constexpr site<"site_Game_CareerEventsSequencerFirstRecord"> site_Game_CareerEventsSequencerFirstRecord{}; // L2 experimental
+inline constexpr site<"site_Game_CareerEventsSequencerPlayerDriver"> site_Game_CareerEventsSequencerPlayerDriver{}; // L2 experimental
+inline constexpr site<"site_Game_CareerEventsSequencerPlayerDriverJoin"> site_Game_CareerEventsSequencerPlayerDriverJoin{}; // L2 experimental
 inline constexpr site<"site_Game_CareerEventsSequencerRecordsJoin"> site_Game_CareerEventsSequencerRecordsJoin{}; // L2 experimental
+inline constexpr site<"site_Game_CareerEventsSequencerTeamMateDriver"> site_Game_CareerEventsSequencerTeamMateDriver{}; // L2 experimental
+inline constexpr site<"site_Game_CareerEventsSequencerTeamMateDriverJoin"> site_Game_CareerEventsSequencerTeamMateDriverJoin{}; // L2 experimental
 inline constexpr site<"site_Game_CareerWizardConfirm_NextRoute"> site_Game_CareerWizardConfirm_NextRoute{}; // L2 experimental
 inline constexpr site<"site_Game_CareerWizard_BackRoute"> site_Game_CareerWizard_BackRoute{}; // L2 experimental
 inline constexpr call<"site_Game_DriverSelectHeader_BuildTabs"> site_Game_DriverSelectHeader_BuildTabs{}; // L2 experimental
@@ -1126,6 +1130,7 @@ inline constexpr site<"site_Game_GrandPrixContinueVm_F1wCarCheck"> site_Game_Gra
 inline constexpr site<"site_Game_GrandPrixContinueVm_F1wWarningCheck"> site_Game_GrandPrixContinueVm_F1wWarningCheck{}; // L2 experimental
 inline constexpr site<"site_Game_MyTeamVehicleBases_AiConfigLoad"> site_Game_MyTeamVehicleBases_AiConfigLoad{}; // L2 experimental
 inline constexpr site<"site_Game_MyTeamVehicleBases_NextBase"> site_Game_MyTeamVehicleBases_NextBase{}; // L2 experimental
+inline constexpr site<"site_Game_MyTeamVehicleBases_SaveRecord"> site_Game_MyTeamVehicleBases_SaveRecord{}; // L2 experimental
 inline constexpr site<"site_Game_PitLane_BoxPoseFalse"> site_Game_PitLane_BoxPoseFalse{}; // L2 experimental
 inline constexpr site<"site_Game_PitLane_BoxSlotRead"> site_Game_PitLane_BoxSlotRead{}; // L2 experimental
 inline constexpr site<"site_Game_PitStops_CrewTemplateRead"> site_Game_PitStops_CrewTemplateRead{}; // L2 experimental
