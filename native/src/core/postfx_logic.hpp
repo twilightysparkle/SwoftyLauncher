@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <type_traits>
 
@@ -260,6 +261,18 @@ inline bool placed_lately(unsigned now, unsigned at)
     return now - at < 2;
 }
 
+// The HUD's read of the finished picture, which the game makes while paused and under panels over the race: the
+// passes run at that read. A frame's lists are recorded in parallel, so the list with the HUD-less step cannot
+// tell whether the HUD's list of the same frame reads the picture; while the read holds, the step leaves the passes
+// to it. It holds for the frame of a read and the one after, so the first frame without a read is the only one
+// that goes without the passes when the reads stop.
+struct HudRead {
+    unsigned at = LONG_AGO;
+
+    void read(unsigned now) { at = now; }
+    bool holds(unsigned now) const { return now - at <= 1; }
+};
+
 // What the submission of a picture's list does with a fresh back buffer: nothing (the passes were placed), the
 // passes between the game's lists right after it, or wait for the list that closes the HUD-less step.
 enum PictureEnd : uint8_t { END_NONE, END_BETWEEN, END_DEFER };
@@ -268,9 +281,12 @@ enum PictureEnd : uint8_t { END_NONE, END_BETWEEN, END_DEFER };
 // the passes are placed on it. A picture's list can end inside the HUD-less step; the list that closes the step
 // then sometimes draws the rest of the picture into the back buffer, over anything placed after the picture's list.
 // So that submission only opens the step: the closing list runs the passes in it while the back buffer is bound
-// there (the split step); when it doesn't, the core's own list runs them right after the closing list, and when no
-// list closes the step before the back buffer is presented, at Present. `target` is whether the lists submitted
-// since the step opened left the back buffer a render target.
+// there (the split step); when it doesn't, the core's own list runs them right after the closing list. A list that
+// ends with the back buffer out of render target while they still wait is the one that draws the HUD and hands the
+// frame to Present: they run right before it. Only a frame whose lists the core never saw do that reaches Present
+// with them waiting, and they run there, over the HUD: the picture keeps its look and the HUD alone differs for
+// that frame, where skipping them would change the whole picture. `target` is whether the lists submitted since
+// the step opened left the back buffer a render target.
 struct BackPlace {
     bool fresh = false, open = false, target = false;
     unsigned placed_at = LONG_AGO, opened_at = LONG_AGO;
@@ -335,6 +351,16 @@ struct BackPlace {
         return true;
     }
 
+    // A list submitted after the picture's ends with the back buffer out of render target: true when the passes
+    // run between, right before it. Asked before moved().
+    bool target_left(unsigned now, bool direct)
+    {
+        if (!direct || !target || !waits(now))
+            return false;
+        place(now);
+        return true;
+    }
+
     // The back buffer is presented: true when the passes run at Present.
     bool presented(unsigned now)
     {
@@ -344,6 +370,131 @@ struct BackPlace {
         return true;
     }
 };
+
+// A frame generation swapchain (FidelityFX's, Streamline's) hands the game back buffers of its own and copies each
+// frame into its real back buffer inside Present, so the buffer a Present shows is never one the game drew into and
+// never matches the back buffer whose passes wait. The shown buffer still holds that picture when frame generation
+// is off (each Present shows the frame the game just drew), the step opened in the frame this Present closes, no
+// passes were recorded since the last Present, and the two buffers have the same size and format.
+inline bool shown_is_waiting(bool generating, unsigned runs, unsigned now, unsigned opened_at, bool same_shape)
+{
+    return !generating && !runs && now == opened_at && same_shape;
+}
+
+// Why a presented frame went without the passes, most specific first.
+enum Idle : uint8_t {
+    IDLE_NONE,
+    IDLE_KILL,
+    IDLE_KEY,
+    IDLE_PASS_OFF,
+    IDLE_RULE,
+    IDLE_OPTION,
+    IDLE_ADDON_KEY,
+    IDLE_VIEW,
+    IDLE_PASSES,
+    IDLE_BUSY,
+    IDLE_LIST_STATE,
+    IDLE_UI_TOGETHER,
+    IDLE_HUD_READ,
+    IDLE_NO_PICTURE,
+    IDLE_UNPLACED,
+    IDLE_COUNT
+};
+
+// What a frame knows when it closes without the passes: the kill file, the shader toggle key, what stopped the
+// place that tried to run them (IDLE_NONE when none tried), whether the HUD's read held the other places off, and
+// whether the game submitted a picture list.
+struct IdleFacts {
+    bool killed = false, key_off = false, hud_read = false, picture = false;
+    Idle tried = IDLE_NONE;
+};
+
+inline Idle idle_reason(const IdleFacts &f)
+{
+    if (f.killed)
+        return IDLE_KILL;
+    if (f.key_off)
+        return IDLE_KEY;
+    if (f.tried != IDLE_NONE)
+        return f.tried;
+    if (f.hud_read)
+        return IDLE_HUD_READ;
+    return f.picture ? IDLE_UNPLACED : IDLE_NO_PICTURE;
+}
+
+// Why no pass of a frame is live, from the reasons its passes gave (one bit per Idle): the reason they share, or
+// IDLE_PASSES when they differ.
+inline Idle idle_of_passes(unsigned reasons)
+{
+    for (Idle one : {IDLE_PASS_OFF, IDLE_RULE, IDLE_OPTION, IDLE_ADDON_KEY, IDLE_VIEW})
+        if (reasons == 1u << one)
+            return one;
+    return IDLE_PASSES;
+}
+
+inline const char *idle_text(Idle why)
+{
+    switch (why) {
+    case IDLE_KILL:
+        return "swofty/postfx.off exists";
+    case IDLE_KEY:
+        return "the shader toggle key turned them off";
+    case IDLE_PASS_OFF:
+        return "every pass is off, over its GPU budget or without a pipeline";
+    case IDLE_RULE:
+        return "a rule turned every pass off";
+    case IDLE_OPTION:
+        return "an option turns every pass off";
+    case IDLE_ADDON_KEY:
+        return "an addon's shader key turned every pass off";
+    case IDLE_VIEW:
+        return "no pass is for this view";
+    case IDLE_PASSES:
+        return "every pass is off or not for this view";
+    case IDLE_BUSY:
+        return "every slot is in flight";
+    case IDLE_LIST_STATE:
+        return "the game's list has state from before the hooks";
+    case IDLE_UI_TOGETHER:
+        return "the picture and the HUD are in one list without a HUD-less step";
+    case IDLE_HUD_READ:
+        return "the HUD read the picture a frame before and not in this one (pause latch)";
+    case IDLE_NO_PICTURE:
+        return "the game submitted no picture list";
+    case IDLE_UNPLACED:
+        return "no list of the frame had a place for them";
+    default:
+        return "";
+    }
+}
+
+// The passes going off and on again, for one log line per change. The first time they run has its own line.
+struct OnOff {
+    enum Change : uint8_t { SAME, STOPPED, AGAIN };
+    bool on = false, ran_before = false;
+    unsigned off_at = 0;
+    Idle why = IDLE_NONE;
+
+    Change frame(bool ran, unsigned now, Idle reason)
+    {
+        if (ran == on)
+            return SAME;
+        on = ran;
+        if (!ran) {
+            off_at = now;
+            why = reason;
+            return STOPPED;
+        }
+        return std::exchange(ran_before, true) ? AGAIN : SAME;
+    }
+};
+
+// The count line's window: a minute for the first half hour, five minutes for the rest of the session.
+inline constexpr unsigned STAT_MINUTES = 30, ONOFF_LINES = 20;
+inline unsigned stat_window_ms(unsigned lines)
+{
+    return lines < STAT_MINUTES ? 60000 : 300000;
+}
 
 // A view a slot wrote into one entry of its descriptor tables: the resource and its format.
 template <class R, class F> struct Written {

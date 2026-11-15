@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use gpui_kit::component::Theme;
 use gpui_kit::{App, Pixels, Window};
-use swofty_core::session::UiMode;
+use swofty_core::session::{UiMode, nearest_ui_scale_step};
 
 pub const TV_SCALE: f32 = 1.3;
 const BASE_REM: f32 = 16.;
@@ -11,11 +11,22 @@ const BASE_FONT: f32 = 14.;
 const MIN_CONTENT: f32 = 320.;
 
 static SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
+static TV: AtomicBool = AtomicBool::new(false);
 
 pub fn scale_for(mode: UiMode) -> f32 {
     match mode {
         UiMode::Pc => 1.,
         UiMode::Tv => TV_SCALE,
+    }
+}
+
+/// The scale for a display mode and an interface scale step: Auto is the mode's own scale,
+/// a step multiplies it.
+pub fn scale_with(mode: UiMode, step: Option<u16>) -> f32 {
+    let base = scale_for(mode);
+    match step {
+        None => base,
+        Some(step) => base * f32::from(nearest_ui_scale_step(step)) / 100.,
     }
 }
 
@@ -31,7 +42,7 @@ fn scaled(value: f32, scale: f32) -> f32 {
 pub const TV_CONTROL: f32 = 1.5;
 
 pub fn is_tv() -> bool {
-    current() > 1.
+    TV.load(Ordering::Relaxed)
 }
 
 pub fn control() -> f32 {
@@ -68,9 +79,10 @@ pub fn content_width(viewport_px: f32, scale: f32) -> f32 {
     (viewport_px / scale - 2. * crate::ui::tokens::space::GUTTER).max(MIN_CONTENT)
 }
 
-pub fn apply(mode: UiMode, window: &mut Window, cx: &mut App) {
-    let scale = scale_for(mode);
+pub fn apply(mode: UiMode, step: Option<u16>, window: &mut Window, cx: &mut App) {
+    let scale = scale_with(mode, step);
     SCALE.store(scale.to_bits(), Ordering::Relaxed);
+    TV.store(mode.is_tv(), Ordering::Relaxed);
     window.set_rem_size(gpui_kit::px(BASE_REM * scale));
     Theme::update(cx, |t| {
         t.font_size = gpui_kit::px(BASE_FONT * scale);
@@ -78,35 +90,24 @@ pub fn apply(mode: UiMode, window: &mut Window, cx: &mut App) {
     });
     Theme::sync_base(cx);
     if mode.is_tv() {
-        widen_scrollbars(cx);
+        widen_scrollbars(scale / TV_SCALE, cx);
     }
     window.refresh();
 }
 
-fn widen_scrollbars(cx: &mut App) {
+fn widen_scrollbars(relative: f32, cx: &mut App) {
+    let w = |value: f32| gpui_kit::px(value * relative);
     let mut base = cx.global::<gpui_kit::base::Theme>().clone();
     let styles = base
         .scrollbar
         .styles()
         .clone()
-        .track(|s| s.width(gpui_kit::px(32.)))
-        .track_hover(|s| s.width(gpui_kit::px(32.)))
-        .track_active(|s| s.width(gpui_kit::px(32.)))
-        .thumb(|s| {
-            s.width(gpui_kit::px(14.))
-                .inset(gpui_kit::px(9.))
-                .min_length(gpui_kit::px(96.))
-        })
-        .thumb_hover(|s| {
-            s.width(gpui_kit::px(16.))
-                .inset(gpui_kit::px(8.))
-                .min_length(gpui_kit::px(96.))
-        })
-        .thumb_active(|s| {
-            s.width(gpui_kit::px(18.))
-                .inset(gpui_kit::px(7.))
-                .min_length(gpui_kit::px(96.))
-        });
+        .track(|s| s.width(w(32.)))
+        .track_hover(|s| s.width(w(32.)))
+        .track_active(|s| s.width(w(32.)))
+        .thumb(|s| s.width(w(14.)).inset(w(9.)).min_length(w(96.)))
+        .thumb_hover(|s| s.width(w(16.)).inset(w(8.)).min_length(w(96.)))
+        .thumb_active(|s| s.width(w(18.)).inset(w(7.)).min_length(w(96.)));
     base.scrollbar = base.scrollbar.with_styles(styles);
     cx.set_global(base);
 }
@@ -134,9 +135,22 @@ mod tests {
     fn controls_grow_only_in_tv() {
         assert_eq!(control(), 1.);
         SCALE.store(TV_SCALE.to_bits(), Ordering::Relaxed);
+        TV.store(true, Ordering::Relaxed);
         assert_eq!(control(), TV_CONTROL);
         assert!(f32::from(ctl(26.)) >= 44.);
         SCALE.store(1.0_f32.to_bits(), Ordering::Relaxed);
+        TV.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn auto_keeps_the_mode_scale_and_a_step_multiplies_it() {
+        assert_eq!(scale_with(UiMode::Pc, None), 1.);
+        assert_eq!(scale_with(UiMode::Tv, None), TV_SCALE);
+        assert_eq!(scale_with(UiMode::Pc, Some(100)), 1.);
+        assert_eq!(scale_with(UiMode::Pc, Some(150)), 1.5);
+        assert!((scale_with(UiMode::Tv, Some(75)) - TV_SCALE * 0.75).abs() < 1e-6);
+        assert_eq!(scale_with(UiMode::Pc, Some(9999)), 1.5);
+        assert_eq!(scale_with(UiMode::Pc, Some(1)), 0.75);
     }
 
     #[test]

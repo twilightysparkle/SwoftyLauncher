@@ -143,6 +143,11 @@ pub struct DepartmentData {
 }
 
 #[repr(C)]
+pub struct DriverRecord {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
 pub struct FEHomeViewModel {
     _opaque: [u8; 0],
 }
@@ -204,6 +209,11 @@ pub struct UpgradeEffectDef {
 
 #[repr(C)]
 pub struct UpgradeRecord {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
+pub struct VehicleHelperParticipant {
     _opaque: [u8; 0],
 }
 
@@ -1526,6 +1536,29 @@ const _: () = assert!(core::mem::offset_of!(DriverSecretMeetings, driver) == 0x4
 const _: () = assert!(core::mem::size_of::<DriverSecretMeetings>() == 0x48);
 
 #[repr(C)]
+pub struct DriverSetRef {
+    _pad_0x0: [u8; 0x8],
+    pub slots: *mut DriverSlots,
+}
+const _: () = assert!(core::mem::offset_of!(DriverSetRef, slots) == 0x8);
+
+#[repr(C)]
+pub struct DriverSlot {
+    _pad_0x0: [u8; 0x8],
+    pub record: *mut DriverRecord,
+}
+const _: () = assert!(core::mem::offset_of!(DriverSlot, record) == 0x8);
+
+#[repr(C)]
+pub struct DriverSlots {
+    _pad_0x0: [u8; 0x8],
+    pub begin: *mut DriverSlot,
+    pub end: *mut DriverSlot,
+}
+const _: () = assert!(core::mem::offset_of!(DriverSlots, begin) == 0x8);
+const _: () = assert!(core::mem::offset_of!(DriverSlots, end) == 0x10);
+
+#[repr(C)]
 pub struct EvolutionCurve {
     pub vtable: *mut *mut c_void,
     pub inv_x_range: f32,
@@ -1721,9 +1754,12 @@ const _: () = assert!(core::mem::offset_of!(TeamSetRef, slots) == 0x8);
 
 #[repr(C)]
 pub struct EntrantsSystem {
-    _pad_0x0: [u8; 0x2c0],
+    _pad_0x0: [u8; 0x260],
+    pub driver_sets: [DriverSetRef; 3],
+    _pad_0x290: [u8; 0x30],
     pub team_sets: [TeamSetRef; 3],
 }
+const _: () = assert!(core::mem::offset_of!(EntrantsSystem, driver_sets) == 0x260);
 const _: () = assert!(core::mem::offset_of!(EntrantsSystem, team_sets) == 0x2c0);
 
 #[repr(C)]
@@ -3182,11 +3218,19 @@ const _: () = assert!(core::mem::offset_of!(UpgradesComponent, career_time) == 0
 
 #[repr(C)]
 pub struct VehicleHelperSystem {
-    _pad_0x0: [u8; 0x568],
+    _pad_0x0: [u8; 0x60],
+    pub player_name: *mut c_char,
+    _pad_0x68: [u8; 0x20],
+    pub participants_begin: *mut *mut VehicleHelperParticipant,
+    pub participants_end: *mut *mut VehicleHelperParticipant,
+    _pad_0x98: [u8; 0x4d0],
     pub drive_through: *mut DriveThroughObject,
     _pad_0x570: [u8; 0x8],
     pub stop_go: *mut StopGoObject,
 }
+const _: () = assert!(core::mem::offset_of!(VehicleHelperSystem, player_name) == 0x60);
+const _: () = assert!(core::mem::offset_of!(VehicleHelperSystem, participants_begin) == 0x88);
+const _: () = assert!(core::mem::offset_of!(VehicleHelperSystem, participants_end) == 0x90);
 const _: () = assert!(core::mem::offset_of!(VehicleHelperSystem, drive_through) == 0x568);
 const _: () = assert!(core::mem::offset_of!(VehicleHelperSystem, stop_go) == 0x578);
 
@@ -4050,6 +4094,8 @@ pub type Game_Teleport_Vehicle_t = unsafe extern "C" fn(
     dt: f32,
     flags: u32,
 );
+pub type Game_TileList_PushChildSelection_Thunk_t =
+    unsafe extern "C" fn(widget: *mut c_void, child: *mut c_void);
 pub type Game_TimeManager_OnResetFixedTimeStep_t =
     unsafe extern "C" fn(ctx: *mut c_void, msg: *const c_void) -> c_int;
 pub type Game_TitleScreenVM_OnScreenActivated_t = unsafe extern "C" fn(vm: *mut c_void);
@@ -4280,6 +4326,8 @@ pub type Sess_Tyres_ClosestAvailableCompound_t = unsafe extern "C" fn(
 pub type Sess_VehicleTable_EmplaceAt_t =
     unsafe extern "C" fn(table: *mut c_void, record: *const c_void) -> *mut c_void;
 pub type Sess_WeatherComponent_SetSystemRandomSeed_t = unsafe extern "C" fn(component: *mut c_void);
+pub type Sess_WeekendOptions_Refresh_t = unsafe extern "C" fn(comp: *mut c_void, force: bool, post: bool);
+pub type Sess_WeekendSetup_LayoutWeekends_t = unsafe extern "C" fn(comp: *mut c_void);
 pub type Sess_Weekend_Start_t =
     unsafe extern "C" fn(weekend: *mut c_void, entrants: *const c_void, begin: bool);
 pub type Sess_WinnerSequence_Update_t =
@@ -11906,6 +11954,11 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Game_TileList_PushChildSelection_Thunk: Binding = Binding {
+        id: "Game_TileList_PushChildSelection_Thunk",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Game_TimeAttackGates_CreateGateModel: Binding = Binding {
         id: "Game_TimeAttackGates_CreateGateModel",
         kind: "func",
@@ -18611,6 +18664,16 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Sess_WeekendOptions_Refresh: Binding = Binding {
+        id: "Sess_WeekendOptions_Refresh",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Sess_WeekendSetup_LayoutWeekends: Binding = Binding {
+        id: "Sess_WeekendSetup_LayoutWeekends",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Sess_Weekend_RebuildUniqueEntrantList: Binding = Binding {
         id: "Sess_Weekend_RebuildUniqueEntrantList",
         kind: "func",
@@ -21768,6 +21831,16 @@ pub mod bindings {
     };
     pub const site_Team_LoadInserted: Binding = Binding {
         id: "site_Team_LoadInserted",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Team_RecognitionFirstRecord: Binding = Binding {
+        id: "site_Team_RecognitionFirstRecord",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Team_RecognitionRecordsExit: Binding = Binding {
+        id: "site_Team_RecognitionRecordsExit",
         kind: "site",
         status: Status::Experimental,
     };

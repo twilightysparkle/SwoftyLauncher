@@ -57,7 +57,7 @@ const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "career.season",
-        include_str!("../../../sdk/std/registries/career.season/1.0.json"),
+        include_str!("../../../sdk/std/registries/career.season/1.1.json"),
     ),
     (
         "career.wizard",
@@ -105,7 +105,7 @@ const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "hud.element",
-        include_str!("../../../sdk/std/registries/hud.element/1.1.json"),
+        include_str!("../../../sdk/std/registries/hud.element/1.2.json"),
     ),
     (
         "hub.tab",

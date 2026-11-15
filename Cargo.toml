@@ -4,7 +4,7 @@ members = ["addons/builtins", "apps/cli", "apps/launcher", "installer", "package
 default-members = ["addons/builtins", "apps/cli", "packages/addon-api", "packages/core", "packages/formats", "packages/i18n", "packages/sdk", "packages/shaders", "templates/launcher-addon", "templates/std/whatif/launcher"]
 
 [workspace.package]
-version = "1.9.51"
+version = "1.9.55"
 edition = "2024"
 rust-version = "1.95"
 license = "AGPL-3.0-or-later"
@@ -32,7 +32,7 @@ ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 sha1 = "0.11"
 sha2 = "0.11"
 tar = { version = "0.4", default-features = false }

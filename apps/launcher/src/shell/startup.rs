@@ -65,6 +65,7 @@ impl Shell {
             seen,
         } = prepared;
         swofty_i18n::set_language(config.language.as_deref());
+        let ui_scale = config.ui_scale_step();
         let vr_profiles = config.vr_profiles;
         let start_store = config.launch.start_store;
         let ui_mode = config.ui_mode;
@@ -152,6 +153,7 @@ impl Shell {
             vr_profiles,
             start_store,
             ui_mode,
+            ui_scale,
             onboarding: None,
             developer_mode,
             clear_old_session_logs,
@@ -199,6 +201,17 @@ impl Shell {
             Ok("settings") => shell.open_page(Page::Settings, cx),
             Ok("support") => shell.open_page(Page::Support, cx),
             Ok("moderation") => shell.open_page(Page::Moderation, cx),
+            Ok(page) if page.starts_with("section:") => {
+                let section = page.trim_start_matches("section:");
+                if let Some(i) = shell
+                    .library
+                    .sections
+                    .iter()
+                    .position(|s| format!("{}/{}", s.addon, s.spec.id) == section)
+                {
+                    shell.open_page(Page::Section(i), cx);
+                }
+            }
             _ => {}
         }
         if cfg!(debug_assertions) && std::env::var_os("SWOFTY_FAKE_NOTICES").is_some() {

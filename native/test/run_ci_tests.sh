@@ -87,6 +87,7 @@ t "Pit box guard unit test" native/test/run_pit_box_test.sh
 t "Garage slot guard unit test" native/test/run_garage_slots_test.sh
 t "Direct start unit test" native/test/run_direct_start_test.sh
 t "Direct start Time Trial unit test" native/test/run_direct_start_tt_test.sh
+t "Time Trial loaded list board and team label unit test" native/test/run_tt_loaded_test.sh
 t "Thrustmaster LCD guard unit test" native/test/run_thrustmaster_lcd_test.sh
 t "Estimate lap time guard unit test" native/test/run_estimate_laptime_test.sh
 t "Red flag recompute guard unit test" native/test/run_red_flag_recompute_test.sh
@@ -104,6 +105,7 @@ t "Time Trial boards bridge unit test" native/test/run_tt_bridge_test.sh
 t "Lap recorder state machine, field plan and session gate unit test" native/test/run_lap_rec_test.sh
 t "Ghost trace codec and lap converter unit test" native/test/run_ghost_trace_test.sh
 t "Ghost arming state machine unit test" native/test/run_ghost_arm_test.sh
+t "Ghost personal best re-arm decision unit test" native/test/run_ghost_rearm_test.sh
 t "Lap setup capture unit test" native/test/run_lap_setup_test.sh
 t "Lap toast message and state machine unit test" native/test/run_toast_test.sh
 t "Time Trial barred addons warning unit test" native/test/run_tt_barred_test.sh

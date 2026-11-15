@@ -44,8 +44,9 @@ bool settings_state(const std::string &addon, const std::string &option, size_t 
 //   a list of the core's own submitted right after it.
 // - Where it ends inside that step, the list that closes the step can draw the rest of the picture into
 //   the back buffer first: the passes run in that list while it has the back buffer bound (the split
-//   step), else in a list of the core's own right after it, or at Present when no list closed the step
-//   (postfx::BackPlace).
+//   step), else in a list of the core's own right after it, or right before the list that takes the back
+//   buffer out of render target for the HUD and Present when none closed the step by then; at Present only
+//   when the core saw no such list (postfx::BackPlace).
 //
 // In the game's lists the core records its passes before the game's barrier and then puts back the
 // pipeline, descriptor heaps, compute bindings and graphics descriptor tables it changed
@@ -118,7 +119,7 @@ struct Tex {
 };
 
 struct Toggle {
-    std::string addon_id, addon, option;
+    std::string addon_id, addon, option, key;
     int vk = 0;
     bool down = false, off = false;
 };
@@ -182,6 +183,8 @@ struct Retired {
 // One presented frame, for SWOFTY_POSTFX_TRACE.
 struct Trace {
     const char *path = "none", *why = nullptr;
+    postfx::Idle tried = postfx::IDLE_NONE;
+    bool picture = false;
     unsigned runs = 0, ran = 0, live = 0;
     std::string skipped;
     ID3D12Resource *back = nullptr;
@@ -375,8 +378,8 @@ ViewAt back_views[32], recent_views[64];
 std::atomic<unsigned> recent_next;
 std::atomic<SIZE_T> views_lo{SIZE_T(-1)}, views_hi{0};
 void pin_view(SIZE_T at, ID3D12Resource *res);
-unsigned back_seen, hud_read_at;
-bool hud_read_seen;
+unsigned back_seen;
+postfx::HudRead hud_read;
 
 
 // Lets go of the held depth buffers other than keep: all of them when the picture changes, the old ones
@@ -431,20 +434,23 @@ postfx::FrameClock frame_clock;
 float frametime;
 unsigned frame_count, ran_total;
 
-constexpr unsigned NAMED_LINES = 80, STAT_LINES = 30;
+constexpr unsigned NAMED_LINES = 80;
 constexpr const wchar_t *INTERESTING[] = {L"tonemap", L"output", L"final", L"hudless", L"backbuffer", L"pathtrac",
                                           L"_pt", L"pt_", L"denois", L"upscal", L"composite", L"present",
                                           L"display", L"post", L"lut", L"bloom", L"exposure"};
 std::vector<std::wstring> named_seen;
 
 struct Stats {
-    unsigned presented = 0, in_list = 0, split_step = 0, between = 0, after_close = 0, at_present = 0, without = 0,
+    unsigned presented = 0, in_list = 0, split_step = 0, between = 0, after_close = 0, before_hud = 0, at_present = 0,
+             without = 0,
              doubled = 0, ui_together = 0, unknown_state = 0, busy = 0, deferred = 0, dropped = 0;
     unsigned generated = 0, runs = 0, unplaced = 0;
+    unsigned copied = 0, hud_read = 0, no_previous = 0, prev_gap = 0, onoff_untold = 0, idle[postfx::IDLE_COUNT] = {};
 };
 Stats stats;
-unsigned stat_lines;
-ULONGLONG stat_at;
+unsigned stat_lines, onoff_lines;
+ULONGLONG stat_at, stat_from;
+postfx::OnOff onoff;
 Trace trace;
 unsigned trace_left, trace_present;
 ULONGLONG trace_checked;
@@ -1205,7 +1211,8 @@ int pick_slot()
         swofty::log("[postfx] every one of the %u slots is in flight; passes skip frames until one is free", FRAMES);
     warned_busy = true;
     stats.busy++;
-    trace.why = "every slot is in flight";
+    trace.tried = postfx::IDLE_BUSY;
+    trace.why = postfx::idle_text(trace.tried);
     return -1;
 }
 
@@ -1247,7 +1254,7 @@ void drop_instance(int inst)
                     : "?");
 }
 
-std::vector<int> live_passes(const view::State &v)
+std::vector<int> live_passes(const view::State &v, unsigned *idle = nullptr)
 {
     std::vector<int> live;
     if (shaders_off)
@@ -1268,6 +1275,12 @@ std::vector<int> live_passes(const view::State &v)
             live.push_back(int(i));
             return;
         }
+        if (idle)
+            *idle |= 1u << (p.off                   ? postfx::IDLE_PASS_OFF
+                            : p.ruled_off           ? postfx::IDLE_RULE
+                            : !p.on                 ? postfx::IDLE_OPTION
+                            : addon_off(p.addon_id) ? postfx::IDLE_ADDON_KEY
+                                                    : postfx::IDLE_VIEW);
         if (!p.off && trace_left)
             trace.skipped += (trace.skipped.empty() ? "" : ", ") + p.name + " (" + why + ")";
     };
@@ -1504,16 +1517,19 @@ bool record(const Where &w, int k)
     Work &wk = frame.work[k];
     view::State v = view::current();
     trace.view = v;
-    std::vector<int> live = live_passes(v);
+    unsigned idle = 0;
+    std::vector<int> live = live_passes(v, &idle);
     trace.live = unsigned(live.size());
     if (live.empty()) {
-        trace.why = "every pass is off or not for this view";
+        trace.tried = postfx::idle_of_passes(idle);
+        trace.why = postfx::idle_text(trace.tried);
         return false;
     }
     d3d12hooks::ListState saved;
     if (w.game && !d3d12hooks::list_state(w.list, saved)) {
         stats.unknown_state++;
-        trace.why = "the game's list has state from before the hooks";
+        trace.tried = postfx::IDLE_LIST_STATE;
+        trace.why = postfx::idle_text(trace.tried);
         return false;
     }
     ID3D12GraphicsCommandList *l = w.list;
@@ -1532,8 +1548,10 @@ bool record(const Where &w, int k)
         for (auto &t : textures)
             t.clear |= t.persistent;
     }
-    bool has_previous =
-        frame.prev && frame.prev_valid && frame.prev_serial == v.serial && frame_count - frame.prev_frame <= 1;
+    bool had_previous = frame.prev && frame.prev_valid && frame.prev_serial == v.serial;
+    bool has_previous = had_previous && frame_count - frame.prev_frame <= 1;
+    stats.no_previous += !has_previous;
+    stats.prev_gap += had_previous && !has_previous;
     UINT pw = UINT(d.Width), ph = d.Height;
 
     ClipEntry *clip = clip_begin(d, k);
@@ -1862,11 +1880,12 @@ void on_setname(ID3D12Object *o, LPCWSTR name)
         watch(res, bits);
 }
 
-// While the game reads the finished picture for its HUD (on track), that read is the one place the
-// passes run; without such reads (menus) they run at the HUD-less step or between the game's lists.
+// While the game reads the finished picture for its HUD (paused, panels over the race), that read is the one
+// place the passes run; without such reads they run at the HUD-less step or between the game's lists
+// (postfx::HudRead).
 bool hud_reads()
 {
-    return hud_read_seen && frame_count - hud_read_at <= 30;
+    return hud_read.holds(frame_count);
 }
 
 // Batches that move only depth and UI images, most watched batches, are marked without the lock by
@@ -2128,17 +2147,17 @@ bool on_barrier(ID3D12GraphicsCommandList *list, UINT n, const D3D12_RESOURCE_BA
         !passes.empty()) {
         Where w{list, true, nullptr, D3D12_RESOURCE_STATE_RENDER_TARGET, hudless, hudless_now, nullptr,
                 D3D12_RESOURCE_STATE_COMMON, "in-list"};
-        bool split_step = false;
+        bool split_step = false, at_read = false;
         if (leaving && (!m || !m->left_rt) && !postfx::placed_lately(frame_count, back_use(leaving).place.placed_at)) {
             BackUse &u = back_use(leaving);
-            hud_read_seen = true;
-            hud_read_at = frame_count;
+            hud_read.read(frame_count);
             w.back = leaving;
             w.hudless = m ? m->hudless : nullptr;
             w.hudless_state = m ? m->hudless_state : D3D12_RESOURCE_STATE_COMMON;
             w.depth = m && m->depth ? m->depth : u.depth;
             w.depth_state = m && m->depth ? m->depth_state : u.depth_state;
             w.path = "in-list (HUD read)";
+            at_read = true;
         } else if (hudless && !hud_reads() && !moves_back && m && m->target &&
                    m->state == D3D12_RESOURCE_STATE_RENDER_TARGET && m->slot < 0 && back_use(m->target).place.fresh) {
             w.back = m->target;
@@ -2170,6 +2189,7 @@ bool on_barrier(ID3D12GraphicsCommandList *list, UINT n, const D3D12_RESOURCE_BA
                 m->ran_back = w.back;
                 stats.in_list++;
                 stats.split_step += split_step;
+                stats.hud_read += at_read;
                 if (order_left) {
                     char at[24];
                     snprintf(at, sizeof at, " [PASSES@%04x]", unsigned(uintptr_t(w.back) & 0xffff));
@@ -2276,14 +2296,14 @@ BackUse *waiting_back()
 // that closed a HUD-less step the picture's list left open, and a fence signal after any list the passes were
 // recorded into, so their slot is known done. A list that draws into the game's next back buffer closes the
 // passes' frame while the game's own frames do (postfx::FrameClock).
-void on_exec(ID3D12CommandQueue *, UINT n, ID3D12CommandList *const *lists, d3d12hooks::ExecPlan &plan)
+void on_exec(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *lists, d3d12hooks::ExecPlan &plan)
 {
     static const uint32_t probe = perf::probe("core", "postfx ExecuteCommandLists");
     if (!lists || !n || broken)
         return;
     perf::Scope p(probe);
     UINT split = n;
-    bool after_close = false;
+    bool after_close = false, before = false;
     ID3D12Resource *res = nullptr, *hudless = nullptr, *later_depth = nullptr;
     D3D12_RESOURCE_STATES state{}, hudless_state{}, later_depth_state{};
     int signal[FRAMES];
@@ -2305,16 +2325,28 @@ void on_exec(ID3D12CommandQueue *, UINT n, ID3D12CommandList *const *lists, d3d1
             }
             if (m.slot >= 0 && signals < FRAMES)
                 signal[signals++] = m.slot;
+            trace.picture |= m.tonemap;
             if (m.tonemap && !diag_done) {
                 log_diag(reinterpret_cast<ID3D12GraphicsCommandList *>(lists[i]), m);
                 diag_done = true;
+            }
+            // A list that ends with the back buffer out of render target while the passes still wait for the
+            // step's closing list draws the HUD and hands the frame to Present: they run right before it.
+            if (m.target && m.state != D3D12_RESOURCE_STATE_RENDER_TARGET && split == n && !killed_now() &&
+                !passes.empty() &&
+                back_use(m.target).place.target_left(frame_count, gl->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT)) {
+                split = i;
+                before = true;
+                res = m.target;
+                state = D3D12_RESOURCE_STATE_RENDER_TARGET;
             }
             if (m.target && !m.tonemap)
                 back_use(m.target).place.moved(m.state == D3D12_RESOURCE_STATE_RENDER_TARGET);
             if (m.tonemap && m.slot < 0 && split == n && !hud_reads() && !killed_now() && !passes.empty()) {
                 if (m.ui) {
                     stats.ui_together++;
-                    trace.why = "the picture and the HUD are in one list without a HUD-less step";
+                    trace.tried = postfx::IDLE_UI_TOGETHER;
+                    trace.why = postfx::idle_text(trace.tried);
                 } else if (m.target && m.state == D3D12_RESOURCE_STATE_RENDER_TARGET) {
                     // The picture is in the back buffer. A list that ends with the HUD-less step still open
                     // leaves the passes to the list that closes the step, which may draw the rest of the
@@ -2347,7 +2379,7 @@ void on_exec(ID3D12CommandQueue *, UINT n, ID3D12CommandList *const *lists, d3d1
                 }
             }
             if (m.depth) {
-                if (split == n || i <= split) {
+                if (split == n || i < split || (i == split && !before)) {
                     postfx::hold(depth_res, m.depth);
                     depth_state = m.depth_state;
                 } else {
@@ -2358,7 +2390,8 @@ void on_exec(ID3D12CommandQueue *, UINT n, ID3D12CommandList *const *lists, d3d1
             if (order_left && m.target && !m.order.empty()) {
                 order_left--;
                 swofty::log("[postfx] order: list %p of %u in this submission%s:%s%s", static_cast<void *>(lists[i]), n,
-                            m.tonemap ? " (picture)" : "", m.order.c_str(), split == i ? " [BETWEEN after this list]" : "");
+                            m.tonemap ? " (picture)" : "", m.order.c_str(),
+                            split != i ? "" : before ? " [BETWEEN before this list]" : " [BETWEEN after this list]");
             }
             unmark(gl);
         }
@@ -2379,14 +2412,23 @@ void on_exec(ID3D12CommandQueue *, UINT n, ID3D12CommandList *const *lists, d3d1
         depth_state = later_depth_state;
     };
     if (split < n) {
-        plan.after(split, [res, state, hudless, hudless_state, after_close](ID3D12CommandQueue *queue) {
+        auto between = [res, state, hudless, hudless_state, after_close, before](ID3D12CommandQueue *queue) {
             std::lock_guard<std::recursive_mutex> g(lock);
             if (run_between(queue, res, state, hudless, hudless_state,
-                            after_close ? "between (after the list that closed the step)" : "between")) {
+                            before        ? "between (before the list that takes the back buffer to the HUD)"
+                            : after_close ? "between (after the list that closed the step)"
+                                          : "between")) {
                 stats.between++;
                 stats.after_close += after_close;
+                stats.before_hud += before;
             }
-        });
+        };
+        if (!before)
+            plan.after(split, between);
+        else if (split)
+            plan.after(split - 1, between);
+        else
+            between(q);
         plan.after(split, take_later_depth);
     } else {
         plan.at_end(take_later_depth);
@@ -2454,8 +2496,10 @@ void refresh_live()
             p.on = v != 0;
     }
     for (auto &t : toggles)
-        if (setting_value(t.addon_id, t.option, text))
+        if (setting_value(t.addon_id, t.option, text)) {
             t.vk = postfx::key_code(text);
+            t.key = text;
+        }
 }
 
 
@@ -2566,6 +2610,7 @@ void install_plan(postfx::Plan next)
         Pass p;
         p.inst = pp.instance;
         const postfx::PlanInstance &pi = next.instances[size_t(pp.instance)];
+        p.addon_id = pi.decl->addon;
         p.effect = pi.effect;
         p.label = pi.label;
         p.name = pp.decl->name;
@@ -2911,8 +2956,9 @@ void apply_active(postfx::ActiveSpec next)
     install_plan(std::move(p));
     active = std::move(next);
     rules_reset();
-    swofty::log("[shaders] config \"%s\" (serial %llu): %zu effect(s), %zu pass(es)", active.name.c_str(),
-                (unsigned long long)active.serial, n_effects, n_passes);
+    swofty::log("[shaders] config \"%s\" (serial %llu): %zu effect(s), %zu pass(es), toggle key %s", active.name.c_str(),
+                (unsigned long long)active.serial, n_effects, n_passes,
+                shader_vk ? active.toggle_key.c_str() : "none");
 }
 
 void check_active(ULONGLONG now, bool force)
@@ -2957,7 +3003,7 @@ void poll_toggles()
         bool raw = t.vk && front && (GetAsyncKeyState(t.vk) & 0x8000);
         if (raw && !t.down && !runtime::typing("a shader key")) {
             t.off = !t.off;
-            swofty::log("[postfx] %s's passes are %s (its key)", t.addon.c_str(), t.off ? "off" : "on");
+            swofty::log("[postfx] %s's passes are %s (its key %s)", t.addon.c_str(), t.off ? "off" : "on", t.key.c_str());
             runtime::hud_toast(t.off ? "SHADERS OFF" : "SHADERS ON", t.addon, 2.0f, t.addon_id);
         }
         t.down = raw;
@@ -2965,7 +3011,7 @@ void poll_toggles()
     bool raw = shader_vk && front && (GetAsyncKeyState(shader_vk) & 0x8000);
     if (raw && !shader_key_down && !runtime::typing("a shader key")) {
         shaders_off = !shaders_off;
-        swofty::log("[shaders] shaders are %s (the toggle key)", shaders_off ? "off" : "on");
+        swofty::log("[shaders] shaders are %s (the toggle key %s)", shaders_off ? "off" : "on", active.toggle_key.c_str());
         runtime::hud_toast(shaders_off ? "SHADERS OFF" : "SHADERS ON", active.name, 2.0f, "");
     }
     shader_key_down = raw;
@@ -3043,11 +3089,44 @@ void final_land()
     }
 }
 
+// Why the frame that closes went without the passes, counted, and one line when they stop and when they run again
+// (postfx::ONOFF_LINES a count line at most; the count line says how many were left out).
+void note_idle()
+{
+    if (passes.empty())
+        return;
+    postfx::Idle why = postfx::IDLE_NONE;
+    if (!trace.runs) {
+        why = postfx::idle_reason({killed, shaders_off, hud_reads(), trace.picture, trace.tried});
+        stats.idle[why]++;
+    }
+    postfx::OnOff::Change c = onoff.frame(trace.runs > 0, frame_count, why);
+    if (c == postfx::OnOff::SAME)
+        return;
+    if (onoff_lines >= postfx::ONOFF_LINES) {
+        stats.onoff_untold++;
+        return;
+    }
+    onoff_lines++;
+    view::State v = view::current();
+    std::string view = std::string(postfx::view_text(v.kind)), flags = postfx::flag_text(v.flags);
+    if (c == postfx::OnOff::STOPPED)
+        swofty::log("[postfx] the passes stopped at frame %u: %s%s%s (view %s, flags %s, serial %u)", frame_count,
+                    postfx::idle_text(why), why == postfx::IDLE_KEY ? ", key " : "",
+                    why == postfx::IDLE_KEY ? active.toggle_key.c_str() : "", view.c_str(), flags.c_str(), v.serial);
+    else
+        swofty::log("[postfx] the passes run again at frame %u, %s, after %u frame(s) without them: %s (view %s, "
+                    "flags %s, serial %u)",
+                    frame_count, trace.path, frame_count - onoff.off_at, postfx::idle_text(onoff.why), view.c_str(),
+                    flags.c_str(), v.serial);
+}
+
 // The frame closes: the passes' frame clock, its trace line and its counts.
 void end_frame(ULONGLONG now)
 {
     frametime = frame_at ? float(double(now - frame_at) / 1000.0) : 0.0f;
     frame_at = now;
+    note_idle();
     frame_count++;
     stats.presented++;
     stats.without += trace.runs == 0;
@@ -3074,29 +3153,49 @@ void tick(ULONGLONG now)
 
 void stat_line(ULONGLONG now)
 {
-    if (stat_lines >= STAT_LINES || now < stat_at)
+    if (now < stat_at)
         return;
     bool game_frames = frame_clock.game_frames(now, started), told = false;
+    unsigned secs = unsigned((now - stat_from + 500) / 1000);
+    const unsigned *idle = stats.idle;
     if (stat_at && game_frames && !passes.empty()) {
         told = true;
-        swofty::log("[postfx] %s: %u real frame(s), %u pass run(s), %u skipped in the last 60 s (%u in the game's list, "
-                    "%u between its lists, %u with the GPU behind); %u Present(s) from frame generation",
-                    stats.generated ? "xess fg" : "no present", stats.presented, stats.runs, stats.unplaced,
-                    stats.in_list, stats.between, stats.busy, stats.generated);
+        swofty::log("[postfx] %s: %u real frame(s), %u pass run(s), %u skipped in the last %u s (%u in the game's list, "
+                    "%u between its lists, %u with the GPU behind); %u Present(s) from frame generation; %u run(s) "
+                    "without the frame before's result (%u after a frame gap); %u on/off line(s) left out",
+                    stats.generated ? "xess fg" : "no present", stats.presented, stats.runs, stats.unplaced, secs,
+                    stats.in_list, stats.between, stats.busy, stats.generated, stats.no_previous, stats.prev_gap,
+                    stats.onoff_untold);
     } else if (stat_at && ran_total) {
         told = true;
-        swofty::log("[postfx] last 60 s: %u frame(s) presented; passes ran in the game's list on %u (%u in a split "
-                    "step's closing list), between its lists on %u (%u after a split step's closing list) and at "
-                    "Present on %u; %u picture list(s) left the HUD-less step to a later list; %u recorded into lists "
-                    "the game reset unsubmitted; %u without passes (%u with the picture and the HUD in one list, %u "
-                    "with list state from before the hooks, %u with the GPU behind); %u frame(s) ran them twice",
-                    stats.presented, stats.in_list, stats.split_step, stats.between, stats.after_close,
-                    stats.at_present, stats.deferred, stats.dropped, stats.without, stats.ui_together,
-                    stats.unknown_state, stats.busy, stats.doubled);
+        swofty::log("[postfx] last %u s: %u frame(s) presented; passes ran in the game's list on %u (%u at the HUD's "
+                    "read of the picture, %u in a split step's closing list), between its lists on %u (%u after a "
+                    "split step's closing list, %u before the list that takes the back buffer to the HUD) and at "
+                    "Present, over the HUD, on %u (%u on a frame generation swapchain's copy of the frame); %u picture "
+                    "list(s) left the HUD-less step to a later list; %u "
+                    "recorded into lists the game reset unsubmitted; %u without passes (%u toggle key, %u "
+                    "swofty/postfx.off, %u after the HUD's last read of the picture, %u every pass off: %u budget or "
+                    "pipeline, %u rule, %u option, %u addon key, %u view, %u mixed; %u with the picture and the HUD "
+                    "in one list, %u with list state from before the hooks, %u with the GPU behind, %u with no "
+                    "picture list, %u with no place in the frame's lists); %u frame(s) ran them twice; %u run(s) "
+                    "without the frame before's result (%u after a frame gap); %u on/off line(s) left out",
+                    secs, stats.presented, stats.in_list, stats.hud_read, stats.split_step, stats.between,
+                    stats.after_close, stats.before_hud, stats.at_present, stats.copied, stats.deferred, stats.dropped,
+                    stats.without,
+                    idle[postfx::IDLE_KEY], idle[postfx::IDLE_KILL], idle[postfx::IDLE_HUD_READ],
+                    idle[postfx::IDLE_PASS_OFF] + idle[postfx::IDLE_RULE] + idle[postfx::IDLE_OPTION] +
+                        idle[postfx::IDLE_ADDON_KEY] + idle[postfx::IDLE_VIEW] + idle[postfx::IDLE_PASSES],
+                    idle[postfx::IDLE_PASS_OFF], idle[postfx::IDLE_RULE], idle[postfx::IDLE_OPTION],
+                    idle[postfx::IDLE_ADDON_KEY], idle[postfx::IDLE_VIEW], idle[postfx::IDLE_PASSES],
+                    idle[postfx::IDLE_UI_TOGETHER], idle[postfx::IDLE_LIST_STATE], idle[postfx::IDLE_BUSY],
+                    idle[postfx::IDLE_NO_PICTURE], idle[postfx::IDLE_UNPLACED], stats.doubled, stats.no_previous,
+                    stats.prev_gap, stats.onoff_untold);
     }
     stat_lines += told;
-    stat_at = now + 60000;
+    stat_from = now;
+    stat_at = now + postfx::stat_window_ms(stat_lines);
     stats = Stats{};
+    onoff_lines = 0;
 }
 
 // The frame generation module that presents frames of its own on a swapchain (postfx::presents_own_frames): the
@@ -3116,23 +3215,52 @@ std::string own_frames_by(const d3d12hooks::Swapchain *known, void *caller)
     return by;
 }
 
-// The passes of a frame whose HUD-less step no list closed before Present run on the presented back buffer, on the
-// swapchain's queue, so the frame never goes without them.
+// The passes of a frame that reached Present with its HUD-less step open and no list the core saw taking the back
+// buffer out of render target run on the presented back buffer, on the swapchain's queue: over the HUD for that
+// frame, so the picture never goes without them. A frame generation swapchain shows a buffer of its own that it
+// copied the game's back buffer into: the passes run on that copy while it holds the waiting picture
+// (postfx::shown_is_waiting).
 void present_fallback(IDXGISwapChain3 *sc, const d3d12hooks::Swapchain *known)
 {
-    if (!waiting_back() || !known || !known->queue || killed_now() || passes.empty())
+    BackUse *waiting = waiting_back();
+    if (!waiting || !known || !known->queue || killed_now() || passes.empty())
         return;
     ID3D12Resource *shown = nullptr;
     if (FAILED(sc->GetBuffer(sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&shown))) || !shown)
         return;
+    bool direct = known->queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT;
+    BackUse *own = nullptr;
     for (auto &u : back_uses)
-        if (u.back == shown) {
-            if (known->queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT && u.place.presented(frame_count) &&
-                run_between(known->queue, shown, D3D12_RESOURCE_STATE_PRESENT, nullptr, D3D12_RESOURCE_STATE_COMMON,
-                            "at Present"))
-                stats.at_present++;
-            break;
+        if (u.back == shown)
+            own = &u;
+    if (own) {
+        if (direct && own->place.presented(frame_count) &&
+            run_between(known->queue, shown, D3D12_RESOURCE_STATE_PRESENT, nullptr, D3D12_RESOURCE_STATE_COMMON,
+                        "at Present"))
+            stats.at_present++;
+    } else {
+        D3D12_RESOURCE_DESC a = shown->GetDesc(), b = waiting->back->GetDesc();
+        bool same_shape = a.Width == b.Width && a.Height == b.Height && a.Format == b.Format;
+        bool generating = frame_gen_on();
+        static bool told;
+        if (!std::exchange(told, true))
+            swofty::log("[postfx] swapchain %p shows buffer %p, which is not the back buffer %p the game drew into "
+                        "(a frame generation swapchain copies the game's frames into its own); frame generation is "
+                        "%s in the game's settings, so passes that wait for Present %s",
+                        static_cast<void *>(sc), static_cast<void *>(shown), static_cast<void *>(waiting->back),
+                        generating ? "on" : "off",
+                        generating   ? "do not run on that copy"
+                        : same_shape ? "run on that copy"
+                                     : "do not run on that copy, which has another size or format");
+        if (direct &&
+            postfx::shown_is_waiting(generating, trace.runs, frame_count, waiting->place.opened_at, same_shape) &&
+            waiting->place.presented(frame_count) &&
+            run_between(known->queue, shown, D3D12_RESOURCE_STATE_PRESENT, nullptr, D3D12_RESOURCE_STATE_COMMON,
+                        "at Present (the swapchain's copy)")) {
+            stats.at_present++;
+            stats.copied++;
         }
+    }
     shown->Release();
 }
 
