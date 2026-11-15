@@ -14,7 +14,7 @@ use crate::conflicts::Pair;
 use crate::install::LOADER_DIR;
 use crate::launch::LOW_DISK;
 use crate::manifest::{AddonManifest, Category};
-use crate::overlay_guard::SessionOverlay;
+use crate::overlay_guard::{Removal, SessionOverlay};
 use crate::session::SessionRecord;
 use crate::store::Store;
 
@@ -282,7 +282,7 @@ fn evidence(session: &SessionRecord, game: Option<&Path>, store: &Store) -> Evid
     Evidence::read(session, game, names, Some(&store.root)).with_profile(store, &addons)
 }
 
-fn read_perf(dir: &Path) -> Option<String> {
+pub(crate) fn read_perf(dir: &Path) -> Option<String> {
     ["perf.log", "game-logs/perf.log"]
         .iter()
         .find_map(|rel| read_capped(&dir.join(rel)))
@@ -1245,7 +1245,7 @@ fn timeline_row(line: &str) -> Option<(f64, &str)> {
 
 /// How long the game had been on the start screen when perf.log was last
 /// written, when that is the last screen its timeline shows.
-fn perf_start_screen(perf: &str) -> Option<f64> {
+pub(crate) fn perf_start_screen(perf: &str) -> Option<f64> {
     let uptime: f64 = perf
         .lines()
         .find_map(|l| l.strip_prefix("uptime: "))?
@@ -1269,6 +1269,30 @@ fn perf_start_screen(perf: &str) -> Option<f64> {
     }
     let (at, screen) = last?;
     (screen == START_SCREEN).then_some(uptime - at)
+}
+
+/// The last screen the perf timeline names.
+pub(crate) fn last_screen(perf: &str) -> Option<&str> {
+    let mut timeline = false;
+    let mut last = None;
+    for line in perf.lines() {
+        if let Some(section) = line.strip_prefix("== ") {
+            timeline = section.starts_with("Timeline");
+            continue;
+        }
+        let Some((_, what)) = timeline.then(|| timeline_row(line)).flatten() else {
+            continue;
+        };
+        if let Some(screen) = what.split("; ").filter_map(|w| w.strip_prefix("screen ")).last() {
+            last = Some(screen.split(' ').next().unwrap_or(screen));
+        }
+    }
+    last
+}
+
+/// Whether an addon known to stall the boot explains the session's stall.
+pub(crate) fn addon_stall(session: &SessionRecord, store: &Store) -> bool {
+    boot_stall(&evidence(session, None, store)).is_some()
 }
 
 /// How long the game had been on the start screen when it ended: from the
@@ -1315,7 +1339,9 @@ fn minutes(secs: f64) -> String {
 /// The cause of a session that ended without a crash, from the first rule that
 /// recognises it.
 pub fn stalled(e: &Evidence) -> Option<Diagnosis> {
-    let (addon, secs) = boot_stall(e)?;
+    let Some((addon, secs)) = boot_stall(e) else {
+        return stalled_save(e);
+    };
     Some(Diagnosis {
         id: "boot_stall",
         title: format!("{addon} kept F1 25 on the loading screen"),
@@ -1327,6 +1353,37 @@ pub fn stalled(e: &Evidence) -> Option<Diagnosis> {
         steps: vec![format!(
             "Turn off {addon} in your profile, then press Play again."
         )],
+    })
+}
+
+/// What the core logs for each profile load.
+const PROFILE_LOAD: &str = "[saves] profile load ";
+
+/// A start-screen stall right after the game read the profile save, with no addon known to cause one.
+fn stalled_save(e: &Evidence) -> Option<Diagnosis> {
+    let secs = start_screen_secs(e).filter(|s| *s >= crate::save_stall::STALL_SECS)?;
+    if !e.loader.contains(PROFILE_LOAD) {
+        return None;
+    }
+    Some(Diagnosis {
+        id: "stalled_save",
+        title: "F1 25 stayed on the loading screen after reading your save".to_owned(),
+        what: format!(
+            "F1 25 read your profile save, then stayed on Loading... after Press any button for {} and never \
+             reached the main menu. A save last played with addon content that is off now (a career, livery or \
+             item from an addon) can do this, also from Steam or the EA app without the launcher. When the same \
+             save stalls again, the launcher moves it into the career vault before the next Play and puts back \
+             the newest version that isn't stuck.",
+            minutes(secs)
+        ),
+        steps: vec![
+            "Press Play again. If it stalls a second time, the launcher puts back an earlier version of your save; \
+             the stuck one stays on the Saves page."
+                .to_owned(),
+            "To get the stuck save back as it is, turn on the addons you last played it with, then restore it from \
+             the Saves page."
+                .to_owned(),
+        ],
     })
 }
 
@@ -1876,9 +1933,12 @@ fn pitlane(e: &Evidence) -> Diagnosis {
 
 const QUIT_SECS: f64 = 10.0;
 
-/// Whether the crash report's black box shows the game was already in its
-/// Exiting flow, with a first-chance access violation in the game's own code
-/// just before the process ended.
+/// The flow graph's root state, StateApp, as the black box prints it: by its name hash, or by name. It exits only
+/// when the game itself closes; every other state (a session, a screen's flow) exits while the game keeps running.
+const APP_FLOW: [&str; 2] = ["#e11edb87", "StateApp"];
+
+/// Whether the crash report's black box shows the game itself was closing: its root flow state had just exited,
+/// with a first-chance access violation in the game's own code just before the process ended.
 fn quit_fault(e: &Evidence) -> bool {
     let Some(report) = &e.report else {
         return false;
@@ -1888,8 +1948,12 @@ fn quit_fault(e: &Evidence) -> bool {
         rest.split(" s before").next()?.parse().ok()
     };
     let state = |key: &str| report.lines().find(|l| l.trim_start().starts_with(key));
-    let exiting = state("last flow")
-        .is_some_and(|l| l.contains(" Exiting ") && secs_before(l).is_some_and(|s| s <= QUIT_SECS));
+    let exiting = state("last flow").is_some_and(|l| {
+        let mut words = l.split_whitespace().skip(2);
+        words.next().is_some_and(|flow| APP_FLOW.contains(&flow))
+            && words.next() == Some("Exiting")
+            && secs_before(l).is_some_and(|s| s <= QUIT_SECS)
+    });
     let violation = state("last exception")
         .is_some_and(|l| l.contains("ACCESS_VIOLATION") && l.to_ascii_lowercase().contains(" at f1_25.exe+"));
     exiting && violation
@@ -2129,8 +2193,11 @@ fn matched(e: &Evidence) -> Option<Diagnosis> {
     }
     if windows && gpu_removed(e) {
         let overlay = SessionOverlay::scan(&e.loader).unwrap_or_default();
-        if overlay.removed.is_some() && overlay.drew && !painters(e, &overlay).is_empty() {
-            let addons = painters(e, &overlay);
+        let addons = match overlay.removal {
+            Some(Removal::AfterDraw { .. }) if overlay.drew => painters(e, &overlay),
+            _ => Vec::new(),
+        };
+        if overlay.removal == Some(Removal::AfterDraw { at_present: true }) && !addons.is_empty() {
             let mut steps = vec![format!(
                 "Turn off {} in your profile, then play again.",
                 list(&addons)
@@ -2158,6 +2225,12 @@ fn matched(e: &Evidence) -> Option<Diagnosis> {
                 .into_iter()
                 .filter(|s| !frame_gen || !s.starts_with("Turn off frame generation")),
         );
+        if !addons.is_empty() {
+            steps.push(format!(
+                "If it keeps happening, turn off {} in your profile for one session.",
+                list(&addons)
+            ));
+        }
         let also = if mods.is_empty() {
             String::new()
         } else {
@@ -2438,6 +2511,113 @@ mod tests {
             d.steps[0].contains("dxgi.dll, ReShade.ini and dlss5-feed.addon64"),
             "{}",
             d.steps[0]
+        );
+    }
+
+    /// A report's session: the overlay drew on the main menu only, the game aborted in its own
+    /// resource creation half a minute later, and Present had returned 0.
+    const GPU_LONG_AFTER_OVERLAY: &str = "\
+2026-11-14 10:35:11.303 [12808] [overlay] at start the game's hardware settings (C:\\Users\\id\\Documents\\My Games\\F1 25\\hardwaresettings\\hardware_settings_config.xml) have frame generation on (frame_gen mode 1, multi_frame_gen 3); drawing before frame generation is on
+2026-11-14 10:35:23.897 [12808] [overlay] api: alexs.silly-season on_paint -> ok (token 1)
+2026-11-14 10:35:23.917 [12808] [overlay] api: kizi.ai-tweaks on_paint -> ok (token 2)
+2026-11-14 10:35:38.567 [12808] [overlay] the game's hardware settings (C:\\Users\\id\\Documents\\My Games\\F1 25\\hardwaresettings\\hardware_settings_config.xml) have frame generation on (frame_gen mode 1, multi_frame_gen 3)
+2026-11-14 10:37:02.225 [17276] [overlay] first overlay frame submitted: 2820 vertices
+2026-11-14 10:37:38.712 [12808] [overlay] last 60 s: 281 frame(s) drawn, 0 skipped while the GPU still held the slot; GPU 0.031 ms per drawn frame (278 timed)
+2026-11-14 10:38:11.319 [17276] [crash] #1 first-chance (the game may still handle it) ACCESS_VIOLATION (0xc0000005) on thread 17276, 183 s after load, at F1_25.exe+0x39182a4 .xtls Ne_FatalAbort+0x4
+2026-11-14 10:38:11.319 [17276] [crash]   writing 0x1
+2026-11-14 10:38:11.319 [17276] [crash]   rsi=00000001c3603440 rdi=00000000887a0005 rbp=00000000887a0001 rsp=000000007d08f470
+2026-11-14 10:38:11.320 [17276] [crash]   stack:
+2026-11-14 10:38:11.320 [17276] [crash]   #0  F1_25.exe+0x39182a4 .xtls Ne_FatalAbort+0x4
+2026-11-14 10:38:11.320 [17276] [crash]   #1  F1_25.exe+0x39b8802 .xtls Render_Check_GfxResult+0x2f2
+2026-11-14 10:38:11.320 [17276] [crash]   #2  F1_25.exe+0x39b84b5 .xtls Render_Gfx2_PlacedResourceForward_C+0x25
+2026-11-14 10:38:11.320 [17276] [crash]   #3  F1_25.exe+0x39b9c46 .xtls Render_Gfx2Heap_BumpAllocPlacedResource+0x1b6
+2026-11-14 10:38:11.320 [17276] [overlay] the GPU was removed (present 0x00000000, reason 0x887a0001) more than 10 s after the overlay last drew; the overlay stops drawing
+2026-11-14 10:38:13.897 [17276] [crash] unhandled ACCESS_VIOLATION (0xc0000005) at F1_25.exe+0x39182a4 .xtls Ne_FatalAbort+0x4 reached the top-level filter; passing it to the game's filter
+";
+
+    /// A report's session: the device went 0.1 s after an overlay frame at a session's start, found
+    /// by the game's own resource creation and not by a Present.
+    const GPU_JUST_AFTER_OVERLAY: &str = "\
+2026-11-14 11:10:28.332 [ 4324] [overlay] api: kizi.ai-tweaks on_paint -> ok (token 1)
+2026-11-14 11:10:28.337 [ 4324] [overlay] api: dromodf.skip-cutscenes on_paint -> ok (token 2)
+2026-11-14 11:10:28.372 [ 4324] [overlay] api: alexs.silly-season on_paint -> ok (token 3)
+2026-11-14 11:10:35.253 [ 4324] [overlay] drawing on swapchain 000000007A32A040 with the direct queue 000000007BA5D780 from CreateSwapChainForHwnd (2560x1440, format 28, 3 buffer(s), created by sl.interposer.dll <- amd_fidelityfx_dx12.dll <- F1_25.exe <- KERNEL32.DLL <- ntdll.dll)
+2026-11-14 11:23:28.091 [ 4324] [overlay] first overlay frame submitted: 3330 vertices
+2026-11-14 11:24:34.769 [ 4324] [overlay] last 60 s: 227 frame(s) drawn, 0 skipped while the GPU still held the slot; GPU 0.038 ms per drawn frame (227 timed)
+2026-11-14 11:25:46.381 [ 4324] [overlay] the GPU was removed (present 0x00000000, reason 0x887a0006) 0.1 s after the overlay last drew (swapchain by sl.interposer.dll <- amd_fidelityfx_dx12.dll <- F1_25.exe <- KERNEL32.DLL <- ntdll.dll); the overlay stops drawing
+2026-11-14 11:25:46.384 [ 4324] [crash] #1 first-chance (the game may still handle it) ACCESS_VIOLATION (0xc0000005) on thread 4324, 949 s after load, at F1_25.exe+0x39182a4 .xtls Ne_FatalAbort+0x4
+2026-11-14 11:25:46.384 [ 4324] [crash]   rsi=00000001c3603440 rdi=00000000887a0005 rbp=00000000887a0006 rsp=000000000015bdf0
+2026-11-14 11:25:46.384 [ 4324] [crash]   stack:
+2026-11-14 11:25:46.384 [ 4324] [crash]   #0  F1_25.exe+0x39182a4 .xtls Ne_FatalAbort+0x4
+";
+
+    fn overlay_addons(log: &str) -> Evidence {
+        with_names(
+            ev(log, &["F1_25.exe"]),
+            &[
+                ("alexs.silly-season", "Silly Season"),
+                ("kizi.ai-tweaks", "Contact Physics"),
+                ("dromodf.skip-cutscenes", "Skip Cutscenes"),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_gpu_removed_long_after_the_overlay_drew_is_not_the_overlay() {
+        let d = diagnose(&overlay_addons(GPU_LONG_AFTER_OVERLAY)).unwrap();
+        assert_eq!(d.id, "gpu_removed");
+        assert_eq!(d.title, "Your graphics driver stopped responding");
+        assert!(d.what.contains("Frame generation was on"), "{}", d.what);
+        assert_eq!(d.steps[0], FRAME_GEN_OFF);
+        let all = format!("{} {} {}", d.title, d.what, d.steps.join(" "));
+        for word in ["overlay", "Silly Season", "Contact Physics"] {
+            assert!(!all.contains(word), "{word}: {all}");
+        }
+    }
+
+    #[test]
+    fn a_gpu_removed_before_the_overlay_drew_is_not_the_overlay() {
+        let log = GPU_LONG_AFTER_OVERLAY.replace(
+            "more than 10 s after the overlay last drew",
+            "and the overlay had not drawn",
+        );
+        assert!(log.contains("and the overlay had not drawn"));
+        assert_eq!(diagnose(&overlay_addons(&log)).unwrap().id, "gpu_removed");
+        let unknown =
+            GPU_LONG_AFTER_OVERLAY.replace("more than 10 s after the overlay last drew", "at some point");
+        assert_eq!(diagnose(&overlay_addons(&unknown)).unwrap().id, "gpu_removed");
+    }
+
+    #[test]
+    fn a_gpu_the_game_found_removed_just_after_an_overlay_frame_is_the_driver() {
+        let d = diagnose(&overlay_addons(GPU_JUST_AFTER_OVERLAY)).unwrap();
+        assert_eq!(d.id, "gpu_removed");
+        assert_eq!(d.title, "Your graphics driver stopped responding");
+        assert!(!d.what.contains("overlay"), "{}", d.what);
+        assert!(
+            d.steps[0].starts_with("Update your graphics driver"),
+            "{:?}",
+            d.steps
+        );
+        let named: Vec<&String> = d.steps.iter().filter(|s| s.contains("Silly Season")).collect();
+        assert_eq!(
+            named,
+            [
+                "If it keeps happening, turn off Contact Physics, Skip Cutscenes and Silly Season in your profile \
+                 for one session."
+            ]
+        );
+        assert_eq!(d.steps.last(), Some(named[0]));
+    }
+
+    #[test]
+    fn a_present_that_returned_the_removal_just_after_an_overlay_frame_names_the_addons() {
+        let log = GPU_JUST_AFTER_OVERLAY.replace("present 0x00000000", "present 0x887a0005");
+        let d = diagnose(&overlay_addons(&log)).unwrap();
+        assert_eq!(d.id, "gpu_removed_overlay");
+        assert_eq!(
+            d.steps[0],
+            "Turn off Contact Physics, Skip Cutscenes and Silly Season in your profile, then play again."
         );
     }
 
@@ -2864,6 +3044,37 @@ runtime      Windows
     }
 
     #[test]
+    fn a_stall_right_after_the_profile_load_points_at_the_save() {
+        let load = "2026-11-04 03:32:34.875 [ 5256] [saves] profile load 1: manager 5 slot 2: gm_my_team id=16 \
+                    key=66f051ee751e04d1 career=my_team:66f051ee751e04d1 flags=0x20 name=\"My Team Save 3\"\n";
+        let mut e = stuck(SPLASH, 408, &[]);
+        e.loader = load.into();
+        let d = stalled(&e).unwrap();
+        assert_eq!(d.id, "stalled_save");
+        assert_eq!(
+            d.title,
+            "F1 25 stayed on the loading screen after reading your save"
+        );
+        assert!(d.what.contains("for 5 minutes"), "{}", d.what);
+        assert_eq!(d.steps.len(), 2);
+        let mut quick = stuck(SPLASH, 120, &[]);
+        quick.loader = load.into();
+        assert_eq!(stalled(&quick), None, "30 s is a normal load");
+        assert_eq!(
+            stalled(&stuck(SPLASH, 408, &[])),
+            None,
+            "no profile load, no save to blame"
+        );
+        let mut addon = stuck(SPLASH, 408, &[LIVERY]);
+        addon.loader = load.into();
+        assert_eq!(
+            stalled(&addon).unwrap().id,
+            "boot_stall",
+            "the known addon comes first"
+        );
+    }
+
+    #[test]
     fn a_boot_stuck_on_loading_names_the_addon_known_to_cause_it() {
         let d = stalled(&stuck(
             SPLASH,
@@ -2980,6 +3191,44 @@ runtime      Windows
         assert_eq!(diagnose(&e), None, "not exiting");
         e.report = Some(QUIT_REPORT.replace("F1_25.exe+", "other.dll+"));
         assert_eq!(diagnose(&e), None, "not in the game's code");
+        e.report = Some(QUIT_REPORT.replace("#e11edb87", "StateApp"));
+        assert_eq!(diagnose(&e).unwrap().id, "quit_fault", "the root state by name");
+    }
+
+    const SESSION_EXIT_REPORT: &str = "== Game state (from the black box)\n  \
+        last flow      StateSession Exiting (1.2 s before this report)\n  \
+        last screen    garage_monitor_container (0.1 s before this report)\n  \
+        last session   started (Game_GameModule_OnSessionEnter); frame 19364 (1.9 s before this report)\n  \
+        last race      none recorded\n  \
+        last career    hub left (117.5 s before this report)\n  \
+        last heap      none recorded\n  \
+        last exception first-chance ACCESS_VIOLATION at F1_25.exe+0x1f8a25c .xtls \
+        Game_Read_OverridesCarMonitorMaximisedConfig_2+0xe6c (0.0 s before this report)\n";
+
+    const SESSION_EXIT_LOADER: &str = "\
+2026-11-14 19:35:37.360 [ 9720] [career] flow \"StateSession\" Updating -> Exiting
+2026-11-14 19:35:37.362 [ 9720] [events] session.end (StateSession exited)
+2026-11-14 19:35:37.769 [ 5108] [events] career.saved (driver_career): 0 handlers
+2026-11-14 19:35:38.524 [17320] [crash] #1 first-chance (the game may still handle it) ACCESS_VIOLATION (0xc0000005) on thread 17320, 419 s after load, at F1_25.exe+0x1f8a25c .xtls Game_Read_OverridesCarMonitorMaximisedConfig_2+0xe6c
+2026-11-14 19:35:38.524 [17320] [crash]   reading 0x9c58
+2026-11-14 19:35:38.525 [17320] [crash]   stack:
+2026-11-14 19:35:38.525 [17320] [crash]   #0  F1_25.exe+0x1f8a25c .xtls Game_Read_OverridesCarMonitorMaximisedConfig_2+0xe6c
+2026-11-14 19:35:38.525 [17320] [crash]   #1  F1_25.exe+0x42c02eb .xtls Vm_Dispatch_BindingMessage+0x20b
+2026-11-14 19:35:38.525 [17320] [crash]   #2  F1_25.exe+0x398c32c .xtls Ne_EventQueue_DispatchPending+0xbc
+2026-11-14 19:35:38.526 [17320] [crash] unhandled ACCESS_VIOLATION (0xc0000005) at F1_25.exe+0x1f8a25c .xtls Game_Read_OverridesCarMonitorMaximisedConfig_2+0xe6c reached the top-level filter; passing it to the game's filter
+";
+
+    #[test]
+    fn a_session_that_exits_while_the_game_runs_is_not_a_quit_fault() {
+        let mut e = ev(SESSION_EXIT_LOADER, &[]);
+        e.report = Some(SESSION_EXIT_REPORT.to_owned());
+        assert_eq!(diagnose(&e), None, "the session was exiting, not the game");
+        for flow in ["StateUnloadSession", "SessionStateCareerHubUpdate", "#04fc8ffa"] {
+            e.report = Some(SESSION_EXIT_REPORT.replace("StateSession", flow));
+            assert_eq!(diagnose(&e), None, "{flow}");
+        }
+        e.report = Some(SESSION_EXIT_REPORT.replace("StateSession", "#e11edb87"));
+        assert_eq!(diagnose(&e).unwrap().id, "quit_fault");
     }
 
     #[test]

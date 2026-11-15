@@ -223,9 +223,13 @@ pub fn run(store: &Store, profile: &str, args: RunArgs) -> Result<ExitCode> {
     let mut follow = Follow::new(&dir, Some((loader, before)), symbols(&game, args.exe.as_deref()));
     install_ctrl_c();
     let mut quiet = false;
+    let mut opened: Option<Instant> = None;
     while !dir.join("exit_code").exists() {
-        if let Some(url) = swofty_core::home_menu::take_open_request(&game) {
+        if let Some(url) = swofty_core::home_menu::take_open_request(&game)
+            && opened.is_none_or(|at: Instant| at.elapsed() >= OPEN_AGAIN)
+        {
             open_in_browser(&url);
+            opened = Some(Instant::now());
         }
         if stop_requested() {
             if wrapper.child.is_none() {
@@ -280,9 +284,16 @@ pub fn run(store: &Store, profile: &str, args: RunArgs) -> Result<ExitCode> {
 const LEFT: &str = "left without waiting; the next swofty run or launcher start rolls the game files back";
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(600);
 
+const OPEN_AGAIN: Duration = Duration::from_secs(3);
+
 fn open_in_browser(url: &str) {
-    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let (opener, lead): (&str, &[&str]) = if cfg!(windows) {
+        ("rundll32.exe", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
     match Command::new(opener)
+        .args(lead)
         .arg(url)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -434,13 +445,7 @@ fn wrapper(store: &Store, profile: &str, args: &RunArgs, g: &Game) -> Result<Exi
         .ok()
         .and_then(|d| serde_json::from_slice(&d).ok())
         .unwrap_or_default();
-    // A wrapper Steam starts later on its own must not inherit an earlier launch's arming.
-    if request.netplay.is_some() && !written_within(&launch_path, NETPLAY_REQUEST_LIFE) {
-        request.netplay = None;
-    }
-    if request.row_ids.is_some() && !written_within(&launch_path, NETPLAY_REQUEST_LIFE) {
-        request.row_ids = None;
-    }
+    age_out(&mut request, written_within(&launch_path, NETPLAY_REQUEST_LIFE));
     if let Some(file) = &request.row_ids {
         match swofty_core::row_ids::Overrides::read(file) {
             Ok(ids) => {
@@ -608,9 +613,14 @@ struct Session<'a> {
 
 impl Drop for Session<'_> {
     fn drop(&mut self) {
-        match swofty_core::offline::restore_pending(&self.store.root) {
-            Ok(true) => info("offline play: the game folder is back to vanilla"),
-            Ok(false) => {}
+        match swofty_core::offline::restore_pending(&self.store.root, &self.game.dir) {
+            Ok(Some(notes)) => {
+                for note in notes {
+                    info(&format!("offline play: {note}"));
+                }
+                info("offline play: the game folder is back to vanilla");
+            }
+            Ok(None) => {}
             Err(e) => info(&format!(
                 "offline play restore failed{}, run swofty restore: {e:#}",
                 still_running(&self.game.dir)
@@ -733,6 +743,16 @@ fn rebuild_if_needed(store: &Store, profile: &str, game: &Path) {
 }
 
 const NETPLAY_REQUEST_LIFE: Duration = Duration::from_secs(600);
+
+/// A wrapper Steam starts later on its own must not inherit an earlier launch's one-session asks: its
+/// arming, the host's row ids or Steam's saves. `fresh` is whether the request was written just now.
+fn age_out(request: &mut LaunchRequest, fresh: bool) {
+    if !fresh {
+        request.netplay = None;
+        request.row_ids = None;
+        request.steam_saves_once = false;
+    }
+}
 
 fn written_within(path: &Path, max: Duration) -> bool {
     std::fs::metadata(path)
@@ -985,12 +1005,22 @@ fn play(
                 ),
             );
         }
+        let running = found.attached_text();
         say(
             "loader",
-            "version.dll did not attach to F1 25; what the session found:",
+            match running {
+                Some(_) => {
+                    "version.dll attached to F1 25, which the session's watch missed; what the session found:"
+                }
+                None => "version.dll did not attach to F1 25; what the session found:",
+            },
         );
         for line in found.lines(game) {
             say("loader", &format!("  {line}"));
+        }
+        if let Some(text) = running {
+            say("info", text);
+            return;
         }
         // The antivirus explanation is a Windows one; under Proton a loader
         // that does not attach is a prefix or override problem instead.
@@ -2209,6 +2239,24 @@ mod tests {
             NETPLAY_REQUEST_LIFE
         ));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn an_old_launch_request_plays_on_launcher_saves_again() {
+        let asked = || LaunchRequest {
+            netplay: Some("armed".into()),
+            row_ids: Some(PathBuf::from("row_ids.json")),
+            steam_saves_once: true,
+            ..LaunchRequest::default()
+        };
+        let mut fresh = asked();
+        age_out(&mut fresh, true);
+        assert_eq!(fresh, asked());
+        let mut old = asked();
+        age_out(&mut old, false);
+        assert!(!old.steam_saves_once);
+        assert_eq!(old.netplay, None);
+        assert_eq!(old.row_ids, None);
     }
 
     fn temp_log(name: &str) -> PathBuf {

@@ -24,6 +24,12 @@ pub const FILE: &str = "row-ids.json";
 /// The table name of the track rows `track.add` adds; the game reads their `statId` in a byte, 0xff = none.
 const TRACK_TABLE: &str = "tracks.Track";
 pub const TRACK_STAT_MAX: i64 = 254;
+
+/// The `<table>.<row>/<label>` name of the track row `track.add` adds for the track `code`, as a build's added-row
+/// ids and [`Overrides::rows`] name it.
+pub fn track_row(code: &str) -> String {
+    format!("{TRACK_TABLE}/{code}")
+}
 const LOCK: &str = "row-ids.lock";
 const VERSION: u32 = 2;
 const ALIASES_VERSION: u32 = 1;
@@ -327,20 +333,52 @@ pub fn save_owners(data: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// The addons that own each team, vehicle or driver id a save can hold, by table and id: the ids the
-/// store keeps for their rows, and the ids those rows had before.
-pub fn id_owners(data: &Path) -> BTreeMap<(String, i64), BTreeSet<String>> {
+/// The addons that own the team, vehicle and driver ids a save can hold ([`id_owners`]).
+#[derive(Debug, Default, Clone)]
+pub struct IdOwners {
+    now: BTreeMap<(String, i64), BTreeSet<String>>,
+    careers: BTreeMap<String, BTreeMap<(String, i64), BTreeSet<String>>>,
+}
+
+impl IdOwners {
+    /// The addons that own `id` of `table` for `career`: the record the core's `ids.json` keeps for
+    /// that career when it keeps one, else the addons that hold the id now, else the record another
+    /// career keeps. An id an addon held before under `pin` is never its id.
+    pub fn of(&self, career: &str, table: &str, id: i64) -> Option<&BTreeSet<String>> {
+        let key = (table.to_owned(), id);
+        self.careers
+            .get(career)
+            .and_then(|kept| kept.get(&key))
+            .or_else(|| self.now.get(&key))
+            .or_else(|| self.careers.values().find_map(|kept| kept.get(&key)))
+    }
+}
+
+impl From<BTreeMap<(String, i64), BTreeSet<String>>> for IdOwners {
+    fn from(now: BTreeMap<(String, i64), BTreeSet<String>>) -> Self {
+        Self {
+            now,
+            careers: BTreeMap::new(),
+        }
+    }
+}
+
+/// The addons that own each team, vehicle or driver id a save can hold: the ids the store keeps for
+/// their rows, the ids those rows had before, the ids the core's `ids.json` gives their team, vehicle
+/// and driver records now, and the ids it keeps for each career.
+pub fn id_owners(data: &Path) -> IdOwners {
     let file: File = match crate::load_json(&path(data)) {
         Ok(Loaded::Found(f)) => f,
         _ => File::default(),
     };
-    let mut out: BTreeMap<(String, i64), BTreeSet<String>> = BTreeMap::new();
+    let mut out = IdOwners::default();
     let mut put = |key: &str, id: i64| {
         let mut parts = key.splitn(3, '/');
         if let (Some(addon), Some(table)) = (parts.next(), parts.next())
             && ALIAS_TABLES.iter().any(|(t, _)| *t == table)
         {
-            out.entry((table.to_owned(), id))
+            out.now
+                .entry((table.to_owned(), id))
                 .or_default()
                 .insert(addon.to_owned());
         }
@@ -356,6 +394,66 @@ pub fn id_owners(data: &Path) -> BTreeMap<(String, i64), BTreeSet<String>> {
     for (key, ids) in file.aliases.iter().chain(profiles.flat_map(|p| p.aliases.iter())) {
         for id in ids {
             put(key, *id);
+        }
+    }
+    let Some(doc) = std::fs::read(reports::path(data, reports::IDS))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    else {
+        return out;
+    };
+    let held = REGISTRY_TABLES
+        .iter()
+        .filter(|(_, table)| ALIAS_TABLES.iter().any(|(t, _)| t == table));
+    for (registry, table) in held {
+        let records = |of: &Value| -> Vec<(i64, String)> {
+            of[*registry]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(record, e)| {
+                    let id = e.as_i64().or_else(|| e["id"].as_i64())?;
+                    Some((id, record.split_once('/')?.0.to_owned()))
+                })
+                .collect()
+        };
+        for (id, addon) in records(&doc["ids"]) {
+            out.now
+                .entry(((*table).to_owned(), id))
+                .or_default()
+                .insert(addon);
+        }
+        for (career, kept) in doc["careers"].as_object().into_iter().flatten() {
+            for (id, addon) in records(kept) {
+                out.careers
+                    .entry(career.clone())
+                    .or_default()
+                    .entry(((*table).to_owned(), id))
+                    .or_default()
+                    .insert(addon);
+            }
+        }
+    }
+    out
+}
+
+/// The addons the store in `data` keeps a row of `table` for, by the row's label.
+pub fn label_owners(data: &Path, table: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let file: File = match crate::load_json(&path(data)) {
+        Ok(Loaded::Found(f)) => f,
+        _ => File::default(),
+    };
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for key in file
+        .rows
+        .keys()
+        .chain(file.profiles.values().flat_map(|p| p.rows.keys()))
+    {
+        let mut parts = key.splitn(3, '/');
+        if let (Some(addon), Some(t), Some(label)) = (parts.next(), parts.next(), parts.next())
+            && t == table
+        {
+            out.entry(label.to_owned()).or_default().insert(addon.to_owned());
         }
     }
     out
@@ -964,7 +1062,8 @@ impl Store {
     /// `<addon>/tracks.Track/<code>`: the id kept for it, else `seed` (the id the last build gave it), else the first
     /// free id from `top`, the table's highest plus one, to [`TRACK_STAT_MAX`] and then from 0. `held` says whether a
     /// track row of this build holds an id. An id kept for any other track stays that track's whether or not its addon
-    /// is on, so no id is ever given to two tracks.
+    /// is on, so no id is ever given to two tracks; only when every id is kept does a track whose addon the build
+    /// leaves out give its id up.
     pub fn track_stat_id(
         &mut self,
         addon: &str,
@@ -973,7 +1072,7 @@ impl Store {
         top: i64,
         held: &dyn Fn(i64) -> bool,
     ) -> std::result::Result<(i64, String), String> {
-        let base = format!("{addon}/{TRACK_TABLE}/{code}");
+        let base = format!("{addon}/{}", track_row(code));
         let mut nth = 0;
         let key = loop {
             let key = match nth {
@@ -1007,15 +1106,52 @@ impl Store {
             Some(_) => IdFrom::Moved,
             None => IdFrom::Next,
         };
-        let id = (top.max(0)..=TRACK_STAT_MAX)
+        let free = (top.max(0)..=TRACK_STAT_MAX)
             .chain(0..top.clamp(0, TRACK_STAT_MAX + 1))
-            .find(|id| !blocked(self, *id))
-            .ok_or_else(|| {
-                format!(
-                    "{code}: tracks have no free statId up to {TRACK_STAT_MAX}, the highest the game reads"
-                )
-            })?;
+            .find(|id| !blocked(self, *id));
+        // Every id is kept for some track ever installed: the id of a track whose addon this build leaves out goes to
+        // this one. A track of an addon in the build never lends its id, whether or not the build reached it yet.
+        // Saves name a track by its id and no record says which ids careers use, so a calendar that named the left-out
+        // track shows this one from then on. The left-out track takes a free or spare id again when it is turned on;
+        // the ids UDP telemetry reports never change with it (udp_ids.rs, swofty_track_id).
+        let spare = || {
+            self.by_id
+                .get(TRACK_TABLE)
+                .into_iter()
+                .flatten()
+                .filter(|(id, k)| {
+                    **k != key
+                        && (0..=TRACK_STAT_MAX).contains(*id)
+                        && !held(**id)
+                        && !self.claimed.contains(*k)
+                        && !self.building.contains(addon_of(k))
+                })
+                .map(|(id, k)| (*id, k.clone()))
+                .min()
+        };
+        let (id, from, lent) = match free {
+            Some(id) => (id, from, None),
+            None => match spare() {
+                Some((id, k)) => (id, IdFrom::Reused, Some(k)),
+                None => {
+                    return Err(format!(
+                        "{code}: tracks have no free statId up to {TRACK_STAT_MAX}, the highest the game reads, and every track that holds \
+                         one is in this build"
+                    ));
+                }
+            },
+        };
         self.put(&key, id, from);
+        if let Some(k) = lent {
+            self.reused += 1;
+            return Ok((
+                id,
+                format!(
+                    "stat id {id} (every id is kept; this one was {}, whose addon is off)",
+                    row_name(&k)
+                ),
+            ));
+        }
         let why = match kept {
             Some(old) => format!("stat id {id} (the {old} kept for it is held by another track)"),
             None => format!("stat id {id} (new, kept in {FILE})"),
@@ -1106,16 +1242,16 @@ fn career_ids(doc: &Value) -> HashMap<String, HashSet<i64>> {
     out
 }
 
-// The ids `ids.json` holds and its careers use, by the table whose rows they are ids of.
-fn registry_ids(doc: &Value) -> HashMap<String, HashMap<i64, String>> {
-    let mut out: HashMap<String, HashMap<i64, String>> = HashMap::new();
+// The ids `ids.json` holds and its careers use, as `(table, id, record)`: the table whose rows they are
+// ids of and the `<addon>/<label>` record each is the id of. A registry's own ids come before its careers'.
+fn registry_records(doc: &Value) -> Vec<(&'static str, i64, &str)> {
+    let mut out = Vec::new();
     for (registry, table) in REGISTRY_TABLES {
-        let ids = out.entry((*table).to_owned()).or_default();
         if let Some(records) = doc["ids"][*registry].as_object() {
-            ids.extend(records.iter().filter_map(|(record, e)| {
+            out.extend(records.iter().filter_map(|(record, e)| {
                 e.as_i64()
                     .or_else(|| e["id"].as_i64())
-                    .map(|id| (id, record.clone()))
+                    .map(|id| (*table, id, record.as_str()))
             }));
         }
         if let Some(careers) = doc["careers"]
@@ -1124,16 +1260,26 @@ fn registry_ids(doc: &Value) -> HashMap<String, HashMap<i64, String>> {
         {
             for career in careers.values() {
                 if let Some(records) = career[*registry].as_object() {
-                    ids.extend(
+                    out.extend(
                         records
                             .iter()
-                            .filter_map(|(record, e)| e.as_i64().map(|id| (id, record.clone()))),
+                            .filter_map(|(record, e)| e.as_i64().map(|id| (*table, id, record.as_str()))),
                     );
                 }
             }
         }
     }
-    out.retain(|_, ids| !ids.is_empty());
+    out
+}
+
+// The ids `ids.json` holds and its careers use, by the table whose rows they are ids of.
+fn registry_ids(doc: &Value) -> HashMap<String, HashMap<i64, String>> {
+    let mut out: HashMap<String, HashMap<i64, String>> = HashMap::new();
+    for (table, id, record) in registry_records(doc) {
+        out.entry(table.to_owned())
+            .or_default()
+            .insert(id, record.to_owned());
+    }
     out
 }
 
@@ -1457,6 +1603,63 @@ mod tests {
     }
 
     #[test]
+    fn a_lent_track_id_is_the_one_the_build_gives_even_where_a_turned_off_track_keeps_it() {
+        let mut store = Store::default();
+        let own = track_build(
+            &mut store,
+            &[
+                ("mod.lemans", "le_mans_2017"),
+                ("track.bahrain_outer", "bahrain_outer"),
+                ("mod.brhgp", "brhgp"),
+            ],
+            &[],
+        );
+        assert_eq!(own["le_mans_2017"], STOCK_TRACKS);
+        assert_eq!(own["brhgp"], STOCK_TRACKS + 2);
+        let host = Overrides {
+            rows: BTreeMap::from([
+                (
+                    "track.bahrain_outer".to_owned(),
+                    BTreeMap::from([(track_row("bahrain_outer"), STOCK_TRACKS)]),
+                ),
+                (
+                    "mod.brhgp".to_owned(),
+                    BTreeMap::from([(track_row("brhgp"), STOCK_TRACKS + 6)]),
+                ),
+            ]),
+            ..Overrides::default()
+        };
+        let on = [("track.bahrain_outer", "bahrain_outer"), ("mod.brhgp", "brhgp")];
+        let order: Vec<String> = on.iter().map(|(a, _)| (*a).to_owned()).collect();
+        assert_eq!(store.lend(&host, &order), Ok(2));
+        let lent = track_build(&mut store, &on, &[]);
+        assert_eq!(lent["bahrain_outer"], STOCK_TRACKS);
+        assert_eq!(lent["brhgp"], STOCK_TRACKS + 6);
+        assert_eq!(store.lent_missed(), None);
+        assert!(!store.unsaved(), "row-ids.json keeps the player's own ids");
+    }
+
+    #[test]
+    fn a_lent_track_id_a_track_of_the_build_keeps_is_refused_by_name() {
+        let mut store = Store::default();
+        let on = [
+            ("mod.lemans", "le_mans_2017"),
+            ("track.bahrain_outer", "bahrain_outer"),
+        ];
+        track_build(&mut store, &on, &[]);
+        let host = Overrides {
+            rows: BTreeMap::from([(
+                "track.bahrain_outer".to_owned(),
+                BTreeMap::from([(track_row("bahrain_outer"), STOCK_TRACKS)]),
+            )]),
+            ..Overrides::default()
+        };
+        let order: Vec<String> = on.iter().map(|(a, _)| (*a).to_owned()).collect();
+        let err = store.lend(&host, &order).unwrap_err();
+        assert!(err.contains("le_mans_2017"), "{err}");
+    }
+
+    #[test]
     fn track_stat_ids_stay_within_what_the_game_reads() {
         let mut store = Store::default();
         let (id, _) = store
@@ -1464,6 +1667,55 @@ mod tests {
             .unwrap();
         assert_eq!(id, 250);
         let err = store.track_stat_id("mod.b", "b", None, 0, &|_| true).unwrap_err();
+        assert!(err.contains("254"), "{err}");
+    }
+
+    #[test]
+    fn a_full_track_pool_lends_the_id_of_a_track_whose_addon_is_off() {
+        let mut store = Store::default();
+        for i in 0..=TRACK_STAT_MAX {
+            store
+                .track_stat_id(&format!("mod.t{i}"), "t", None, 0, &|_| false)
+                .unwrap();
+        }
+        let off = store.get("mod.t7/tracks.Track/t").unwrap();
+        let on: Vec<String> = (0..=TRACK_STAT_MAX)
+            .filter(|i| *i != 7)
+            .map(|i| format!("mod.t{i}"))
+            .chain(["mod.new".to_owned()])
+            .collect();
+        store.building(on.clone());
+        let before: Vec<i64> = (0..=TRACK_STAT_MAX)
+            .filter(|i| *i != 7)
+            .map(|i| store.get(&format!("mod.t{i}/tracks.Track/t")).unwrap())
+            .collect();
+        // The new track asks first: no track of the build has asked yet, and none of them lends its id.
+        let (id, why) = store.track_stat_id("mod.new", "t", None, 0, &|_| false).unwrap();
+        assert_eq!(id, off);
+        assert!(why.contains("mod.t7"), "{why}");
+        assert_eq!(store.get("mod.t7/tracks.Track/t"), None);
+        let after: Vec<i64> = on
+            .iter()
+            .filter(|a| *a != "mod.new")
+            .map(|a| store.track_stat_id(a, "t", None, 0, &|_| false).unwrap().0)
+            .collect();
+        assert_eq!(after, before);
+
+        let mut full = Store::default();
+        for i in 0..=TRACK_STAT_MAX {
+            full.track_stat_id(&format!("mod.t{i}"), "t", None, 0, &|_| false)
+                .unwrap();
+        }
+        full.building(
+            (0..=TRACK_STAT_MAX)
+                .map(|i| format!("mod.t{i}"))
+                .chain(["mod.x".to_owned()]),
+        );
+        for i in 0..=TRACK_STAT_MAX {
+            full.track_stat_id(&format!("mod.t{i}"), "t", None, 0, &|_| false)
+                .unwrap();
+        }
+        let err = full.track_stat_id("mod.x", "t", None, 0, &|_| false).unwrap_err();
         assert!(err.contains("254"), "{err}");
     }
 
@@ -2594,7 +2846,7 @@ mod tests {
               "profiles":{"p":{"rows":{"b.cars/entrants.vehicles.vehicle/v":{"id":510,"from":"next"}}}}}"#,
         );
         let owners = id_owners(&data);
-        let of = |table: &str, id: i64| owners.get(&(table.to_owned(), id)).cloned().unwrap_or_default();
+        let of = |table: &str, id: i64| owners.of("c", table, id).cloned().unwrap_or_default();
         assert_eq!(
             of("entrants.teams.team", 501),
             BTreeSet::from(["a.season".to_owned()])
@@ -2608,6 +2860,53 @@ mod tests {
             BTreeSet::from(["b.cars".to_owned()])
         );
         assert!(of("tracks.Track", 9).is_empty());
+        assert_eq!(
+            label_owners(&data, "entrants.vehicles.vehicle").get("v"),
+            Some(&BTreeSet::from(["b.cars".to_owned()]))
+        );
+        assert!(!label_owners(&data, "entrants.vehicles.vehicle").contains_key("t"));
+        std::fs::remove_dir_all(&data).ok();
+    }
+
+    #[test]
+    fn id_owners_name_the_addon_of_a_registry_id_and_of_a_careers_pin() {
+        let data = data_dir("id-owners-registry");
+        put(
+            &path(&data),
+            r#"{"version":2,"rows":{"b.cars/entrants.vehicles.vehicle/v":{"id":545,"from":"next"}}}"#,
+        );
+        put(
+            &reports::path(&data, reports::IDS),
+            r#"{"version":1,"ids":{
+              "team.identity":{"x.season/t":{"id":536,"since":"2026-11-13"}},
+              "vehicle":{"x.season/v":{"id":545},"z.season/w":528,"old.season/o":{"id":825,"pin":529}},
+              "driver.identity":{"x.season/d":{"id":255}},
+              "driver.head":{"x.season/h":{"id":300}},
+              "vehicle.package":{"x.season/p":{"id":600}},
+              "helmet":{"x.season/k":{"id":537}}},
+              "careers":{"c":{"vehicle":{"y.season/w":528},"team.identity":{"y.season/u":700}}}}"#,
+        );
+        let owners = id_owners(&data);
+        let of = |career: &str, table: &str, id: i64| -> Vec<String> {
+            owners
+                .of(career, table, id)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(of("c", "entrants.teams.team", 536), ["x.season"]);
+        assert_eq!(of("c", "entrants.teams.team", 700), ["y.season"]);
+        assert_eq!(of("other", "entrants.teams.team", 700), ["y.season"]);
+        assert_eq!(of("c", "entrants.vehicles.vehicle", 545), ["b.cars", "x.season"]);
+        assert_eq!(of("c", "entrants.vehicles.vehicle", 528), ["y.season"]);
+        assert_eq!(of("other", "entrants.vehicles.vehicle", 528), ["z.season"]);
+        assert_eq!(of("c", "entrants.vehicles.vehicle", 825), ["old.season"]);
+        assert!(of("c", "entrants.vehicles.vehicle", 529).is_empty());
+        assert_eq!(of("c", "entrants.drivers.driver", 255), ["x.season"]);
+        assert!(of("c", "entrants.drivers.driver", 300).is_empty());
+        assert!(of("c", "entrants.vehicles.vehicle", 600).is_empty());
+        assert!(of("c", "entrants.teams.team", 537).is_empty());
         std::fs::remove_dir_all(&data).ok();
     }
 
