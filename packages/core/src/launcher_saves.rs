@@ -32,9 +32,8 @@ pub const OFF_ENV: &str = "SWOFTY_LAUNCHER_SAVES";
 pub const EA_NOTE: &str =
     "launcher saves are not available on the EA copy yet; this session uses the EA copy's own saves";
 pub const EA_DIR: &str = "ea/profile";
-/// The EA copy's launcher store, import and export are written and tested, and stay off until the
-/// core's EA storage backend lands.
-pub const EA_ENABLED: bool = false;
+/// The EA copy's launcher store, import and export; the core serves the EA save device from it.
+pub const EA_ENABLED: bool = true;
 
 pub fn root(data: &Path) -> PathBuf {
     data.join(DIR)
@@ -63,6 +62,54 @@ pub fn store_for(data: &Path, profile: &str, game_save: &Location) -> Option<Loc
         Layout::Steam | Layout::Launcher => Some(location(data, profile)),
         Layout::Ea | Layout::LauncherEa => Some(location_ea(data, profile)),
     }
+}
+
+/// Why a Play uses the game copy's own save instead of the profile's launcher save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Why {
+    UnsupportedBuild(String),
+    Vanilla,
+    LauncherSavesOff,
+    EaCopy,
+    SteamOnce,
+}
+
+/// The save a Play runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Area {
+    Launcher,
+    Own(Why),
+}
+
+/// What decides the save area of one Play.
+#[derive(Debug, Clone, Copy)]
+pub struct Choice<'a> {
+    pub build_blocked: Option<&'a str>,
+    pub vanilla: bool,
+    pub profile_uses_launcher_saves: bool,
+    pub steam_saves_once: bool,
+    pub layout: Layout,
+}
+
+/// The one decision between the profile's launcher save and the copy's own save. `swofty run` acts on
+/// it and the launcher's play bar shows it.
+pub fn area(c: Choice<'_>) -> Area {
+    if let Some(version) = c.build_blocked {
+        return Area::Own(Why::UnsupportedBuild(version.to_owned()));
+    }
+    if c.vanilla {
+        return Area::Own(Why::Vanilla);
+    }
+    if !c.profile_uses_launcher_saves {
+        return Area::Own(Why::LauncherSavesOff);
+    }
+    if !supported(c.layout) {
+        return Area::Own(Why::EaCopy);
+    }
+    if c.steam_saves_once {
+        return Area::Own(Why::SteamOnce);
+    }
+    Area::Launcher
 }
 
 /// Whether launcher saves can be used with a copy whose save is `layout`.
@@ -131,9 +178,12 @@ fn stage_copy(from: &Path, to: &Path) -> Result<()> {
             true => Ok(()),
             false => Err(Error::Other(format!("{} did not copy cleanly", tmp.display()))),
         })
+        .and_then(|()| crate::sync_file(&tmp))
         .and_then(|()| std::fs::rename(&tmp, to).map_err(io_err(to)));
     if done.is_err() {
         std::fs::remove_file(&tmp).ok();
+    } else {
+        crate::sync_dir(to.parent());
     }
     done
 }

@@ -8,10 +8,15 @@
 #include "../scheduler.hpp"
 #include "boot.hpp"
 #include "garage_build.hpp"
+#include "grid_rules.hpp"
 #include "gvdb.hpp"
 #include "logos.hpp"
+#include "race_fuel.hpp"
+#include "quali_tyres.hpp"
 #include "teams.hpp"
+#include "box_options.hpp"
 #include "tyre_warmers.hpp"
+#include "weekend.hpp"
 #include "../tracks/boot.hpp"
 #include "../tracks/box.hpp"
 #include "../../career_ops/teams_plan.hpp"
@@ -857,6 +862,89 @@ WarmersBox tyre_warmers_for_box(const std::string &entrant_list)
         packages.push_back({id, lookup("content.package", id)});
     WarmersPick pick = tyre_warmers_pick(entrant_list, packages);
     return {pick.warmers, pick.line};
+}
+
+FuelRules fuel_rules_for_box(const std::string &entrant_list)
+{
+    Store &st = registry::store();
+    std::map<std::string, Value> keep;
+    Lookup lookup = store_lookup(st, keep);
+    std::vector<std::pair<std::string, const Value *>> packages;
+    for (auto &id : in_load_order(st, "content.package"))
+        packages.push_back({id, lookup("content.package", id)});
+    return fuel_rules_pick(entrant_list, packages);
+}
+
+WeekendBox weekend_for_box(const std::string &entrant_list)
+{
+    Store &st = registry::store();
+    std::map<std::string, Value> keep;
+    Lookup lookup = store_lookup(st, keep);
+    std::vector<std::pair<std::string, const Value *>> packages;
+    for (auto &id : in_load_order(st, "content.package"))
+        packages.push_back({id, lookup("content.package", id)});
+    WeekendPick pick = weekend_pick(entrant_list, packages);
+    return {pick.time_limit_s, pick.weekend_mode, pick.line};
+}
+
+BoxOptionsPick box_options_for_box(const std::string &entrant_list)
+{
+    Store &st = registry::store();
+    std::map<std::string, Value> keep;
+    Lookup lookup = store_lookup(st, keep);
+    std::vector<std::pair<std::string, const Value *>> packages;
+    for (auto &id : in_load_order(st, "content.package"))
+        packages.push_back({id, lookup("content.package", id)});
+    return box_options_pick(entrant_list, packages);
+}
+
+GridBox grid_for_box(const std::string &entrant_list)
+{
+    Store &st = registry::store();
+    std::map<std::string, Value> keep;
+    Lookup lookup = store_lookup(st, keep);
+    std::vector<std::pair<std::string, const Value *>> packages;
+    for (auto &id : in_load_order(st, "content.package"))
+        packages.push_back({id, lookup("content.package", id)});
+    GridPick pick = grid_pick(entrant_list, packages);
+    return {pick.rule, pick.line};
+}
+
+bool any_grid_rule()
+{
+    Store &st = registry::store();
+    std::map<std::string, Value> keep;
+    Lookup lookup = store_lookup(st, keep);
+    for (auto &id : in_load_order(st, "content.package"))
+        if (const Value *rec = lookup("content.package", id); rec && (*rec)["rules"]["grid"].is_object())
+            return true;
+    return false;
+}
+
+QualiTyresBox quali_tyres_for_box(const std::string &entrant_list)
+{
+    Store &st = registry::store();
+    std::map<std::string, Value> keep;
+    Lookup lookup = store_lookup(st, keep);
+    std::vector<std::pair<std::string, const Value *>> packages;
+    for (auto &id : in_load_order(st, "content.package"))
+        packages.push_back({id, lookup("content.package", id)});
+    QualiTyresPick pick = quali_tyres_pick(entrant_list, packages);
+    return {pick.mask, pick.line};
+}
+
+bool any_quali_tyres()
+{
+    Store &st = registry::store();
+    std::map<std::string, Value> keep;
+    Lookup lookup = store_lookup(st, keep);
+    for (auto &id : in_load_order(st, "content.package")) {
+        const Value *rec = lookup("content.package", id);
+        if (rec && (*rec)["entrant_list"].is_string() &&
+            quali_tyres_pick(std::string((*rec)["entrant_list"].as_string()), {{id, rec}}).mask)
+            return true;
+    }
+    return false;
 }
 
 void register_appliers()

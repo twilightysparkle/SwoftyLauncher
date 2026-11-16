@@ -372,7 +372,7 @@ fn layouts_exchange_only_where_the_names_match() {
 }
 
 #[test]
-fn the_ea_store_follows_the_ea_layout_and_stays_off() {
+fn the_ea_store_follows_the_ea_layout() {
     let r = root("ea");
     let profile = r.join("pfx/drive_c/users/steamuser/AppData/Local/F1 25/savegame/ea/profile");
     std::fs::create_dir_all(&profile).unwrap();
@@ -384,16 +384,14 @@ fn the_ea_store_follows_the_ea_layout_and_stays_off() {
     assert_eq!(to.layout, Layout::LauncherEa);
     assert_eq!(to.source, "launcher-ea.default");
     assert_eq!(to.dir, data.join("saves/default/ea/profile"));
-    assert!(!supported(Layout::Ea) && supported(Layout::Steam));
+    assert!(supported(Layout::Ea) && supported(Layout::Steam));
     let Seeded::Copied { files, .. } = seed(&data, "default", &ea, Reason::Imported, NOW).unwrap() else {
         panic!()
     };
     assert_eq!(files, 2);
     assert_eq!(names(&to.dir), ["NXDSMWW.BWW", "QKRHMYXE"]);
-    let e = import(&data, "default", &ea, Reason::Imported, closed(), NOW).unwrap_err();
-    assert!(e.to_string().contains("not available on the EA copy yet"), "{e}");
-    let e = export(&data, "default", &ea, closed(), NOW).unwrap_err();
-    assert!(e.to_string().contains("not available on the EA copy yet"), "{e}");
+    let (files, _, _) = import(&data, "default", &ea, Reason::Imported, closed(), NOW).unwrap();
+    assert_eq!(files, 2);
 }
 
 #[test]
@@ -524,4 +522,89 @@ fn the_steam_save_is_pending_until_an_import_found_it() {
         true,
     );
     assert!(!steam_save_pending(&data, "default"));
+}
+
+fn choice() -> Choice<'static> {
+    Choice {
+        build_blocked: None,
+        vanilla: false,
+        profile_uses_launcher_saves: true,
+        steam_saves_once: false,
+        layout: Layout::Steam,
+    }
+}
+
+#[test]
+fn a_profile_with_launcher_saves_on_a_steam_copy_plays_on_the_launcher_save() {
+    assert_eq!(area(choice()), Area::Launcher);
+    assert_eq!(
+        area(Choice {
+            layout: Layout::Launcher,
+            ..choice()
+        }),
+        Area::Launcher
+    );
+}
+
+#[test]
+fn each_reason_for_the_copys_own_save_is_named() {
+    let own = |c| area(c);
+    assert_eq!(
+        own(Choice {
+            vanilla: true,
+            ..choice()
+        }),
+        Area::Own(Why::Vanilla)
+    );
+    assert_eq!(
+        own(Choice {
+            profile_uses_launcher_saves: false,
+            ..choice()
+        }),
+        Area::Own(Why::LauncherSavesOff)
+    );
+    assert_eq!(
+        own(Choice {
+            steam_saves_once: true,
+            ..choice()
+        }),
+        Area::Own(Why::SteamOnce)
+    );
+    assert_eq!(
+        own(Choice {
+            layout: Layout::Ea,
+            ..choice()
+        }),
+        Area::Launcher
+    );
+    assert_eq!(
+        own(Choice {
+            build_blocked: Some("1.0.145.2472"),
+            ..choice()
+        }),
+        Area::Own(Why::UnsupportedBuild("1.0.145.2472".into()))
+    );
+}
+
+#[test]
+fn an_unsupported_build_outranks_every_other_reason() {
+    let all = Choice {
+        build_blocked: Some("1.0.145.2472"),
+        vanilla: true,
+        profile_uses_launcher_saves: false,
+        steam_saves_once: true,
+        layout: Layout::Ea,
+    };
+    assert_eq!(area(all), Area::Own(Why::UnsupportedBuild("1.0.145.2472".into())));
+}
+
+#[test]
+fn a_staged_copy_keeps_its_contents_and_leaves_no_temp_file() {
+    let r = root("stage-copy");
+    let from = r.join("from.bin");
+    std::fs::write(&from, [9u8; 4096]).unwrap();
+    let to = r.join("to.bin");
+    stage_copy(&from, &to).unwrap();
+    assert_eq!(std::fs::read(&to).unwrap(), [9u8; 4096]);
+    assert_eq!(names(&r), ["from.bin", "to.bin"]);
 }

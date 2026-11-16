@@ -7726,7 +7726,8 @@
    "used_by": [
     "native/src/core/dbread.cpp",
     "native/src/core/career.cpp",
-    "native/src/core/car_category.cpp"
+    "native/src/core/car_category.cpp",
+    "native/src/core/box_options.cpp"
    ]
   },
   {
@@ -7944,7 +7945,8 @@
     }
    ],
    "used_by": [
-    "addons/f1-1990/native/src/grid_best_of.cpp"
+    "addons/f1-1990/native/src/grid_best_of.cpp",
+    "native/src/core/box_grid.cpp"
    ]
   },
   {
@@ -7970,7 +7972,8 @@
     }
    ],
    "used_by": [
-    "addons/f1-1990/native/src/grid_best_of.cpp"
+    "addons/f1-1990/native/src/grid_best_of.cpp",
+    "native/src/core/box_grid.cpp"
    ]
   },
   {
@@ -7996,7 +7999,8 @@
     }
    ],
    "used_by": [
-    "addons/f1-1990/native/src/grid_best_of.cpp"
+    "addons/f1-1990/native/src/grid_best_of.cpp",
+    "native/src/core/box_grid.cpp"
    ]
   },
   {
@@ -74483,7 +74487,8 @@
     }
    ],
    "used_by": [
-    "native/src/core/car_category.cpp"
+    "native/src/core/car_category.cpp",
+    "native/src/core/box_options.cpp"
    ]
   },
   {
@@ -74511,7 +74516,8 @@
     }
    ],
    "used_by": [
-    "native/src/core/car_category.cpp"
+    "native/src/core/car_category.cpp",
+    "native/src/core/box_options.cpp"
    ]
   },
   {

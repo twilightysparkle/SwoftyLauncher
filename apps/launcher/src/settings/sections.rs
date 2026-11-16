@@ -3,13 +3,14 @@ use std::time::Duration;
 use crate::scale::{Hit, px};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::slider::Slider;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable, v_flex};
+use gpui_kit::component::{Disableable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use swofty_core::data_usage::{self, KEEP_FOR, KEEP_SESSIONS};
 use swofty_core::install::Source;
-use swofty_core::session::{UI_SCALE_STEPS, UiMode};
+use swofty_core::session::UiMode;
 use swofty_core::update;
 use swofty_core::updater;
 use swofty_i18n::{tr, trf};
@@ -63,6 +64,9 @@ impl Shell {
         let home_video = Switch::new("settings-home-video")
             .checked(self.home_video)
             .on_click(cx.listener(|this, on: &bool, window, cx| this.set_home_video(*on, window, cx)));
+        let use_profiles = Switch::new("settings-use-profiles")
+            .checked(self.use_profiles)
+            .on_click(cx.listener(|this, on: &bool, window, cx| this.set_use_profiles(*on, window, cx)));
         SettingsSection::new(tr("General"))
             .row(
                 SettingRow::new(tr("Language"))
@@ -73,6 +77,11 @@ impl Shell {
                 SettingRow::new(start_label)
                     .description(tr("When you press Play"))
                     .control(start),
+            )
+            .row(
+                SettingRow::new(tr("Use profiles"))
+                    .description(tr("Turned off, the launcher hides every profile and works on the one that is active now, or on your first modded profile if that is vanilla. Your other profiles are kept untouched and come back when you turn this on."))
+                    .control(use_profiles),
             )
             .row(
                 SettingRow::new(tr("Time Trial boards"))
@@ -101,21 +110,36 @@ impl Shell {
                 shell.update(cx, |s, cx| s.set_ui_mode(mode, window, cx)).ok();
             })
         };
-        let current = self.ui_scale;
-        let steps = std::iter::once((tr("Auto").to_owned(), None))
-            .chain(UI_SCALE_STEPS.into_iter().map(|s| (format!("{s}%"), Some(s))))
-            .map(|(label, step)| {
-                let shell = shell.clone();
-                Choice::new(label, current == step, move |window, cx| {
-                    shell.update(cx, |s, cx| s.set_ui_scale(step, window, cx)).ok();
-                })
-            })
-            .collect();
+        let shown = self.ui_scale_drag.or(self.ui_scale);
+        let readout = shown.map_or_else(|| tr("Auto").to_owned(), |p| format!("{p}%"));
+        let reset = Button::new("settings-ui-scale-reset")
+            .outline()
+            .tap_sm()
+            .label(tr("Reset to automatic"))
+            .disabled(self.ui_scale.is_none() && self.ui_scale_drag.is_none())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.ui_scale_drag = None;
+                this.set_ui_scale(None, window, cx)
+            }));
+        let scale = h_flex()
+            .gap(px(12.))
+            .items_center()
+            .child(div().w(px(220.)).child(Slider::new(&self.ui_scale_slider)))
+            .child(
+                div()
+                    .w(px(56.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_end()
+                    .text_color(p.text)
+                    .child(readout),
+            )
+            .child(reset);
         SettingsSection::new(tr("Interface"))
             .row(
                 SettingRow::new(tr("Interface scale"))
                     .description(tr("Makes the whole launcher larger or smaller, on top of the display mode. Auto keeps the size the display mode gives"))
-                    .control(select("settings-ui-scale", steps)),
+                    .control(scale),
             )
             .row(
                 SettingRow::new(tr("Display mode"))

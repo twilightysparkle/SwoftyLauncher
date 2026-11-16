@@ -92,7 +92,7 @@ pub struct Config {
     /// The layout the player chose on first run; `None` until they choose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_mode: Option<UiMode>,
-    /// The interface scale step in percent; `None` is Auto, the scale the display mode gives.
+    /// The interface scale in percent, 1 to 400; `None` is Auto, the scale the display mode gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_scale: Option<u16>,
     /// The code of the language the launcher shows; `None` is English.
@@ -135,6 +135,8 @@ pub struct Config {
     /// Show the latest Swofty video card on the F1 25 home screen; on unless turned off.
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub home_video: bool,
+    #[serde(default = "on", skip_serializing_if = "is_on")]
+    pub use_profiles: bool,
 }
 
 fn on() -> bool {
@@ -167,15 +169,15 @@ impl UiMode {
     }
 }
 
-/// The interface scale steps in percent a player can pick besides Auto.
-pub const UI_SCALE_STEPS: [u16; 6] = [75, 90, 100, 110, 125, 150];
+/// The smallest interface scale in percent.
+pub const UI_SCALE_MIN: u16 = 1;
 
-/// The step nearest `percent`, so a hand-edited value still lands on one the launcher offers.
-pub fn nearest_ui_scale_step(percent: u16) -> u16 {
-    UI_SCALE_STEPS
-        .into_iter()
-        .min_by_key(|step| step.abs_diff(percent))
-        .unwrap_or(100)
+/// The largest interface scale in percent.
+pub const UI_SCALE_MAX: u16 = 400;
+
+/// `percent` held to the range the launcher supports, so a hand-edited value stays usable.
+pub fn clamp_ui_scale(percent: u16) -> u16 {
+    percent.clamp(UI_SCALE_MIN, UI_SCALE_MAX)
 }
 
 /// The version of the welcome wizard. Raise it to show the wizard once more to everyone.
@@ -187,9 +189,9 @@ impl Config {
         self.onboarding.is_none_or(|seen| seen < ONBOARDING_VERSION)
     }
 
-    /// The chosen interface scale step, snapped to an offered step; `None` is Auto.
-    pub fn ui_scale_step(&self) -> Option<u16> {
-        self.ui_scale.map(nearest_ui_scale_step)
+    /// The chosen interface scale in percent, held to 1 to 400; `None` is Auto.
+    pub fn ui_scale_percent(&self) -> Option<u16> {
+        self.ui_scale.map(clamp_ui_scale)
     }
 
     /// The layout in use: what the player chose, PC until they do.
@@ -615,7 +617,7 @@ impl Ending {
 
 /// An exit code a crash leaves: an error NTSTATUS (0xC0000000 and up) other
 /// than -1, or an unhandled breakpoint.
-/// The exit code the core closes F1 25 with when it stops a Grand Prix load that would crash
+/// The exit code the core closes F1 25 with when it stops a Grand Prix or Driver Career load that would crash
 /// (native/src/core/era_logic.hpp `CONTINUE_STOP_EXIT`).
 pub const CORE_STOPPED_LOAD: i32 = 92;
 
@@ -693,8 +695,8 @@ impl SessionEnd {
                 Ending::Stopped,
                 None,
                 format!(
-                    "the core closed F1 25 at the session load (exit code {c}) instead of letting it crash: the Grand \
-                     Prix save names a grid or a track this build doesn't have, and loader.log's [era] line says which"
+                    "the core closed F1 25 at the session load (exit code {c}) instead of letting it crash: the save \
+                     names a grid, a list or a track this build doesn't have, and loader.log's [era] line says which"
                 ),
             );
         }
@@ -993,29 +995,31 @@ mod tests {
     fn ui_scale_is_auto_until_chosen_and_round_trips() {
         let config = Config::default();
         assert_eq!(config.ui_scale, None);
-        assert_eq!(config.ui_scale_step(), None);
+        assert_eq!(config.ui_scale_percent(), None);
         assert!(!serde_json::to_string(&config).unwrap().contains("ui_scale"));
-        for step in UI_SCALE_STEPS {
+        for percent in [1, 75, 90, 100, 110, 125, 150, 237, 400] {
             let config = Config {
-                ui_scale: Some(step),
+                ui_scale: Some(percent),
                 ..Config::default()
             };
             let back: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
-            assert_eq!(back.ui_scale_step(), Some(step));
+            assert_eq!(back.ui_scale_percent(), Some(percent));
         }
         let old: Config = serde_json::from_str(r#"{ "ui_mode": "tv" }"#).unwrap();
         assert_eq!(old.ui_scale, None);
     }
 
     #[test]
-    fn ui_scale_snaps_to_an_offered_step() {
-        assert_eq!(nearest_ui_scale_step(0), 75);
-        assert_eq!(nearest_ui_scale_step(60000), 150);
-        assert_eq!(nearest_ui_scale_step(100), 100);
-        assert_eq!(nearest_ui_scale_step(104), 100);
-        assert_eq!(nearest_ui_scale_step(106), 110);
-        let hand: Config = serde_json::from_str(r#"{ "ui_scale": 400 }"#).unwrap();
-        assert_eq!(hand.ui_scale_step(), Some(150));
+    fn ui_scale_is_held_to_one_through_four_hundred() {
+        assert_eq!(clamp_ui_scale(0), 1);
+        assert_eq!(clamp_ui_scale(1), 1);
+        assert_eq!(clamp_ui_scale(237), 237);
+        assert_eq!(clamp_ui_scale(400), 400);
+        assert_eq!(clamp_ui_scale(60000), 400);
+        let low: Config = serde_json::from_str(r#"{ "ui_scale": 0 }"#).unwrap();
+        assert_eq!(low.ui_scale_percent(), Some(1));
+        let high: Config = serde_json::from_str(r#"{ "ui_scale": 9000 }"#).unwrap();
+        assert_eq!(high.ui_scale_percent(), Some(400));
     }
 
     #[test]
@@ -1035,6 +1039,24 @@ mod tests {
         config.console = true;
         let json = serde_json::to_string(&config).unwrap();
         assert!(serde_json::from_str::<Config>(&json).unwrap().console);
+    }
+
+    #[test]
+    fn profiles_are_on_unless_turned_off() {
+        assert!(Config::default().use_profiles);
+        assert!(serde_json::from_str::<Config>("{}").unwrap().use_profiles);
+        let json = serde_json::to_string(&Config {
+            use_profiles: false,
+            ..Config::default()
+        })
+        .unwrap();
+        assert!(json.contains(r#""use_profiles":false"#));
+        assert!(!serde_json::from_str::<Config>(&json).unwrap().use_profiles);
+        assert!(
+            !serde_json::to_string(&Config::default())
+                .unwrap()
+                .contains("use_profiles")
+        );
     }
 
     #[test]
@@ -1422,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grand_prix_load_the_core_stopped_is_named() {
+    fn a_load_the_core_stopped_is_named() {
         let end = SessionEnd::resolve(Some(CORE_STOPPED_LOAD), "", None, Some(&seen(ATTACHED)));
         assert_eq!(end.end, Ending::Stopped);
         assert!(

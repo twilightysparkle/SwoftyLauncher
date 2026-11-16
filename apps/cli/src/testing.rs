@@ -241,7 +241,7 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "DIR",
-        help = "The machine's game lock folder (default: $SWOFTY_GAME_LOCK, else /mnt/work/.f1-game.lock.d where /mnt/work exists, else swofty-game.lock.d next to the data folder)"
+        help = "The machine's game lock folder (default: $SWOFTY_GAME_LOCK, else /mnt/work/F1/f1-game.lock.d where /mnt/work/F1 exists, else swofty-game.lock.d next to the data folder)"
     )]
     lock: Option<PathBuf>,
     #[arg(long, help = "Print report.json instead of the summary")]
@@ -785,6 +785,7 @@ impl Launcher for SwoftyRun {
             c.arg(format!("--game-arg={a}"));
         }
         c.env("SWOFTY_KEEP_FOCUS", "1")
+            .env(swofty_core::build_support::ALLOW_ENV, "1")
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)

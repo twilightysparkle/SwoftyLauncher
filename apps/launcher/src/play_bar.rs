@@ -356,6 +356,10 @@ impl Shell {
                     "{} {}",
                     match self.launch.as_ref().and_then(|l| l.stage.as_deref()) {
                         Some(stage) => stage.to_owned(),
+                        None if !self.use_profiles && self.launch_mode().is_vr() => {
+                            tr("Starting in VR…").to_owned()
+                        }
+                        None if !self.use_profiles => tr("Starting…").to_owned(),
                         None if self.launch_mode().is_vr() => trf!(
                             "Starting with profile {name} in VR…",
                             name = self.library.profile.name
@@ -445,18 +449,46 @@ impl Shell {
             PlayState::Checking => row.text_color(p.text_muted).child(tr("Checking conflicts…")),
             PlayState::Preparing => row.child(dot(p.warning)).child(tr("Checking addons…")),
             PlayState::Ready => {
+                if let Some(n) = self
+                    .install
+                    .as_ref()
+                    .and_then(|i| crate::unsupported_build::notice(&i.dir.join(swofty_core::GAME_EXE)))
+                {
+                    return row
+                        .items_start()
+                        .child(div().mt(px(6.)).child(dot(p.warning)))
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .gap(px(2.))
+                                .child(div().min_w_0().truncate().child(n.headline))
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(p.text_muted)
+                                        .truncate()
+                                        .child(n.detail),
+                                ),
+                        );
+                }
                 if rebuild {
-                    return row.text_color(p.text_muted).child(dot(p.warning)).child(
-                        div().min_w_0().truncate().child(trf!(
+                    let changes = trn(
+                        self.library.rebuild.len(),
+                        "{count} changed setting",
+                        "{count} changed settings",
+                    );
+                    let text = match self.use_profiles {
+                        true => trf!(
                             "Ready · rebuilds {profile} for {changes} on launch",
                             profile = self.library.profile.name,
-                            changes = trn(
-                                self.library.rebuild.len(),
-                                "{count} changed setting",
-                                "{count} changed settings"
-                            )
-                        )),
-                    );
+                            changes = changes
+                        ),
+                        false => trf!("Ready · rebuilds for {changes} on launch", changes = changes),
+                    };
+                    return row
+                        .text_color(p.text_muted)
+                        .child(dot(p.warning))
+                        .child(div().min_w_0().truncate().child(text));
                 }
                 if let Some(refused) = self.saves_refused() {
                     let dir = refused.dir.clone();
@@ -510,6 +542,39 @@ impl Shell {
                 row
             }
         }
+    }
+
+    fn save_area(&self, state: &PlayState, p: Palette) -> Option<AnyElement> {
+        if !matches!(
+            state,
+            PlayState::Ready | PlayState::Crashed(_) | PlayState::Preparing
+        ) {
+            return None;
+        }
+        let install = self.install.as_ref()?;
+        let blocked = swofty_core::build_support::blocked(&install.dir.join(swofty_core::GAME_EXE));
+        let line = crate::save_area::line(
+            &self.library.profile,
+            install.source,
+            blocked.as_deref(),
+            self.steam_saves_once,
+        );
+        let colour = if line.warn { p.warning } else { p.text_muted };
+        Some(
+            v_flex()
+                .id("save-area")
+                .flex_shrink_0()
+                .max_w(px(330.))
+                .min_w_0()
+                .gap(px(1.))
+                .text_size(px(12.))
+                .text_color(colour)
+                .child(div().min_w_0().truncate().child(line.headline))
+                .when_some(line.reason, |d, reason| {
+                    d.child(div().min_w_0().truncate().text_color(p.text_muted).child(reason))
+                })
+                .into_any_element(),
+        )
     }
 
     fn saves_await_import(&self) -> bool {
@@ -868,6 +933,7 @@ impl Shell {
                     .gap(px(20.))
                     .child(self.game_info(p, wide, cx))
                     .child(self.status(&state, p, cx))
+                    .children(self.save_area(&state, p))
                     .children(room)
                     .child(self.footer_links(p, cx))
                     .when(!lobby_only, |d| d.child(self.big_button(&state, p, cx))),

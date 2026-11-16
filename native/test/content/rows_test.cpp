@@ -1,5 +1,10 @@
 #include "../../src/core/apply/content/boot.hpp"
+#include "../../src/core/apply/content/race_fuel.hpp"
+#include "../../src/core/apply/content/box_options.hpp"
+#include "../../src/core/apply/content/grid_rules.hpp"
+#include "../../src/core/apply/content/quali_tyres.hpp"
 #include "../../src/core/apply/content/tyre_warmers.hpp"
+#include "../../src/core/apply/content/weekend.hpp"
 #include "../../src/core/apply/ids.hpp"
 #include "../../src/core/apply/room.hpp"
 #include "../../src/core/apply/scheduler.hpp"
@@ -325,7 +330,7 @@ static void leaderboard_tests(const std::string &regs)
     st.set_validator(&registry::schema_validator());
     const SwoftyRegistry *t = registry::table();
     for (const char *name : {"engine_sound", "vehicle.package", "vehicle", "livery", "content.package", "era.box"}) {
-        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "content.package" ? "/1.4.json" : "/1.0.json"));
+        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "content.package" ? "/1.5.json" : "/1.0.json"));
         t->declare(name, SwoftyText{schema.data(), schema.size()});
     }
     auto package = [](const char *list, const char *board) {
@@ -1823,6 +1828,280 @@ static void drs_tests(const std::string &regs)
     Value w1959b = swofty::json::parse(R"({"entrant_list":"f1_1959","rules":{"tyre_warmers":true}})");
     boxes.push_back({"mod.b/f1_1959", &w1959b});
     check(content::tyre_warmers_pick("f1_1959", boxes).warmers == true, "the last package with the box's entrant list decides");
+
+    Value k1959 = swofty::json::parse(R"({"entrant_list":"f1_1959","rules":{"race_time_limit_s":10800,"weekend_mode":"swofty_f1_short_quali"}})");
+    Value k2004 = swofty::json::parse(R"({"entrant_list":"f1_2004","rules":{"weekend_mode":"swofty_f1_one_shot"}})");
+    Value k2009 = swofty::json::parse(R"({"entrant_list":"f1_2009","rules":{"race_time_limit_s":30,"weekend_mode":"Bad Name"}})");
+    Value k2010 = swofty::json::parse(R"({"entrant_list":"f1_2010","rules":{"race_time_limit_s":"3h","weekend_mode":"swofty_f1"}})");
+    std::vector<std::pair<std::string, const Value *>> weekends = {
+        {"mod.a/f1_1959", &k1959}, {"mod.a/f1_2004", &k2004}, {"mod.a/f1_2009", &k2009}, {"mod.a/f1_2010", &k2010}};
+    auto wk = content::weekend_pick("f1_1959", weekends);
+    std::printf("      %s\n", wk.line.c_str());
+    check(wk.time_limit_s == 10800u && wk.weekend_mode == "swofty_f1_short_quali" && wk.package == "mod.a/f1_1959",
+          "a box whose package sets rules.race_time_limit_s and rules.weekend_mode runs both");
+    auto wk04 = content::weekend_pick("f1_2004", weekends);
+    check(!wk04.time_limit_s && wk04.weekend_mode == "swofty_f1_one_shot", "the weekend rule alone keeps the mode's time limit");
+    auto wk09 = content::weekend_pick("f1_2009", weekends);
+    auto wk10 = content::weekend_pick("f1_2010", weekends);
+    check(!wk09.time_limit_s && wk09.weekend_mode.empty() && !wk10.time_limit_s && wk10.weekend_mode.empty(),
+          "a limit under 60 s or not a whole number, a malformed mode name or the host itself: the mode keeps its own");
+    auto wk25 = content::weekend_pick("f1_2025", weekends);
+    check(!wk25.time_limit_s && wk25.weekend_mode.empty(), "a stock box: the mode keeps its own time limit and weekend");
+    Value k1959b = swofty::json::parse(R"({"entrant_list":"f1_1959","rules":{"race_time_limit_s":7200}})");
+    weekends.push_back({"mod.b/f1_1959", &k1959b});
+    auto wkb = content::weekend_pick("f1_1959", weekends);
+    check(wkb.time_limit_s == 7200u && wkb.weekend_mode.empty(), "the last package with the box's entrant list decides");
+
+    // The helper row is made available at boot (the game parses only available rows into its setup mode store).
+    std::map<std::string, std::string> avail = {
+        {"game_setup.game_setup_modes.game_setup_mode[_metadata_=swofty_f1_short_quali].available", "False"},
+        {"game_setup.game_setup_modes.game_setup_mode[_metadata_=swofty_f1_one_shot].available", "True"}};
+    content::Read aread = [&](const std::string &p) -> std::optional<std::string> {
+        auto it = avail.find(p);
+        return it == avail.end() ? std::nullopt : std::optional<std::string>(it->second);
+    };
+    content::Plan wp;
+    content::lower_weekend_mode("mod.a/f1_1959", k1959, "swofty_f1", aread, wp);
+    check(wp.ops.size() == 1 && wp.ops[0]["op"].as_string() == "set" && wp.ops[0]["field"].as_string() == "available" &&
+              wp.ops[0]["value"].as_string() == "True" &&
+              wp.ops[0]["select"].as_string() == "game_setup.game_setup_modes.game_setup_mode[_metadata_=swofty_f1_short_quali]",
+          "a box's weekend mode row that ships available=False is set available");
+    content::Plan wp04, wp09, wp10, wpx;
+    content::lower_weekend_mode("mod.a/f1_2004", k2004, "swofty_f1", aread, wp04);
+    content::lower_weekend_mode("mod.a/f1_2009", k2009, "swofty_f1", aread, wp09);
+    content::lower_weekend_mode("mod.a/f1_2010", k2010, "swofty_f1", aread, wp10);
+    check(wp04.ops.size() == 0 && wp09.ops.size() == 0 && wp10.ops.size() == 0,
+          "an already available row, a malformed name or the host itself: nothing written");
+    Value kx = swofty::json::parse(R"({"entrant_list":"f1_1951","rules":{"weekend_mode":"f51_wk"}})");
+    content::lower_weekend_mode("mod.a/f1_1951", kx, "swofty_f1", aread, wpx);
+    check(wpx.ops.size() == 0 && wpx.lines.size() == 1 && wpx.lines[0].find("f51_wk") != std::string::npos,
+          "a missing row writes nothing (the package still applies) and says so");
+
+    Value s1959 = swofty::json::parse(
+        R"({"entrant_list":"f1_1959","rules":{"safety_car":"off","formation_lap":false,"penalties":"corner_cutting_only","corner_cutting":"regular"}})");
+    Value s1993 = swofty::json::parse(R"({"entrant_list":"f1_1993","rules":{"safety_car":"standard","formation_lap":true,"penalties":"on"}})");
+    Value s2000 = swofty::json::parse(R"({"entrant_list":"f1_2000","rules":{"safety_car":null,"formation_lap":null}})");
+    Value s2001 = swofty::json::parse(
+        R"({"entrant_list":"f1_2001","rules":{"safety_car":"none","formation_lap":"off","penalties":"reduced","corner_cutting":"lax"}})");
+    std::vector<std::pair<std::string, const Value *>> sc = {
+        {"mod.a/f1_1959", &s1959}, {"mod.a/f1_1993", &s1993}, {"mod.a/f1_2000", &s2000}, {"mod.a/f1_2001", &s2001}};
+    const size_t SC = size_t(content::box_option_index("safety_car")), FL = size_t(content::box_option_index("formation_lap")),
+                 PE = size_t(content::box_option_index("penalties")), CC = size_t(content::box_option_index("corner_cutting"));
+    check(content::box_option_index("refuelling") == -1 && SC != FL && PE != CC, "the four option rules have their own slots");
+    auto sc59 = content::box_options_pick("f1_1959", sc);
+    std::printf("      %s\n", sc59.line.c_str());
+    check(sc59.settings[SC] == std::optional<std::string>("off") && sc59.package == "mod.a/f1_1959" &&
+              content::box_options_pick("f1_1993", sc).settings[SC] == std::optional<std::string>("standard"),
+          "a box whose package sets rules.safety_car runs that setting");
+    check(sc59.settings[FL] == std::optional<std::string>("off") &&
+              content::box_options_pick("f1_1993", sc).settings[FL] == std::optional<std::string>("on"),
+          "rules.formation_lap false / true picks the option's off / on");
+    check(sc59.settings[PE] == std::optional<std::string>("corner_cutting_only") && sc59.settings[CC] == std::optional<std::string>("regular") &&
+              content::box_options_pick("f1_1993", sc).settings[PE] == std::optional<std::string>("on") &&
+              !content::box_options_pick("f1_1993", sc).settings[CC],
+          "rules.penalties and rules.corner_cutting pick their settings; a missing rule picks none");
+    auto sc01 = content::box_options_pick("f1_2001", sc);
+    check(!content::box_options_pick("f1_2000", sc).settings[SC] && !content::box_options_pick("f1_2000", sc).settings[FL] &&
+              !sc01.settings[SC] && !sc01.settings[FL] && !sc01.settings[PE] && !sc01.settings[CC] &&
+              !content::box_options_pick("f1_2025", sc).settings[SC],
+          "null, an unknown setting, a wrong type or a stock box: the player's settings stay");
+    std::vector<std::string> names = {"safety_car_standard", "Off", "reduced", "increased"};
+    check(content::box_option_value(names, "safety_car", "off") == 1 && content::box_option_value(names, "safety_car", "standard") == 0 &&
+              content::box_option_value({"low", "normal", "high", "none"}, "safety_car", "off") == 3 &&
+              content::box_option_value({"low", "normal"}, "safety_car", "off") == -1,
+          "a setting matches a value named after it, one ending in _<name>, or a known alias; none: -1");
+    // the stock value lists (options_system.options.game, gamedatabases.2025.bin)
+    check(content::box_option_value({"off", "reduced", "standard", "increased"}, "safety_car", "increased") == 3 &&
+              content::box_option_value({"off", "on"}, "formation_lap", "off") == 0 &&
+              content::box_option_value({"off", "on"}, "formation_lap", "on") == 1 &&
+              content::box_option_value({"off", "corner_cutting_only", "eSports", "on"}, "penalties", "esports") == 2 &&
+              content::box_option_value({"off", "corner_cutting_only", "eSports", "on"}, "penalties", "corner_cutting_only") == 1 &&
+              content::box_option_value({"off", "corner_cutting_only", "eSports", "on"}, "penalties", "on") == 3 &&
+              content::box_option_value({"regular", "strict"}, "corner_cutting", "strict") == 1,
+          "every setting finds its value in the stock option's value list");
+    check(std::string(content::BOX_OPTION_RULES[SC].options[0]) == "safety_car_frequency" &&
+              std::string(content::BOX_OPTION_RULES[FL].options[0]) == "formation_lap" &&
+              std::string(content::BOX_OPTION_RULES[PE].options[0]) == "rules_and_penalties_mode" &&
+              std::string(content::BOX_OPTION_RULES[CC].options[0]) == "corner_cutting_mode",
+          "each rule tries the stock database's option name first");
+    std::vector<int> opt = {2};
+    auto get = [&](const void *) { return opt[0]; };
+    auto set = [&](const void *, int i) { opt[0] = i; };
+    content::OptionForce f;
+    int o1 = 0, o2 = 0;
+    check(f.force(&o1, 0, get, set) && opt[0] == 0 && f.prior == 2, "a press sets the box's index and keeps the player's");
+    check(f.force(&o1, 0, get, set) && f.prior == 2, "a second press of the same box keeps the player's index");
+    check(f.put_back(&o1, get, set) == 1 && opt[0] == 2 && !f.active(), "another box gives the player's index back");
+    f.force(&o1, 0, get, set);
+    opt[0] = 3;   // the player picks another setting after the press
+    check(f.put_back(&o1, get, set) == 0 && opt[0] == 3, "a setting the player picks after the press stays");
+    f.force(&o1, 0, get, set);
+    check(f.put_back(&o2, get, set) == 0 && opt[0] == 0 && !f.active(), "a changed option object is left as it is");
+
+    Value g1990 = swofty::json::parse(R"({"entrant_list":"f1_1990","rules":{"grid":{"qualifying":"best_of","rows":null}}})");
+    Value g2000 = swofty::json::parse(R"({"entrant_list":"f1_2000","rules":{"grid":{"rule_107":true}}})");
+    Value g2005 = swofty::json::parse(R"({"entrant_list":"f1_2005","rules":{"grid":{"qualifying":"aggregate"}}})");
+    Value g1955 = swofty::json::parse(R"({"entrant_list":"f1_1955","rules":{"grid":{"qualifying":"best_of","rows":[3,2]}}})");
+    Value g2008 = swofty::json::parse(R"({"entrant_list":"f1_2008","rules":{"grid":null}})");
+    std::vector<std::pair<std::string, const Value *>> grids = {
+        {"mod.a/f1_1990", &g1990}, {"mod.a/f1_2000", &g2000}, {"mod.a/f1_2005", &g2005}, {"mod.a/f1_1955", &g1955}, {"mod.a/f1_2008", &g2008}};
+    auto gp = content::grid_pick("f1_1955", grids);
+    std::printf("      %s\n", gp.line.c_str());
+    check(gp.rule && gp.rule->qualifying == runtime::box_grid::Scoring::best_of && gp.rule->rows == std::vector<int>({3, 2}) &&
+              !gp.rule->rule_107,
+          "rules.grid best_of with a 3-2 row pattern");
+    auto g00 = content::grid_pick("f1_2000", grids);
+    check(g00.rule && g00.rule->qualifying == runtime::box_grid::Scoring::best_lap && g00.rule->rule_107 && g00.rule->reranks(),
+          "rule_107 alone keeps best_lap scoring and re-ranks");
+    check(content::grid_pick("f1_2005", grids).rule->qualifying == runtime::box_grid::Scoring::aggregate &&
+              content::grid_pick("f1_1990", grids).rule->rows.empty(),
+          "aggregate scoring; rows null is the track's own grid");
+    check(!content::grid_pick("f1_2008", grids).rule && !content::grid_pick("f1_2025", grids).rule,
+          "grid null or a stock box: the game's own grid");
+
+    Value q1985 = swofty::json::parse(R"({"entrant_list":"f1_1985","rules":{"qualifying_tyres":["softer"]}})");
+    Value q1990 = swofty::json::parse(R"({"entrant_list":"f1_1990","rules":{"qualifying_tyres":["medium","softer","softer","wet"]}})");
+    Value q1991 = swofty::json::parse(R"({"entrant_list":"f1_1991","rules":{"qualifying_tyres":null}})");
+    Value q1992 = swofty::json::parse(R"({"entrant_list":"f1_1992","rules":{"qualifying_tyres":"softer"}})");
+    std::vector<std::pair<std::string, const Value *>> qboxes = {
+        {"mod.a/f1_1985", &q1985}, {"mod.a/f1_1990", &q1990}, {"mod.a/f1_1991", &q1991}, {"mod.a/f1_1992", &q1992}};
+    auto q = content::quali_tyres_pick("f1_1985", qboxes);
+    std::printf("      %s\n", q.line.c_str());
+    check(q.mask == 1 && q.package == "mod.a/f1_1985", "rules.qualifying_tyres [softer] masks class option 0");
+    check(content::quali_tyres_pick("f1_1990", qboxes).mask == 3, "names map to options 0..2, duplicates and wet are left out");
+    check(!content::quali_tyres_pick("f1_1991", qboxes).mask && !content::quali_tyres_pick("f1_1992", qboxes).mask &&
+              !content::quali_tyres_pick("f1_2025", qboxes).mask,
+          "null, a non-array or a stock box: no qualifying tyre rule");
+    Value q1985b = swofty::json::parse(R"({"entrant_list":"f1_1985","rules":{}})");
+    qboxes.push_back({"mod.b/f1_1985", &q1985b});
+    check(!content::quali_tyres_pick("f1_1985", qboxes).mask, "the last package with the box's entrant list decides (qualifying tyres)");
+    check(content::quali_refused(15, 0, 1) && content::quali_refused(16, 0, 1) && content::quali_refused(17, 0, 1),
+          "a masked option is refused in Race, Race2 and Race3");
+    check(!content::quali_refused(5, 0, 1) && !content::quali_refused(9, 0, 1) && !content::quali_refused(1, 0, 1) &&
+              !content::quali_refused(12, 0, 1) && !content::quali_refused(18, 0, 1),
+          "a masked option stays usable in practice, qualifying and the sprint shootout");
+    check(!content::quali_refused(15, 1, 1) && !content::quali_refused(15, 3, 7) && !content::quali_refused(15, 4, 0xff) &&
+              !content::quali_refused(15, 0, 0) && !content::quali_refused(15, 0xffffffffu, 0xff),
+          "other options, inter / wet, no mask and an unknown option are never refused");
+    uint32_t pref[5] = {0, 1, 2, 3, 4}, out[5] = {};
+    check(content::quali_filter_preference(15, 1, pref, out) == 1 && out[0] == content::QUALI_NO_SLOT && out[1] == 1 &&
+              out[2] == 2 && out[3] == 3 && out[4] == 4,
+          "in a race the set choice skips the qualifying option and keeps the order of the rest");
+    uint32_t pref2[5] = {2, 0, 1, 3, 4};
+    check(content::quali_filter_preference(5, 1, pref2, out) == 0 && !memcmp(out, pref2, sizeof out),
+          "in qualifying the preference list is unchanged");
+}
+
+static void race_fuel_tests()
+{
+    using content::FuelCar;
+    using content::FuelPlan;
+    using content::FuelRules;
+    Value p2008 = swofty::json::parse(R"({"entrant_list":"f1_2008","rules":{"refuelling":true,"race_fuel_kg":90,"refuel_stint_kg":60,"quali_fuel_kg":45,"race_start_fuel_from_quali":true}})");
+    Value p1994 = swofty::json::parse(R"({"entrant_list":"f1_1994","rules":{"refuelling":true,"race_fuel_kg":80}})");
+    Value p2017 = swofty::json::parse(R"({"entrant_list":"f1_2017","rules":{"refuelling":false,"race_fuel_kg":105}})");
+    Value pbad = swofty::json::parse(R"({"entrant_list":"f1_bad","rules":{"refuelling":"yes","quali_fuel_kg":-3,"race_start_fuel_from_quali":1}})");
+    std::vector<std::pair<std::string, const Value *>> boxes = {
+        {"mod.a/f1_2008", &p2008}, {"mod.a/f1_1994", &p1994}, {"mod.a/f1_2017", &p2017}, {"mod.a/f1_bad", &pbad}};
+    FuelRules r08 = content::fuel_rules_pick("f1_2008", boxes);
+    std::printf("      %s\n", r08.line.c_str());
+    check(r08.refuelling && r08.race_fuel_kg == 90.f && r08.refuel_stint_kg == 60.f && r08.quali_fuel_kg == 45.f && r08.start_from_quali,
+          "a box's content.package gives its refuelling, race, stint and qualifying fuel and parc ferme rule");
+    FuelRules r94 = content::fuel_rules_pick("f1_1994", boxes);
+    std::printf("      %s\n", r94.line.c_str());
+    check(r94.any() && !r94.start_from_quali && !r94.quali_fuel_kg, "refuelling without the 1.5 fields");
+    check(!content::fuel_rules_pick("f1_2017", boxes).any() && !content::fuel_rules_pick("f1_bad", boxes).any() &&
+              !content::fuel_rules_pick("f1_2025", boxes).any(),
+          "refuelling off, malformed values or a stock box: no fuel rule (the game's own fuel)");
+
+    auto car = [](float fuel, int lap, uint8_t stops) {
+        FuelCar c;
+        c.present = true;
+        c.pit_stops_ok = true;
+        c.pit_stops = stops;
+        c.lap = lap;
+        c.fuel = fuel;
+        c.capacity = 110;
+        return c;
+    };
+    // 1994: race start fuel, then a refill at each counted stop.
+    FuelPlan plan;
+    FuelCar cars[2] = {car(30, 1, 0), car(120, 1, 0)};
+    cars[1].capacity = 70;
+    auto w = plan.tick(r94, 15, 1, cars, 2);
+    check(w.size() == 2 && w[0].car == 0 && w[0].kg == 80.f && w[1].kg == 70.f, "race start: race_fuel_kg, capped at the tank");
+    cars[0] = car(80, 1, 0);
+    check(plan.tick(r94, 15, 1, cars, 1).empty(), "the start fuel held: nothing written again");
+    cars[0] = car(100, 1, 0);
+    w = plan.tick(r94, 15, 1, cars, 1);
+    check(w.size() == 1 && w[0].kg == 80.f, "the start sequence loaded its own fuel: the start fuel is written again");
+    cars[0] = car(79, 1, 0);
+    check(plan.tick(r94, 15, 1, cars, 1).empty(), "the car burns: the start fuel is done");
+    cars[0] = car(100, 1, 0);
+    check(plan.tick(r94, 15, 1, cars, 1).empty(), "after the start, a higher fuel is left alone");
+    cars[0] = car(12, 20, 1);
+    w = plan.tick(r94, 15, 1, cars, 1);
+    check(w.size() == 1 && w[0].kg == 80.f && std::string(w[0].why) == "pit stop refuel", "a counted pit stop refuels to the stint (race_fuel_kg)");
+    check(plan.tick(r94, 15, 1, cars, 1).empty(), "one refuel per stop");
+    plan.failed(0);
+    w = plan.tick(r94, 15, 1, cars, 1);
+    check(w.size() == 1 && w[0].kg == 80.f, "a refuel the core could not write is tried again");
+    cars[0] = car(95, 30, 2);
+    check(plan.tick(r94, 15, 1, cars, 1).empty(), "a stop never drains a car that holds more than the stint");
+    cars[0] = car(5, 1, 0);
+    cars[0].pit_stops_ok = false;
+    w = plan.tick(r94, 15, 2, cars, 1);
+    check(w.size() == 1 && w[0].kg == 80.f, "a restarted race (new generation) writes the start fuel again");
+    check(plan.tick(r94, 1, 3, cars, 1).empty(), "practice: nothing");
+
+    // 2008: qualifying fuel, parc ferme race start, stint refuels.
+    FuelPlan pf;
+    FuelCar q[2] = {car(100, 0, 0), car(100, 0, 0)};
+    w = pf.tick(r08, 8, 1, q, 2);
+    check(w.size() == 2 && w[0].kg == 45.f && w[1].kg == 45.f, "qualifying starts on quali_fuel_kg");
+    q[0] = car(45, 0, 0);
+    q[1] = car(45, 0, 0);
+    pf.tick(r08, 8, 1, q, 2);
+    q[0] = car(31.5f, 3, 0);
+    q[1].present = false;
+    pf.tick(r08, 8, 1, q, 2);
+    float left = 0;
+    check(pf.quali_known(0, left) && left == 31.5f, "the fuel left at the end of qualifying is kept per car");
+    FuelCar race[3] = {car(100, 1, 0), car(100, 1, 0), car(100, 1, 0)};
+    w = pf.tick(r08, 15, 2, race, 3);
+    check(w.size() == 3 && w[0].kg == 31.5f && w[1].kg == 45.f && w[2].kg == 45.f,
+          "parc ferme: the race starts on the fuel left after qualifying, quali_fuel_kg for a car without it");
+    std::printf("      car 0: %s; car 2: %s\n", w[0].why, w[2].why);
+    race[0] = car(10, 25, 1);
+    w = pf.tick(r08, 15, 2, race, 1);
+    check(w.size() == 1 && w[0].kg == 60.f, "a stop refuels to refuel_stint_kg");
+    pf.reset();
+    check(!pf.quali_known(0, left), "a box change forgets the qualifying fuel");
+
+    FuelRules none;
+    check(FuelPlan{}.tick(none, 15, 1, race, 3).empty(), "no rule: nothing written");
+
+    // 2005: one tyre set for qualifying and race (race_tyre_change false).
+    Value p2005 = swofty::json::parse(R"({"entrant_list":"f1_2005","rules":{"refuelling":true,"race_fuel_kg":75,"race_tyre_change":false}})");
+    Value pbadt = swofty::json::parse(R"({"entrant_list":"f1_badt","rules":{"race_tyre_change":"no"}})");
+    std::vector<std::pair<std::string, const Value *>> tb = {{"mod.a/f1_2005", &p2005}, {"mod.a/f1_badt", &pbadt}, {"mod.a/f1_1994", &p1994}};
+    FuelRules r05 = content::fuel_rules_pick("f1_2005", tb);
+    std::printf("      %s\n", r05.line.c_str());
+    check(r05.tyres_kept() && r05.any(), "race_tyre_change false: the box keeps its tyres at race stops (and refuels)");
+    check(!content::fuel_rules_pick("f1_badt", tb).tyres_kept() && !content::fuel_rules_pick("f1_1994", tb).tyres_kept(),
+          "race_tyre_change missing or malformed: the game's tyre change");
+    Value ponly = swofty::json::parse(R"({"entrant_list":"f1_t","rules":{"race_tyre_change":false}})");
+    std::vector<std::pair<std::string, const Value *>> to = {{"mod.a/f1_t", &ponly}};
+    FuelRules rt = content::fuel_rules_pick("f1_t", to);
+    check(rt.tyres_kept() && !rt.any() && rt.line.find("keep the tyres") != std::string::npos,
+          "a tyre rule alone is logged and handed over without a fuel rule");
+    using content::TyreChange;
+    check(content::race_tyre_change_pick(true, 15, true, 0) == TyreChange::kept, "race stop, no damage flag: tyres kept");
+    check(content::race_tyre_change_pick(true, 16, true, 0x4) == TyreChange::damage, "race stop with a damage flag: the game's change");
+    check(content::race_tyre_change_pick(true, 15, false, 0) == TyreChange::game, "the garage actor's call (flag 0): the game's");
+    check(content::race_tyre_change_pick(true, 8, true, 0) == TyreChange::game, "qualifying: the game's change");
+    check(content::race_tyre_change_pick(false, 15, true, 0) == TyreChange::game, "no rule: the game's change");
+    check(content::race_tyre_change_pick(true, 15, true, 0x20) == TyreChange::kept, "flags outside the damage mask: kept");
 }
 
 static void stock_career_rows(Db &db)
@@ -2269,7 +2548,7 @@ static void virtual_list_tests(const std::string &regs)
     st.set_validator(&registry::schema_validator());
     const SwoftyRegistry *t = registry::table();
     for (const char *name : {"engine_sound", "vehicle.package", "vehicle", "livery", "content.package", "era.box"}) {
-        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "content.package" ? "/1.4.json" : "/1.0.json"));
+        std::string schema = slurp(regs + "/" + name + (std::string_view(name) == "content.package" ? "/1.5.json" : "/1.0.json"));
         t->declare(name, SwoftyText{schema.data(), schema.size()});
     }
     auto package = [](const char *list, bool virt) {
@@ -2343,6 +2622,7 @@ int main(int argc, char **argv)
         twelve_slot_tests(argv[1]);
     if (argc > 1)
         drs_tests(argv[1]);
+    race_fuel_tests();
     if (argc > 1)
         career_registry_tests(argv[1]);
     if (argc > 1)

@@ -125,6 +125,10 @@ void gp_continue_commit();
 void estimate_laptime_commit();
 std::vector<CoreMixins> red_flag_recompute_mixins();
 void red_flag_recompute_commit();
+std::vector<CoreMixins> box_grid_mixins();
+void box_grid_commit();
+std::vector<CoreMixins> quali_tyres_mixins();
+void quali_tyres_commit();
 std::vector<CoreMixins> track_list_guard_mixins();
 void track_list_guard_commit();
 std::vector<CoreMixins> garage_setup_mixins();
@@ -223,12 +227,17 @@ struct Group {
     uintptr_t addr;
     size_t span;
     std::vector<Handler> handlers;
+    void *tramp = nullptr;
+    size_t site = SIZE_MAX;
 };
 
 struct Held {
     uint32_t kind;
     uintptr_t addr;
     size_t span;
+    std::vector<Handler> handlers;
+    void *tramp;
+    size_t site;
 };
 
 struct Mark {
@@ -236,6 +245,7 @@ struct Mark {
 };
 
 constexpr size_t MAX_SITES = 256;
+constexpr size_t SITE_CHAIN_ROOM = 32;
 
 SwoftyApi *api;
 uintptr_t base;
@@ -1486,6 +1496,30 @@ bool core_only(const Group &g)
     return true;
 }
 
+bool has_overwrite(const std::vector<Handler> &hs)
+{
+    for (auto &h : hs)
+        if (h.m->kind & SWOFTY_MIXIN_OVERWRITE)
+            return true;
+    return false;
+}
+
+bool chains_onto(const Group &g, const Held &h)
+{
+    if (!((g.kind == SWOFTY_MIXIN_WRAP || g.kind == SWOFTY_MIXIN_SITE) && g.kind == h.kind && g.addr == h.addr &&
+          !has_overwrite(g.handlers) && !has_overwrite(h.handlers)))
+        return false;
+    return g.kind != SWOFTY_MIXIN_SITE || (h.site < MAX_SITES && h.handlers.size() + g.handlers.size() <= site_chains[h.site].capacity());
+}
+
+Held *held_for(const Group &g)
+{
+    for (auto &h : held)
+        if (chains_onto(g, h))
+            return &h;
+    return nullptr;
+}
+
 bool drop_conflicts(const std::vector<Group> &groups, bool warn)
 {
     std::vector<size_t> bad;
@@ -1521,6 +1555,8 @@ bool drop_conflicts(const std::vector<Group> &groups, bool warn)
         for (auto &h : held) {
             bool data = g.kind == SWOFTY_MIXIN_VTABLE, hdata = h.kind == SWOFTY_MIXIN_VTABLE;
             if (data != hdata || g.addr >= h.addr + h.span || h.addr >= g.addr + g.span)
+                continue;
+            if (chains_onto(g, h))
                 continue;
             api->log("[core] conflict: %s %s at 0x%llx overlaps a %s installed at the early stage: %s", kind_name(g.kind),
                      target.c_str(), (unsigned long long)g.addr, kind_name(h.kind), owners(g).c_str());
@@ -1725,7 +1761,7 @@ const char *failed(std::string why, const Group &g, bool allocation)
     return install_error.c_str();
 }
 
-const char *install(const Group &g)
+const char *install(Group &g)
 {
     void *first = g.handlers[0].m->handler;
     if (packed && g.kind != SWOFTY_MIXIN_VTABLE && page_encrypted(g.addr))
@@ -1735,7 +1771,8 @@ const char *install(const Group &g)
         auto h = safetyhook::InlineHook::create(reinterpret_cast<void *>(g.addr), first, safetyhook::InlineHook::StartDisabled);
         if (!h)
             return failed(runtime::hook_error(h.error()), g, h.error().type == safetyhook::InlineHook::Error::BAD_ALLOCATION);
-        chain(g, h->original<void *>());
+        g.tramp = h->original<void *>();
+        chain(g, g.tramp);
         if (auto on = h->enable(); !on)
             return failed("enabling it failed: " + runtime::hook_error(on.error()), g, false);
         inline_hooks.push_back(std::move(*h));
@@ -1746,6 +1783,8 @@ const char *install(const Group &g)
         if (sites_used == MAX_SITES)
             return "too many sites";
         size_t s = sites_used++;
+        g.site = s;
+        site_chains[s].reserve(SITE_CHAIN_ROOM);
         for (auto &h : g.handlers)
             site_chains[s].push_back({reinterpret_cast<void (*)(SwoftyContext *)>(h.m->handler),
                                       perf::probe(perf::owner_of(h.m->handler), "site " + h.m->target)});
@@ -1787,9 +1826,11 @@ const char *install(const Group &g)
     return "unknown kind";
 }
 
-bool install_all(const std::vector<Group> &groups)
+bool install_all(std::vector<Group> &groups)
 {
     for (auto &g : groups) {
+        if (held_for(g))
+            continue;
         const char *err = install(g);
         auto &target = g.handlers[0].m->target;
         if (err) {
@@ -1824,7 +1865,7 @@ size_t offer_core_sets()
                        runtime::save_splice_mixins, runtime::ers_newlap_mixins, runtime::ers_mode_mixins, runtime::car_levers_mixins,
                        runtime::garage_crew_mixins, runtime::pit_slots_mixins, runtime::pit_box_mixins, runtime::garage_slots_mixins, runtime::chassis_registry_mixins, runtime::standings_guard_mixins, runtime::ai_corner_guard_mixins, runtime::replay_grid_guard_mixins, runtime::fe_tile_guard_mixins, runtime::myteam_vehicle_guard_mixins, runtime::myteam_vehicle_heal_mixins, runtime::myteam_vehicle_keep_mixins, runtime::tyre_slots_mixins, runtime::tyre_models_mixins, runtime::track_acclim_mixins,
                        runtime::audio_queue_mixins, runtime::heap_sizes_mixins, runtime::team_slots_mixins, runtime::track_select_mixins, runtime::netplay_icons_mixins, runtime::netplay_keys_mixins, runtime::netplay_privilege_mixins,
-                       runtime::leaderboard_guard_mixins, runtime::lap_rec_mixins, runtime::thrustmaster_lcd_mixins, runtime::estimate_laptime_mixins, runtime::red_flag_recompute_mixins, runtime::gp_continue_mixins, runtime::track_list_guard_mixins, runtime::watchdog_grace_mixins, runtime::garage_setup_mixins, runtime::theatre_list_mixins, runtime::tile_list_select_mixins, runtime::session_enter_mixins, runtime::ai_line_set_mixins})
+                       runtime::leaderboard_guard_mixins, runtime::lap_rec_mixins, runtime::thrustmaster_lcd_mixins, runtime::estimate_laptime_mixins, runtime::red_flag_recompute_mixins, runtime::quali_tyres_mixins, runtime::box_grid_mixins, runtime::gp_continue_mixins, runtime::track_list_guard_mixins, runtime::watchdog_grace_mixins, runtime::garage_setup_mixins, runtime::theatre_list_mixins, runtime::tile_list_select_mixins, runtime::session_enter_mixins, runtime::ai_line_set_mixins})
         add_core_sets(sets());
     return addons.size() - before;
 }
@@ -1872,6 +1913,8 @@ void settle_core_sets()
     runtime::thrustmaster_lcd_commit();
     runtime::estimate_laptime_commit();
     runtime::red_flag_recompute_commit();
+    runtime::box_grid_commit();
+    runtime::quali_tyres_commit();
     runtime::gp_continue_commit();
     runtime::track_list_guard_commit();
     runtime::garage_setup_commit();
@@ -1879,6 +1922,30 @@ void settle_core_sets()
     runtime::tile_list_select_commit();
     runtime::session_enter_commit();
     runtime::ai_line_set_commit();
+}
+
+void extend_held(Held &h, const Group &g)
+{
+    auto rest = std::vector<Handler>(h.handlers.begin() + 1, h.handlers.end());
+    rest.insert(rest.end(), g.handlers.begin(), g.handlers.end());
+    std::stable_sort(rest.begin(), rest.end(), [](const Handler &a, const Handler &b) { return a.m->priority > b.m->priority; });
+    size_t old = h.handlers.size();
+    h.handlers.resize(1);
+    h.handlers.insert(h.handlers.end(), rest.begin(), rest.end());
+    if (h.kind == SWOFTY_MIXIN_WRAP) {
+        Group all{h.kind, h.addr, h.span, h.handlers};
+        for (size_t i = all.handlers.size(); i-- > 0;)
+            if (all.handlers[i].m->orig)
+                *all.handlers[i].m->orig = i + 1 < all.handlers.size() ? all.handlers[i + 1].m->handler : h.tramp;
+    } else {
+        for (auto &x : g.handlers)
+            site_chains[h.site].push_back({reinterpret_cast<void (*)(SwoftyContext *)>(x.m->handler),
+                                           perf::probe(perf::owner_of(x.m->handler), "site " + x.m->target)});
+    }
+    Group all{h.kind, h.addr, h.span, h.handlers};
+    api->log("[core] %s %s at 0x%llx (base+0x%llx) chained onto the one installed earlier (%zu handler(s) before): %s",
+             kind_name(h.kind), g.handlers[0].m->target.c_str(), (unsigned long long)h.addr, rva(h.addr), old,
+             owners(all).c_str());
 }
 
 void install_groups(size_t from, bool late, size_t *count)
@@ -1890,7 +1957,10 @@ void install_groups(size_t from, bool late, size_t *count)
     drop_conflicts(groups, true);
     for (auto &g : groups) {
         count[SWOFTY_MIXIN_KIND(g.kind)]++;
-        held.push_back({g.kind, g.addr, g.span});
+        if (Held *h = held_for(g))
+            extend_held(*h, g);
+        else
+            held.push_back({g.kind, g.addr, g.span, g.handlers, g.tramp, g.site});
     }
     mark = {written.size(), stubs.size(), mid_hooks.size(), inline_hooks.size(), sites_used};
 }
