@@ -1061,7 +1061,7 @@
   "Update available: {versions}": "Atualização disponível: {versions}",
   "Update failed": "Falha na atualização",
   "Update failed: {e}": "Falha na atualização: {e}",
-  "Update required: {changes}. The launcher restarts afterwards.": "Atualização obrigatória: {changes}. O launcher reinicia em seguida.",
+  "Update available: {changes}. The launcher restarts afterwards.": "Atualização disponível: {changes}. O launcher reinicia em seguida.",
   "Updated 1 of 1 addon": "1 de 1 complemento atualizado",
   "Updated Project Halo 0.1.2": "Project Halo 0.1.2 atualizado",
   "Updated {done} of {count} addon": ["{done} de {count} complemento atualizado", "{done} de {count} complementos atualizados", "{done} de {count} complementos atualizados"],
