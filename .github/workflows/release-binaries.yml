@@ -45,11 +45,13 @@ jobs:
       # Only the two binaries the release ships, not the installer or the addon template.
       # The log server "Send Logs to Developers" uploads to; without it the button is disabled.
       # The usage address is where anonymised usage reports go; builds without it send none.
+      # The ads address serves the launcher's ad slots; builds without it show none.
       - name: Build
         run: cargo build --release -p swofty-cli -p swofty-launcher
         env:
           SWOFTY_LOGS_URL: https://api.f1.swofty.net/v1/logs
           SWOFTY_USAGE_URL: https://api.f1.swofty.net
+          SWOFTY_ADS_URL: https://ads.swofty.net
 
       - uses: actions/setup-python@v7
         with:
