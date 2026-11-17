@@ -3415,6 +3415,7 @@ const _: () = assert!(core::mem::offset_of!(Weekend, current_session) == 0x238);
 const _: () = assert!(core::mem::offset_of!(Weekend, progress_state) == 0x23c);
 const _: () = assert!(core::mem::offset_of!(Weekend, track_stat_id) == 0x278);
 const _: () = assert!(core::mem::size_of::<Weekend>() == 0x4f0);
+pub type Ai_Handle_PitStateChanged_Thunk_t = unsafe extern "C" fn(ai: *mut c_void, msg: *mut c_void) -> u64;
 
 pub type Car_Create_DetachablePart_t = unsafe extern "C" fn(
     part_manager: *mut c_void,
@@ -4124,6 +4125,8 @@ pub type Game_SceneManagerSpawn_SpawnScene_t = unsafe extern "C" fn(
     ov_b: *mut c_void,
     p7: u64,
 ) -> *mut c_void;
+pub type Game_Scene_UpdateInstanceTransformsBatch_t =
+    unsafe extern "C" fn(scene: *mut c_void, actor_update_flag: u8);
 pub type Game_SeasonLength_ApplyPreset_t = unsafe extern "C" fn(component: *mut c_void, preset: u8);
 pub type Game_SeasonLength_PushCalendarEntry_t =
     unsafe extern "C" fn(calendar: *mut c_void, entry: *const c_void) -> u64;
@@ -4533,6 +4536,7 @@ pub type Vm_WizardTitleSlice_DestroyRange_t = unsafe extern "C" fn(begin: *mut c
 
 pub mod bindings {
     use super::{Binding, Status};
+    pub const Ai_Handle_PitStateChanged_Thunk: Binding = Binding { id: "Ai_Handle_PitStateChanged_Thunk", kind: "func", status: Status::Experimental };
     pub const Ai_BehaviourTestRetire_Update: Binding = Binding {
         id: "Ai_BehaviourTestRetire_Update",
         kind: "func",
@@ -11550,6 +11554,11 @@ pub mod bindings {
     };
     pub const Game_SceneManager_DestroyScene: Binding = Binding {
         id: "Game_SceneManager_DestroyScene",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Game_Scene_UpdateInstanceTransformsBatch: Binding = Binding {
+        id: "Game_Scene_UpdateInstanceTransformsBatch",
         kind: "func",
         status: Status::Experimental,
     };

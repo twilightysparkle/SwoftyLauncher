@@ -78,7 +78,7 @@ t "AI team curves guard unit test" native/test/run_ai_curves_test.sh
 t "Teammate pairs guard unit test" native/test/run_teammate_pairs_test.sh
 t "R&D supplier budget unit test" native/test/run_rnd_suppliers_test.sh
 t "Setup screen car guard unit test" native/test/run_setup_vm_test.sh
-t "AI corner start guard unit test" native/test/run_ai_corner_test.sh
+t "AI brake line guard unit test" native/test/run_ai_corner_test.sh
 t "Replay recorder grid guard unit test" native/test/run_replay_grid_test.sh
 t "placed record bound unit test" native/test/run_placed_record_test.sh
 t "Tyre slot guard unit test" native/test/run_tyre_slots_test.sh
@@ -98,6 +98,7 @@ t "Theatre list guard unit test" native/test/run_theatre_list_test.sh
 t "Tile list select guard unit test" native/test/run_tile_list_select_test.sh
 t "Core site names exported (host-only)" native/test/run_core_sites_exported_test.sh
 t "Garage crew guard unit test" native/test/run_garage_crew_test.sh
+t "Garage placement and crew poses" "bash native/test/run_garage_placement_test.sh"
 t "Garage crew guard sites export test" native/test/run_garage_crew_sites_test.sh
 t "Leaderboard guard unit test" native/test/run_leaderboard_guard_test.sh
 t "Grand Prix continue guard unit test" native/test/run_gp_continue_test.sh
