@@ -11,6 +11,7 @@
 #include "blackbox.hpp"
 #include "crash_dir.hpp"
 #include "crash_heap.hpp"
+#include "d3d12_hooks.hpp"
 #include "../loader/data_folder.h"
 #include "dred.hpp"
 #include "dred_logic.hpp"
@@ -34,7 +35,7 @@ namespace runtime {
 std::string load_stage();
 void on_stage(void (*fn)(int));
 void hud_fatal();
-void netplay_exit();
+void session_host_exit();
 void load_stall_game_line(const char *line);
 }
 
@@ -827,7 +828,7 @@ void window_stage(int)
 void on_exit(const char *fn, UINT code)
 {
     perf::flush(fn);
-    runtime::netplay_exit();
+    runtime::session_host_exit();
     if (InterlockedExchange(&exited, 1) || !enter())
         return;
     bool early = !window_reached, stack = code || early;
@@ -1828,8 +1829,19 @@ void step_dred(Request &r)
     if (r.has_prior)
         look(r.prior.ctx);
     std::string text = runtime::dred::section(seen);
-    if (!text.empty())
-        out.put("%s", text.c_str());
+    if (text.empty())
+        return;
+    out.put("%s", text.c_str());
+    std::string builds = d3d12hooks::rtas_recent_text(runtime::dred::build_stops());
+    for (size_t at = 0; at < builds.size();) {
+        size_t end = builds.find('\n', at);
+        end = end == std::string::npos ? builds.size() : end + 1;
+        out.put("%.*s", int(end - at), builds.data() + at);
+        size_t from = builds.find_first_not_of(' ', at), to = builds[end - 1] == '\n' ? end - 1 : end;
+        if (from < to)
+            api->log("[gfx] rtas recent: %.*s", int(to - from), builds.data() + from);
+        at = end;
+    }
 }
 
 void step_close(Request &)

@@ -9,6 +9,7 @@ use swofty_core::build::{ADDONS_DIR, GVDB};
 use swofty_core::busy::{self, Busy, Step};
 use swofty_core::install::{EA_APP_EXPERIMENTAL, Game, Installer, LOADER_DIR, Source};
 use swofty_core::managed;
+use swofty_core::modules::{self, Plugin};
 use swofty_core::recovery::{Blocked, Scope, SessionLock};
 use swofty_core::settings::SETTINGS_FILE;
 use swofty_core::stock::{self, Depots};
@@ -45,7 +46,7 @@ fn game_dir(store: &Store, explicit: Option<PathBuf>) -> Result<PathBuf> {
 
 pub fn build(store: &Store, profile: &str, game: Option<PathBuf>, side_data: bool) -> Result<ExitCode> {
     let g = self::game(store, game)?;
-    let built = build_profile(store, profile, &g, None)?;
+    let built = build_profile(store, profile, &g, None, &[])?;
     report(profile, &built);
     if side_data {
         println!(
@@ -64,6 +65,7 @@ fn build_profile(
     profile: &str,
     g: &Game,
     integrity: Option<&Module>,
+    plugins: &[(Plugin, modules::Module)],
 ) -> Result<swofty_core::build::Built> {
     let addons = store.addons()?;
     let mut p = store.profile(profile)?;
@@ -90,6 +92,18 @@ fn build_profile(
             integrity::PLUGIN_ID
         ));
     }
+    if !built.plan.loader.is_empty() {
+        for (plugin, m) in plugins {
+            modules::place(m, plugin.id, &mut built.plan.loader, &mut session.plugins);
+            built.lines.push(format!(
+                "module {}: {} {} under {LOADER_DIR}/{ADDONS_DIR}/{}",
+                plugin.name,
+                m.file_name(),
+                m.version,
+                plugin.id
+            ));
+        }
+    }
     std::fs::write(&settings, serde_json::to_vec_pretty(&session)?)
         .with_context(|| format!("writing {}", settings.display()))?;
     if !built.plan.loader.is_empty() {
@@ -101,6 +115,47 @@ fn build_profile(
         Ok(())
     })?;
     Ok(built)
+}
+
+static SESSION_ENV: AtomicBool = AtomicBool::new(false);
+
+/// Whether the game this process starts gets the session module's environment; its in-game plugin is
+/// placed only then.
+pub fn with_session_env(on: bool) {
+    SESSION_ENV.store(on, Ordering::Relaxed);
+}
+
+/// The in-game plugins the server publishes for a signed-in session, verified. A plugin that is not
+/// there is one log line with the reason and the session goes on without it.
+fn server_plugins(store: &Store, out: &dyn Fn(&str)) -> Vec<(Plugin, modules::Module)> {
+    let Some(session) = swofty_core::mpauth::load(&store.root) else {
+        return Vec::new();
+    };
+    let api = swofty_core::timetrial::api::Api::new(&session.token);
+    let mut found = Vec::new();
+    let wanted = [modules::TT_GAME]
+        .into_iter()
+        .chain(SESSION_ENV.load(Ordering::Relaxed).then_some(modules::MP_GAME));
+    for plugin in wanted {
+        match modules::ensure(&store.root, &api, plugin.name, modules::GAME_PLATFORM, plugin.abi) {
+            Ok(m) => {
+                if m.is_local() {
+                    out(&format!(
+                        "module {}: warning: {} is set; the local build {} is placed unsigned and the server's is not used",
+                        plugin.name,
+                        modules::local_env(plugin.name),
+                        m.path.display()
+                    ));
+                }
+                found.push((plugin, m));
+            }
+            Err(why) => out(&format!(
+                "module {}: not loaded for this session: {why}",
+                plugin.name
+            )),
+        }
+    }
+    found
 }
 
 fn report(profile: &str, built: &swofty_core::build::Built) {
@@ -400,7 +455,12 @@ fn install_checked(
         ..Installer::new(&store.root, g)
     };
     let integrity = session.then(|| crate::laps::integrity(store, out)).flatten();
-    let built = build_profile(store, profile, g, integrity.as_ref())?;
+    let plugins = if session {
+        server_plugins(store, out)
+    } else {
+        Vec::new()
+    };
+    let built = build_profile(store, profile, g, integrity.as_ref(), &plugins)?;
     report(profile, &built);
     let found = match inst.apply(&built.plan) {
         Err(swofty_core::Error::Leftovers(found)) => found,
@@ -412,7 +472,7 @@ fn install_checked(
     let cleared = inst.clear(&found)?;
     crate::recover::announce(store, g, &cleared, out);
     crate::recover::record_cleared(store, &cleared);
-    let built = build_profile(store, profile, g, integrity.as_ref())?;
+    let built = build_profile(store, profile, g, integrity.as_ref(), &plugins)?;
     report(profile, &built);
     match inst.apply(&built.plan) {
         Err(swofty_core::Error::Leftovers(found)) => Err(crate::recover::blocked(store, g, &found)),
@@ -470,20 +530,23 @@ fn check_stock(store: &Store, g: &Game, out: &dyn Fn(&str)) -> Result<Option<Dep
             d.steam
         ));
     }
-    for d in &checked.vr {
+    if !checked.third_party.is_empty() {
+        let dlls: Vec<String> = checked
+            .third_party
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} (size {}, Steam {})",
+                    d.rel,
+                    d.size.map_or("missing".to_owned(), |n| n.to_string()),
+                    d.steam
+                )
+            })
+            .collect();
         out(&format!(
-            "[stock] {} differs from Steam's copy (size {}, Steam {}); a VR runtime replaces it, continuing",
-            d.rel,
-            d.size.map_or("missing".to_owned(), |n| n.to_string()),
-            d.steam
-        ));
-    }
-    for d in &checked.upscaler {
-        out(&format!(
-            "[stock] {} differs from Steam's copy (size {}, Steam {}); an upscaler drop-in replaces it, continuing",
-            d.rel,
-            d.size.map_or("missing".to_owned(), |n| n.to_string()),
-            d.steam
+            "[stock] {} DLL file(s) differ from Steam's copy and are left as third-party files, continuing: {}",
+            dlls.len(),
+            dlls.join(", ")
         ));
     }
     if let Some(n) = checked.swept {
@@ -724,11 +787,11 @@ mod tests {
         assert_eq!(
             format!("{:#}", outdated_with(failed(), Some("1.0.136.6820"), &names)),
             format!(
-                "Classic Seasons needs F1 25 1.0.141.7865, the latest update. Your F1 25 is 1.0.136.6820. \
+                "Classic Seasons needs F1 25 1.0.145.2472, the latest update. Your F1 25 is 1.0.136.6820. \
                  Update F1 25 in Steam or the EA app, then press Play again.\n({APPLY_FAILED})"
             )
         );
-        for version in [Some("1.0.141.7865"), None, Some("")] {
+        for version in [Some("1.0.145.2472"), None, Some("")] {
             assert_eq!(
                 format!("{:#}", outdated_with(failed(), version, &names)),
                 APPLY_FAILED,
@@ -780,7 +843,7 @@ mod tests {
             locked: false,
             default_on: true,
         }]);
-        build_profile(&store, "default", &game, None).unwrap();
+        build_profile(&store, "default", &game, None, &[]).unwrap();
         let p = store.profile("default").unwrap();
         assert_eq!(p.state["t.writer"], serde_json::json!({"built": true}));
         std::fs::remove_dir_all(&root).ok();
@@ -942,7 +1005,7 @@ mod tests {
             return;
         }
         let h = Harness::new("unknown");
-        let built = build_profile(&h.store, "default", &h.game, None).unwrap();
+        let built = build_profile(&h.store, "default", &h.game, None, &[]).unwrap();
         assert!(built.plan.added.contains_key(MIP));
         // A copy that turns up after the build is only found when the files
         // are placed, as with track mip files, which always go in as

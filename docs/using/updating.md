@@ -58,7 +58,7 @@ These rules are for Team Simplified, who publish the addon at [TeamSimplified/si
 
 ## Addon updates
 
-The launcher compares your installed addons with the [Addon Browser](/using/addon-browser) when it opens, then every 30 minutes. When an addon that is on in your active profile has a newer version that works with your launcher, the line next to **Play** lists the updates and has an **Update addons** link. Updates for addons that are off do not change **Play**; they show as an update on the Addons page and in the Addon Browser, and become part of **Update addons** when you turn the addon on.
+The launcher compares your installed addons with the [Addon Browser](/using/addon-browser) when it opens, then every 30 minutes. When an addon that is on in your active profile has a newer version that works with your launcher, the line next to **Play** lists the updates and has an **Update addons** link. Updates for addons that are off do not change **Play**; they show as an update on the Addons page and in the Addon Browser, and become part of **Update addons** when you turn the addon on. With **Update turned-off addons** on in [Settings](/using/settings#general), **Update addons** also updates the installed addons that are off, in every profile including Vanilla.
 
 When a launcher update and addon updates are both waiting, each has its own line next to **Play**, with its own link.
 

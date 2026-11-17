@@ -16,12 +16,10 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use swofty_core::catalog;
 use swofty_core::install::Game;
-use swofty_core::multiplayer::diag;
-use swofty_core::multiplayer::game::{self as mp_game, Command, GameStatus, Screen};
-use swofty_core::multiplayer::progress::{self, MemberStage, Problem, Progress, Step};
-use swofty_core::multiplayer::rooms::{Api, RoomAddon, RoomSettings, RoomSummary};
-use swofty_core::multiplayer::session::{
-    Local, MemberState, Phase, RoomContent, Session, SessionState, Setup,
+use swofty_core::multiplayer::client::{self as diag, Local, Session, Setup};
+use swofty_core::multiplayer::types::{
+    GameStatus, MemberStage, MemberState, Phase, Problem, Progress, RoomAddon, RoomContent, RoomSettings,
+    RoomSummary, Screen, SessionState, Step,
 };
 use swofty_core::store::Store;
 use swofty_i18n::{fill, tr, trf, trn};
@@ -33,7 +31,6 @@ use crate::theme::{Palette, ScrollArea};
 const TICK: Duration = Duration::from_millis(500);
 const GAME_EVERY: Duration = Duration::from_secs(2);
 const ROOMS_EVERY: Duration = Duration::from_secs(5);
-const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 const MIN_PLAYERS: u8 = 2;
 const MAX_PLAYERS: u8 = 24;
 const AVATARS_DIR: &str = "avatars";
@@ -148,7 +145,7 @@ pub(crate) struct Status {
 }
 
 pub(crate) fn room_status(state: &SessionState) -> Status {
-    let progress = progress::progress(state);
+    let progress = state.step();
     if let Phase::Ended(why) = &state.phase {
         return Status {
             tone: Tone::Over,
@@ -160,7 +157,7 @@ pub(crate) fn room_status(state: &SessionState) -> Status {
             hint: None,
         };
     }
-    let problem = progress::problem(state);
+    let problem = state.problem.clone();
     let (tone, hint) = match (&problem, progress.step, state.host, &state.phase) {
         (Some(_), ..) => (Tone::Blocked, None),
         (None, Step::InLobby, true, Phase::Racing) => (
@@ -204,6 +201,19 @@ pub(crate) fn exit_notice(host: bool) -> &'static str {
     } else {
         "F1 25 closed, so you left the room."
     }
+}
+
+/// What the page shows in place of its list while the session module isn't loaded: the sentence the last
+/// load failed with, kept while another load runs, gone once one succeeds.
+pub(crate) fn refusal(shown: Option<String>, loaded: bool, failed: Option<String>) -> Option<String> {
+    if loaded {
+        return None;
+    }
+    failed.or(shown)
+}
+
+pub(crate) fn refusal_text(why: &str) -> String {
+    trf!("Online sessions aren't available: {why}", why = why)
 }
 
 /// One member's state as the room lists it: what their game is doing. Only a game in the lobby counts as joined.
@@ -287,12 +297,7 @@ fn read_local(store: &Store, profile: &str, dir: &Path) -> Result<Local, String>
 }
 
 fn read_game(dir: &Path, running: bool) -> Option<GameStatus> {
-    mp_game::last_status(dir).or_else(|| {
-        running
-            .then(|| mp_game::send(dir, &Command::Status, STATUS_TIMEOUT).ok())
-            .flatten()
-            .map(|r| r.status)
-    })
+    diag::game_status(dir, running)
 }
 
 #[derive(Clone)]
@@ -316,6 +321,7 @@ pub(crate) struct Multiplayer {
     rooms: Vec<RoomSummary>,
     rooms_loaded: bool,
     rooms_error: Option<String>,
+    refused: Option<String>,
     rooms_at: Option<Instant>,
     rooms_polling: bool,
     digest: Option<String>,
@@ -337,6 +343,7 @@ pub(crate) struct Multiplayer {
     copied: Option<Instant>,
     launch_seen: u32,
     room_launching: bool,
+    held: Option<RoomLaunch>,
     faces: HashMap<String, Arc<Image>>,
     faces_asked: HashSet<String>,
     _inputs: [Subscription; 2],
@@ -362,6 +369,7 @@ impl Multiplayer {
             rooms: Vec::new(),
             rooms_loaded: false,
             rooms_error: None,
+            refused: None,
             rooms_at: None,
             rooms_polling: false,
             digest: None,
@@ -383,6 +391,7 @@ impl Multiplayer {
             copied: None,
             launch_seen: 0,
             room_launching: false,
+            held: None,
             faces: HashMap::new(),
             faces_asked: HashSet::new(),
             _inputs: inputs,
@@ -397,6 +406,7 @@ impl Multiplayer {
         self.session = None;
         self.launch_seen = 0;
         self.room_launching = false;
+        self.held = None;
         self.state = None;
         self.leaving = false;
         self.closing = None;
@@ -431,6 +441,7 @@ impl Shell {
 
     fn mp_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mp_room_launch(window, cx);
+        self.mp_held_dropped(window, cx);
         self.mp_watch_game(cx);
         let m = &mut self.mp_page;
         if m.leaving && m.session.as_ref().is_none_or(Session::is_finished) {
@@ -448,6 +459,14 @@ impl Shell {
             m.rooms_at = None;
             m.game_at = None;
             m.digest = None;
+        }
+        let refused = refusal(m.refused.clone(), diag::is_loaded(), diag::unavailable());
+        if refused != m.refused {
+            if refused.is_none() {
+                m.rooms_at = None;
+            }
+            m.refused = refused;
+            cx.notify();
         }
         if let Some(session) = &m.session {
             let state = session.state();
@@ -493,7 +512,7 @@ impl Shell {
         }
         self.mp_page.closing = None;
         if let Some(dir) = self.install.as_ref().map(|i| i.dir.clone()) {
-            std::fs::remove_file(mp_game::mailbox(&dir).join("status.json")).ok();
+            diag::forget_status(&dir);
         }
         let row_ids = match &ask.row_ids {
             Some(ids) => {
@@ -513,7 +532,7 @@ impl Shell {
         self.mp_page.launch_seen = ask.seq;
         self.mp_page.game_seen = false;
         self.mp_page.room_launching = true;
-        let direct_start = ask.direct_start(session.state().host);
+        let direct_start = ask.direct_start.clone();
         let started = self.play_for(
             Some(RoomLaunch {
                 row_ids,
@@ -524,6 +543,27 @@ impl Shell {
         );
         if !started {
             self.mp_room_launch_result(false);
+        }
+        cx.notify();
+    }
+
+    /// A prompt Play opened holds the room launch: its Play goes on with it through [`Shell::play`].
+    pub(crate) fn mp_hold_room(&mut self, room: RoomLaunch) {
+        self.mp_page.held = Some(room);
+    }
+
+    pub(crate) fn mp_take_held(&mut self) -> Option<RoomLaunch> {
+        self.mp_page.held.take()
+    }
+
+    fn mp_held_dropped(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mp_page.held.is_none() || window.has_active_dialog(cx) {
+            return;
+        }
+        self.mp_page.held = None;
+        self.mp_page.room_launching = false;
+        if let Some(session) = &self.mp_page.session {
+            session.launch_failed("Play was cancelled");
         }
         cx.notify();
     }
@@ -766,10 +806,14 @@ impl Shell {
             return;
         };
         self.mp_page.rooms_polling = true;
+        let data = self.store.root.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { Api::new(&token).rooms() })
+                .spawn(async move {
+                    diag::load(&data, Some(&token)).map_err(|e| e.to_string())?;
+                    diag::rooms(&token)
+                })
                 .await;
             this.update(cx, |s, cx| {
                 let m = &mut s.mp_page;
@@ -781,7 +825,7 @@ impl Shell {
                         m.rooms_loaded = true;
                         m.rooms_error = None;
                     }
-                    Err(e) => m.rooms_error = Some(e.message),
+                    Err(e) => m.rooms_error = Some(e),
                 }
                 cx.notify();
             })
@@ -845,20 +889,23 @@ impl Shell {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let local = read_local(&store, &profile, &dir).inspect_err(|e| {
-                        diag::line(format!("session not started: couldn't read the addons: {e}"));
-                    })?;
-                    let mut setup = Setup::new(Api::new(&token), &dir, local);
+                    diag::load(&store.root, Some(&token)).map_err(|e| e.to_string())?;
+                    let local = read_local(&store, &profile, &dir)
+                        .inspect_err(|e| {
+                            diag::line(format!("session not started: couldn't read the addons: {e}"));
+                        })
+                        .map_err(|e| trf!("Couldn't read your addons: {e}", e = e).to_string())?;
+                    let mut setup = Setup::new(&token, &dir, local);
                     setup.room_launch = true;
                     let (refresh_store, refresh_profile, refresh_dir) =
                         (store.clone(), profile.clone(), dir.clone());
                     setup.refresh = Some(Arc::new(move || {
                         read_local(&refresh_store, &refresh_profile, &refresh_dir).ok()
                     }));
-                    Ok::<_, String>(match start {
-                        Start::Create(settings) => Session::create(setup, settings),
+                    match start {
+                        Start::Create(settings) => Session::create(setup, &settings),
                         Start::Join(code) => Session::join(setup, &code),
-                    })
+                    }
                 })
                 .await;
             this.update(cx, |s, cx| {
@@ -870,7 +917,7 @@ impl Shell {
                         m.session = Some(session);
                         m.form = false;
                     }
-                    Err(e) => m.error = Some(trf!("Couldn't read your addons: {e}", e = e)),
+                    Err(e) => m.error = Some(e),
                 }
                 cx.notify();
             })
@@ -1000,7 +1047,13 @@ impl Shell {
                     .disabled(self.mp_page.form)
                     .on_click(cx.listener(|this, _, window, cx| this.mp_open_form(window, cx))),
             );
-        let rooms: AnyElement = if !self.mp_page.rooms_loaded && self.mp_page.rooms_error.is_none() {
+        let rooms: AnyElement = if let Some(why) = &self.mp_page.refused {
+            div()
+                .text_size(px(13.))
+                .text_color(p.text_muted)
+                .child(refusal_text(why))
+                .into_any_element()
+        } else if !self.mp_page.rooms_loaded && self.mp_page.rooms_error.is_none() {
             div()
                 .text_size(px(13.))
                 .text_color(p.text_muted)
@@ -1557,6 +1610,13 @@ impl Shell {
                                     .filter(|_| !m.leaving)
                                     .map(|h| div().text_size(px(13.)).text_color(p.text_muted).child(h)),
                             )
+                            .children(
+                                st.problem
+                                    .as_ref()
+                                    .and_then(|problem| problem.detail.clone())
+                                    .filter(|_| !m.leaving)
+                                    .map(|d| div().text_size(px(13.)).text_color(p.text_muted).child(d)),
+                            )
                             .children(reopen.is_some().then(|| {
                                 div()
                                     .text_size(px(13.))
@@ -1760,16 +1820,34 @@ impl Shell {
 mod tests {
     use std::collections::HashSet;
 
-    use swofty_core::multiplayer::game::{Cover, GameStatus, Role, Screen};
-    use swofty_core::multiplayer::progress::{MemberStage, Step};
-    use swofty_core::multiplayer::rooms::{RoomAddon, RoomAddons, RoomSummary, User};
-    use swofty_core::multiplayer::session::{MemberState, Phase, PrintMatch, RelayStatus, SessionState};
+    use swofty_core::multiplayer::types::{
+        GameStatus, MemberStage, MemberState, Phase, PrintMatch, Problem, RelayStatus, Role, RoomAddon,
+        RoomAddons, RoomSummary, Screen, SessionState, User,
+    };
 
     use super::{
         GameState, RoomContent, RoomStatus, Start, Tone, addon_checks, card_addons, content_check,
-        content_word, exit_leaves, exit_notice, joined, member_word, missing, restart_ok_text, room_meta,
-        room_status, step_number,
+        content_word, exit_leaves, exit_notice, joined, member_word, missing, refusal, refusal_text,
+        restart_ok_text, room_meta,
     };
+
+    #[test]
+    fn a_problem_reads_with_or_without_its_detail() {
+        let read = |json: &str| serde_json::from_str::<Problem>(json).unwrap();
+        assert_eq!(
+            read(r#"{"text":"Simplified doesn't match the host's.","retry":false}"#).detail,
+            None
+        );
+        let said = read(
+            r#"{"text":"Simplified doesn't match the host's.","retry":false,"detail":"Its build step made more."}"#,
+        );
+        assert_eq!(said.detail.as_deref(), Some("Its build step made more."));
+        assert!(
+            !serde_json::to_string(&read(r#"{"text":"x","retry":true}"#))
+                .unwrap()
+                .contains("detail")
+        );
+    }
 
     fn status(screen: Screen) -> GameStatus {
         GameStatus {
@@ -1834,6 +1912,8 @@ mod tests {
             last_error: None,
             launch: None,
             content: RoomContent::default(),
+            progress: None,
+            problem: None,
         }
     }
 
@@ -1926,68 +2006,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_each_phase_to_one_step_with_a_bar() {
-        let at = |phase: Phase| room_status(&session(phase, false));
-        let signing = at(Phase::Connecting("signing in".into()));
-        let joining = at(Phase::Connecting("joining F1-7KQ2MX".into()));
-        assert_eq!(signing.progress.step, Step::SigningIn);
-        assert_eq!(joining.progress.step, Step::Joining);
-        assert!(signing.progress.percent < joining.progress.percent);
-        assert!(step_number(Step::SigningIn) < step_number(Step::InLobby));
-        assert_eq!(signing.tone, Tone::Working);
-        assert!(signing.problem.is_none());
-    }
-
-    #[test]
-    fn shows_the_covers_step_while_the_game_loads_and_done_only_in_the_lobby() {
-        let mut s = session(Phase::WaitingForGame("F1 25 is starting".into()), false);
-        let mut game = status(Screen::Other);
-        game.cover = Some(Cover {
-            step: "Joining the lobby".into(),
-            percent: 90,
-        });
-        s.game = Some(game.clone());
-        let loading = room_status(&s);
-        assert_eq!(loading.progress.step, Step::Loading);
-        assert_eq!(loading.progress.label, "Joining the lobby");
-        assert!(loading.progress.percent < 100);
-        game.in_session = true;
-        game.screen = Screen::LanLobby;
-        s.game = Some(game);
-        let lobby = room_status(&s);
-        assert_eq!(
-            (lobby.progress.step, lobby.progress.percent),
-            (Step::InLobby, 100)
-        );
-        assert_eq!(lobby.tone, Tone::Good);
-        assert_eq!(lobby.hint, Some("The host picks the tracks and starts the race."));
-    }
-
-    #[test]
-    fn an_error_is_one_sentence_with_one_action() {
-        let refused = room_status(&session(
-            Phase::WaitingForGame(
-                "F1 25 didn't start for the room: the wrapper exited (exit code: 1); retry or leave the room"
-                    .into(),
-            ),
-            false,
-        ));
-        let problem = refused.problem.expect("a problem");
-        assert_eq!(problem.text, "F1 25 didn't start.");
-        assert!(problem.retry);
-        let dead = room_status(&session(Phase::Failed("that room is full".into()), false));
-        let dead = dead.problem.expect("a problem");
-        assert_eq!(dead.text, "That room is full.", "a failed room says why");
-        assert!(!dead.retry, "a failed room only leaves");
-        let over = room_status(&session(
-            Phase::Ended("the host left, so the room closed".into()),
-            false,
-        ));
-        assert_eq!(over.progress.label, "The host left, so the room closed");
-        assert_eq!(over.tone, Tone::Over);
-    }
-
-    #[test]
     fn lists_each_player_by_what_their_game_is_doing() {
         assert_eq!(
             member_word(&member(true, Some(MemberStage::Starting))).0,
@@ -2038,8 +2056,29 @@ mod tests {
     }
 
     #[test]
+    fn the_servers_refusal_shows_until_a_load_succeeds() {
+        let beta = || Some("needs the beta role".to_owned());
+        assert_eq!(refusal(None, false, None), None);
+        assert_eq!(refusal(None, false, beta()), beta());
+        assert_eq!(
+            refusal(beta(), false, None),
+            beta(),
+            "kept while another load runs"
+        );
+        assert_eq!(
+            refusal(beta(), false, Some("not signed in".into())),
+            Some("not signed in".into())
+        );
+        assert_eq!(refusal(beta(), true, None), None);
+        assert_eq!(
+            refusal_text("needs the beta role"),
+            "Online sessions aren't available: needs the beta role"
+        );
+    }
+
+    #[test]
     fn the_restart_button_says_what_it_does() {
-        use swofty_core::multiplayer::rooms::RoomSettings;
+        use swofty_core::multiplayer::types::RoomSettings;
         assert_eq!(
             restart_ok_text(&Start::Create(RoomSettings::default())),
             "Create room and join"

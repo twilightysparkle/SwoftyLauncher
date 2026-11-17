@@ -13,7 +13,6 @@ use swofty_core::crash::{LogScan, StartFailure, Symbols, fatal_name};
 use swofty_core::ea_app;
 use swofty_core::install::{Game, Source};
 use swofty_core::launch;
-use swofty_core::multiplayer::bridge::armed_env;
 use swofty_core::process::{GameProcess, flag, game_processes};
 use swofty_core::quarantine;
 use swofty_core::recovery::{self, Blocked, Notice, Scope, SessionLock};
@@ -453,7 +452,7 @@ impl Launch {
             steam_saves_once,
         ));
         if let Some(armed) = netplay {
-            c.envs(armed_env(armed));
+            c.env(swofty_core::multiplayer::client::LAUNCH_ENV, armed);
         }
         if let Some(file) = row_ids {
             c.env(swofty_core::row_ids::ENV, file);
@@ -911,7 +910,7 @@ mod tests {
 
     #[test]
     fn an_addon_that_needs_a_newer_game_shows_the_update() {
-        let outdated = "Classic Seasons needs F1 25 1.0.141.7865, the latest update. Your F1 25 is 1.0.136.6820. \
+        let outdated = "Classic Seasons needs F1 25 1.0.145.2472, the latest update. Your F1 25 is 1.0.136.6820. \
                         Update F1 25 in Steam or the EA app, then press Play again.";
         let log = format!(
             "[info] launching F1 25 directly; waiting for the wrapper, output in C:\\Swofty\\state/wrapper-run.log\n\
