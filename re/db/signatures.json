@@ -163307,6 +163307,33 @@
    ]
   },
   {
+   "id": "game.championship_game_mode_session_track_read",
+   "section": ".xtls",
+   "pattern": "49 8B 95 48 14 00 00 0F B6 87 78 02 00 00 48 8B 4A 28 48 8B 52 30 48 29 CA 48 C1 FA 04 48 39 C2 48 89 7C 24 70",
+   "match": "0x1407b7dcf",
+   "anchor": "0x7",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x1407b7dd6",
+   "kind": "mid",
+   "expect": "0F B6 87 78 02 00 00",
+   "names": [
+    "site_Game_ChampionshipGameMode_SessionTrackRead"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-18",
+     "by": "driver-career-suzuka",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/gp_weekend_track_guard.cpp"
+   ]
+  },
+  {
    "id": "session.time_trial_leaderboard_bound_tab_child",
    "section": ".xtls",
    "pattern": "48 8B 01 B2 01 FF 50 30 48 89 F1 E8 ?? ?? ?? ?? 90 48 83 C4 40 5E C3 CC CC CC 56 48 83 EC 40",
@@ -186506,6 +186533,60 @@
     }
    ],
    "used_by": []
+  },
+  {
+   "id": "ai.ers_corner_line_read",
+   "section": ".xtls",
+   "pattern": "4F 8B 04 08 45 8B 40 10 48 C1 FA 03",
+   "match": "0x1406497d5",
+   "anchor": "0x4",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x1406497d9",
+   "kind": "mid",
+   "expect": "45 8B 40 10 48 C1 FA 03",
+   "names": [
+    "site_Ai_Ers_CornerLineRead"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-18",
+     "by": "brands-hatch",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/ai_ers_guard.cpp"
+   ]
+  },
+  {
+   "id": "ai.ers_no_corner_match",
+   "section": ".xtls",
+   "pattern": "C4 A1 7A 10 44 C8 04 C4 C1 7A 11 47 5C",
+   "match": "0x140649cbf",
+   "anchor": "0x7",
+   "resolve": {
+    "kind": "addr"
+   },
+   "target": "0x140649cc6",
+   "kind": "mid",
+   "expect": "C4 C1 7A 11 47 5C",
+   "names": [
+    "site_Ai_Ers_NoCornerMatch"
+   ],
+   "verified": [
+    {
+     "build": "d873a1c8d2044cef",
+     "date": "2026-11-18",
+     "by": "brands-hatch",
+     "how": "static"
+    }
+   ],
+   "used_by": [
+    "native/src/core/ai_ers_guard.cpp"
+   ]
   }
  ]
 }

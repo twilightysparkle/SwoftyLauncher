@@ -184,6 +184,7 @@ impl Shell {
             ui_scale_drag: None,
             _ui_scale_changes,
             onboarding: None,
+            consent_check: false,
             developer_mode,
             clear_old_session_logs,
             time_trial_boards,
@@ -392,7 +393,9 @@ impl Shell {
         let mp = swofty_core::mpauth::load(&store.root);
         if let Some(current) = mp.clone() {
             let dir = store.root.clone();
-            swofty_core::multiplayer::client::load_in_background(&dir, &current.token);
+            if current.allowed {
+                swofty_core::multiplayer::client::load_in_background(&dir, &current.token);
+            }
             cx.spawn(async move |this, cx| {
                 let refreshed = cx
                     .background_executor()

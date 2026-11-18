@@ -10,8 +10,9 @@ use crate::activation::ers::{self, ErsMap, build_ers};
 use crate::activation::grid::grid_size;
 use crate::activation::handling::{self, HandlingMap};
 use crate::activation::place::{
-    PlaceInput, SLOTS, ai_teams, layer_worlds, missing_worlds, place, room_for, slot_asset_group,
-    slot_asset_root, slot_file, track_group,
+    PlaceInput, SLOTS, STOCK_AI, ai_alias_lines, ai_teams, difficulty_stand_ins, layer_worlds,
+    missing_worlds, own_ai_folders, place, room_for, slot_asset_group, slot_asset_root, slot_file,
+    track_group,
 };
 use crate::activation::ui::{Kept, MapUi, build_ui, plan_lists, stamp as ui_stamp};
 use crate::asset::{
@@ -80,6 +81,8 @@ pub struct Built {
     pub row_ids: BTreeMap<String, BTreeMap<String, i64>>,
     /// The track addons left out because the game's track lists are full.
     pub track_limit: Option<crate::tracks::TrackLimit>,
+    /// The build restored a saved build with the same hash instead of building again.
+    pub reused: bool,
 }
 
 /// The recorded originals of the last baseline read, by its path and when it
@@ -900,18 +903,54 @@ fn trackless_options(
     out
 }
 
+/// What [`track_limit`] found and how its check went.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrackLimitCheck {
+    /// The tracks the on addons add with `track.add`.
+    pub added: usize,
+    /// The track addons left out because the game's track lists are full.
+    pub limit: Option<crate::tracks::TrackLimit>,
+    /// How long reading the profile and counting its tracks took.
+    pub counting: std::time::Duration,
+    /// The check build's steps, folded by [`crate::fold_steps`]; empty when too few tracks are on for it to run.
+    pub steps: Vec<crate::Step>,
+    /// The check build restored a saved build with the same hash.
+    pub reused: bool,
+    /// The check build is saved, so a build of the same addons and game files restores it.
+    pub saved: bool,
+}
+
+impl TrackLimitCheck {
+    /// Whether a check build ran.
+    pub fn built(&self) -> bool {
+        !self.steps.is_empty()
+    }
+}
+
 /// A `checking` build gives addon build hooks a host that lists addons but
 /// cannot install, remove, turn on or move them.
 /// The track addons `profile` would lose to the game's full track lists, found by planning the build
-/// without installing it; none when too few tracks are on to fill them.
-pub fn track_limit(store: &Store, profile: &str, game: &Game) -> Result<Option<crate::tracks::TrackLimit>> {
+/// without installing it; none, and no build, when too few tracks are on to fill them.
+pub fn track_limit(store: &Store, profile: &str, game: &Game) -> Result<TrackLimitCheck> {
+    let started = std::time::Instant::now();
     let addons = store.registry()?.manifests();
     let p = store.profile(profile)?;
     let order = resolve(&p, &addons)?.order;
-    if !crate::tracks::may_fill_track_lists(crate::tracks::added_count(store, &order, &addons)) {
-        return Ok(None);
+    let mut check = TrackLimitCheck {
+        added: crate::tracks::added_count(store, &order, &addons),
+        counting: started.elapsed(),
+        ..TrackLimitCheck::default()
+    };
+    if !crate::tracks::may_fill_track_lists(check.added) {
+        return Ok(check);
     }
-    Ok(build_as(store, profile, game, true)?.track_limit)
+    let (built, steps) = crate::timed_steps("resolving the addons", || build_as(store, profile, game, true));
+    let built = built?;
+    check.steps = crate::fold_steps(steps, 3);
+    check.reused = built.reused;
+    check.saved = built.overlay.join(SAVED_FILE).is_file();
+    check.limit = built.track_limit;
+    Ok(check)
 }
 
 pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool) -> Result<Built> {
@@ -1684,6 +1723,7 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
     let (lines_at, warnings_at) = (built.lines.len(), built.warnings.len());
     if let Some(saved) = Saved::load(&built.overlay, &built.buildhash).filter(|s| s.usable(store, game)) {
         saved.restore(&mut built)?;
+        built.reused = true;
         built.report.order = p.enabled().map(str::to_owned).collect();
         crate::write_json(&crate::conflicts::path(store, profile), &built.report)?;
         if !checking {
@@ -1878,6 +1918,10 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
                 .map_or("database", |id| addons.get(id).map_or(id, |m| m.name.as_str()));
             built.warnings.push(u.line(by));
         }
+        let added_heads = crate::heads::registry_heads(&store.addons_dir(), &resolved.order, &std16);
+        for h in crate::heads::wear_stand_ins(&mut db, &shipped_db, &added_heads) {
+            built.lines.push(h.line());
+        }
         for k in crate::livery_kits::keep_kits(&mut db) {
             let by = planner
                 .record_writer(k.key)
@@ -1909,7 +1953,22 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
         }
         let row_adders = crate::stdlib::room::row_adders(copies.iter().map(|c| c.addon.as_str()), CORE_ID);
         built.row_ids = added_row_ids(&db, &copies);
-        let added_ai = ai_teams(&db, copies.iter().map(|c| (c.from.as_str(), c.row.as_str())));
+        let added_ai = ai_teams(
+            &db,
+            &shipped_db,
+            copies.iter().map(|c| (c.from.as_str(), c.row.as_str())),
+        );
+        let row_codes: Vec<&str> = tracks
+            .iter()
+            .filter(|(_, _, o)| !recorded.contains(&o.addon))
+            .map(|(_, p, _)| p.track_code.as_str())
+            .collect();
+        let own_ai = own_ai_folders(&db, &shipped_db);
+        for (code, folder) in difficulty_stand_ins(&mut db, &own_ai, &row_codes) {
+            built.lines.push(format!(
+                "{code}: AI difficulty for {folder} stands in with the track's {STOCK_AI}"
+            ));
+        }
         for (addon, code, id) in &track_ids {
             built
                 .row_ids
@@ -2064,11 +2123,8 @@ pub(crate) fn build_as(store: &Store, profile: &str, game: &Game, checking: bool
                     .lines
                     .push(format!("{}: world {alias} stands in with {to}", pkg.track_code));
             }
-            for (team, to) in &placement.ai_aliases {
-                built.lines.push(format!(
-                    "{}: AI data for {team} stands in with the track's {to}",
-                    pkg.track_code
-                ));
+            for line in ai_alias_lines(&placement.ai_aliases) {
+                built.lines.push(format!("{}: {line}", pkg.track_code));
             }
             if !placement.repaired.is_empty() {
                 built.lines.push(format!(
@@ -6699,6 +6755,180 @@ mod tests {
         assert_eq!(out.get_text("tracks._Track_instancecount_").as_deref(), Some("2"));
         assert!(out.get("stock.key_0").is_none());
         assert!(out.get("mod.key_0").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_added_track_gets_the_stock_ai_data_and_difficulties_of_a_seasons_own_ai_folder() {
+        use swofty_formats::gvdb::Record;
+        if loader_dir().is_some() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("swofty-build-ownai-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let dir = root.join("game");
+        std::fs::create_dir_all(dir.join("game_package/gamedatabases")).unwrap();
+        std::fs::write(dir.join(crate::GAME_EXE), "exe").unwrap();
+        let slot = dir.join(slot_file(SLOTS[0]));
+        std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        std::fs::write(&slot, archive(&["eaid://ui_package/slot.uil"], 0)).unwrap();
+        let res = "tracks.track_resource.TrackResource_0";
+        let set = "track_data.game_setup.TrackDataSet_0";
+        let packages = "entrants.vehicles.vehicle_packages";
+        let difficulty = |row: usize, folder: &str, field: &str| {
+            format!("tracks.Track_{row}.ai_track_difficulties.{folder}.{field}")
+        };
+        let records = vec![
+            Record::new("tracks._Track_instancecount_", 0, "1"),
+            Record::new("tracks.Track_0._metadata_", 2, "melbourne"),
+            Record::new("tracks.Track_0.statId", 0, "5"),
+            Record::new("tracks.Track_0.track_resource", 2, "2019"),
+            Record::new(&difficulty(0, "f1_2025_vehicle_package", "time"), 8, "90.5,89.5"),
+            Record::new(
+                &difficulty(0, "f1_2025_vehicle_package", "max_slider_position"),
+                0,
+                "110",
+            ),
+            Record::new("tracks.track_resource._TrackResource_instancecount_", 0, "1"),
+            Record::new(&format!("{res}._metadata_"), 2, "2019"),
+            Record::new(&format!("{res}.iblAssetGroupsRoot"), 2, "probes/"),
+            Record::new(&format!("{res}.iblKey"), 2, "key_2019.assetgroup"),
+            Record::new("track_data.game_setup._TrackDataSet_instancecount_", 0, "1"),
+            Record::new(&format!("{set}._metadata_"), 2, "f1"),
+            Record::new(&format!("{set}._TrackData_instancecount_"), 0, "1"),
+            Record::new(&format!("{set}.TrackData_0._metadata_"), 2, "melbourne"),
+            Record::new(&format!("{set}.TrackData_0.track"), 2, "melbourne"),
+            Record::new(&format!("{packages}._vehicle_package_instancecount_"), 0, "2"),
+            Record::new(&format!("{packages}.vehicle_package_0._metadata_"), 2, "f1_2025"),
+            Record::new(
+                &format!("{packages}.vehicle_package_0.ai_package_folder"),
+                2,
+                "f1_2025_vehicle_package",
+            ),
+            Record::new(
+                &format!("{packages}.vehicle_package_1._metadata_"),
+                2,
+                "f1cg_f1_2013",
+            ),
+            Record::new(
+                &format!("{packages}.vehicle_package_1.ai_package_folder"),
+                2,
+                "f1cg_f1_2013_vehicle_package",
+            ),
+        ];
+        std::fs::write(dir.join(GVDB), Gvdb { records }.to_bytes()).unwrap();
+        let game = Game {
+            identity: Identity::detect(&dir, Some(1)).unwrap(),
+            dir: dir.clone(),
+            user_reg: None,
+        };
+        let store = Store::new(root.join("data"));
+        let ai = "eaid://environment_package/tracks/testring/ai";
+        let install = |id: &str, ops: &str, track: bool| {
+            let src = root.join("src").join(id);
+            std::fs::create_dir_all(src.join("track")).unwrap();
+            std::fs::write(
+                src.join("swofty.json"),
+                format!(
+                    r#"{{ "schema_version": 1, "id": "{id}", "name": "{id}", "version": "1.0.0", "author": "t",
+                         "compat": {{ "game": "f1_25" }}, "operations": {{ "assets": ["ops.json"] }} }}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                src.join("ops.json"),
+                format!(r#"{{ "schema_version": 1, "ops": [{ops}] }}"#),
+            )
+            .unwrap();
+            if track {
+                std::fs::write(
+                    src.join("track/manifest.json"),
+                    r#"{ "track_code": "testring", "track_name": "Test Ring", "erp": "testring.erp",
+                         "activation": { "copy_from_track": "melbourne", "copy_slot": "melbourne" } }"#,
+                )
+                .unwrap();
+                let names = [
+                    "eaid://environment_package/tracks/testring/wep/testring_common.wep".to_owned(),
+                    format!("{ai}/f1_2025_vehicle_package/mclaren/mclaren.vp_times"),
+                    format!("{ai}/f1_2025_vehicle_package/lotus/lotus.vp_times"),
+                ];
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                std::fs::write(src.join("track/testring.erp"), archive_of("WEP", &names, 0)).unwrap();
+            }
+            store.install_addon(&src).unwrap();
+            store
+                .update_profile("default", |p| p.set_enabled(id, true))
+                .unwrap();
+        };
+        let put = |key: &str, tag: u8, value: &str| {
+            let hex: String = value.bytes().map(|b| format!("{b:02x}")).collect();
+            format!(r#"{{"op":"db.put-record","key":"{key}","type":{tag},"value":"{hex}"}}"#)
+        };
+        let own = "sw_test_vehicle_package";
+        let ops = [
+            put(&format!("{packages}.vehicle_package_1.ai_package_folder"), 2, own),
+            put(&format!("ai.asset_data.{own}._asset_data_instancecount_"), 0, "2"),
+            put(
+                &format!("ai.asset_data.{own}.asset_data_0._metadata_"),
+                2,
+                "mclaren",
+            ),
+            put(
+                &format!("ai.asset_data.{own}.asset_data_1._metadata_"),
+                2,
+                "cater",
+            ),
+            put(&difficulty(0, own, "time"), 8, "95.5,94.5"),
+            put(&difficulty(0, own, "max_slider_position"), 0, "110"),
+        ]
+        .join(",");
+        install("t.season", &ops, false);
+        install("mod.testring", r#"{"op":"track.add","source":"track"}"#, true);
+
+        let built = build(&store, "default", &game).unwrap();
+        for line in [
+            format!("testring: AI difficulty for {own} stands in with the track's f1_2025_vehicle_package"),
+            format!(
+                "testring: AI data for 2 teams of {own} stands in with the track's f1_2025_vehicle_package data of \
+                 the team of the same name; cater with lotus's"
+            ),
+        ] {
+            assert!(built.lines.contains(&line), "{line}\n{:?}", built.lines);
+        }
+        let out = Gvdb::parse(&std::fs::read(&built.plan.data[GVDB]).unwrap()).unwrap();
+        assert_eq!(
+            out.get_text("tracks.Track_1._metadata_").as_deref(),
+            Some("testring")
+        );
+        assert_eq!(
+            out.get_text(&difficulty(1, own, "time")).as_deref(),
+            Some("90.5,89.5")
+        );
+        assert_eq!(
+            out.get_text(&difficulty(1, own, "max_slider_position"))
+                .as_deref(),
+            Some("110")
+        );
+        assert_eq!(
+            out.get_text(&difficulty(0, own, "time")).as_deref(),
+            Some("95.5,94.5")
+        );
+        let placed: Vec<String> = built
+            .plan
+            .data
+            .values()
+            .chain(built.plan.added.values())
+            .filter_map(|p| swofty_formats::erp::ErpFile::open(p).ok())
+            .flat_map(|f| f.erp.resources.iter().map(|r| r.name.clone()).collect::<Vec<_>>())
+            .filter(|n| n.starts_with(&format!("{ai}/{own}/")))
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                format!("{ai}/{own}/cater/cater.vp_times"),
+                format!("{ai}/{own}/mclaren/mclaren.vp_times"),
+            ]
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -112,6 +112,8 @@ pub struct Shell {
     pub(crate) ui_scale_drag: Option<u16>,
     pub(crate) _ui_scale_changes: Subscription,
     pub(crate) onboarding: Option<crate::onboarding::Onboarding>,
+    /// The check at start for an unanswered ad consent form is running.
+    pub(crate) consent_check: bool,
     pub(crate) developer_mode: bool,
     /// `clear_old_session_logs` from config.json: opt-in, old session logs are cleared at start.
     pub(crate) clear_old_session_logs: bool,
@@ -206,8 +208,11 @@ impl Shell {
                             s.mp_toasts.push(Notification::success(tr(
                                 "Your account has been granted access to: Multiplayer",
                             )));
+                            swofty_core::multiplayer::client::load_in_background(
+                                &s.store.root,
+                                &session.token,
+                            );
                         }
-                        swofty_core::multiplayer::client::load_in_background(&s.store.root, &session.token);
                         s.mp = Some(session);
                         s.sync_avatar(cx);
                         s.sync_support(cx);
@@ -277,7 +282,12 @@ impl Shell {
         match refreshed {
             Some(session) => {
                 let gained = session.allowed && !was_allowed;
-                swofty_core::multiplayer::client::load_in_background(&self.store.root, &session.token);
+                if gained {
+                    swofty_core::multiplayer::client::forget_failure();
+                }
+                if session.allowed {
+                    swofty_core::multiplayer::client::load_in_background(&self.store.root, &session.token);
+                }
                 self.mp = Some(session);
                 self.sync_avatar(cx);
                 if gained {

@@ -294,7 +294,7 @@ impl Shell {
             .library
             .addons
             .iter()
-            .filter(|a| a.source != Source::Builtin)
+            .filter(|a| !matches!(a.source, Source::Builtin | Source::Importer))
             .map(|a| &a.manifest);
         self.browser.updates = catalog::updates(installed, &self.browser.addons, &current_version());
     }
@@ -374,6 +374,7 @@ impl Shell {
                             detail,
                             took,
                         );
+                        s.load_media(&a, cx);
                         s.browser.details.insert(id, a);
                     }
                     Err(e) => s.record(
