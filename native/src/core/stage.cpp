@@ -3,8 +3,10 @@
 #include <swofty/mem.hpp>
 #include <swofty/mixin.hpp>
 
+#include "build_logic.hpp"
 #include "game_manager_layout.hpp"
 #include "state_logic.hpp"
+#include "storage_logic.hpp"
 
 #include <mutex>
 
@@ -210,15 +212,20 @@ ImageId image_id()
 
 bool same_build()
 {
-    ImageId id = image_id();
-    return id.stamp == 1789118616u && id.size > 0x6000000;
+    auto [stamp, size] = image_id();
+    return build::kb(stamp, size);
 }
 
 bool verified_build()
 {
     auto [stamp, size] = image_id();
-    return (stamp == 1789118616u && size > 0x6000000) || (stamp == 1789128892u && size == 0x155dc000) ||
-           (stamp == 1794312636u && size == 0x18434000);
+    return build::verified(stamp, size);
+}
+
+bool ported_build()
+{
+    auto [stamp, size] = image_id();
+    return build::ported(stamp, size);
 }
 
 uintptr_t manager_entrants_system()
@@ -269,6 +276,22 @@ std::string read_file(const std::wstring &path, size_t limit)
     }
     CloseHandle(f);
     return out;
+}
+
+uint32_t write_refusal(const std::wstring &dir)
+{
+    const std::wstring &sw = swofty_root();
+    size_t from = dir.size() > sw.size() && _wcsnicmp(dir.c_str(), sw.c_str(), sw.size()) == 0 ? sw.size() : 3;
+    for (size_t i = dir.find_first_of(L"\\/", from); i != std::wstring::npos; i = dir.find_first_of(L"\\/", i + 1))
+        CreateDirectoryW(dir.substr(0, i).c_str(), nullptr);
+    HANDLE h = CreateFileW((dir + wide(storage_logic::PROBE)).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        return e ? e : ERROR_ACCESS_DENIED;
+    }
+    CloseHandle(h);
+    return 0;
 }
 
 const std::wstring &files_root()

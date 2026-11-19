@@ -43,6 +43,12 @@ When a game session ends in a crash, the launcher opens a full-window **F1 25 cr
 
 Under Wine or Proton, the graphics driver, graphics memory and Windows memory checks are skipped.
 
+A session that ended without a crash opens the same screen for a known problem too. Among them:
+
+| Cause | What the launcher looks for |
+|---|---|
+| Your addons' team logos were not built | `team.logo: the game can't create files in swofty/addons/swofty.logos/ (error N)`: F1 25 couldn't write the team logo archives, and the logos and badges addons add were missing. The screen names the folder and the Windows error. `state/wrapper-run.log` gets a `[warning] known problem logos_not_built: ...` line |
+
 A game that stopped itself with exit code `0xc0000409`, `0xc0000602` or `0xc0000417` (a fast-fail) shows as a crash. The screen and the **Crash** section of `summary.txt` say it in one sentence, with the last lines of the session's `loader.log` when no crash report was written:
 
 ```text
@@ -75,7 +81,7 @@ The logs go to the developers' Discord as one zip file, `swofty-logs-<username>-
 | `crash/crash-<time>.txt`, `crash/crash-<time>.dmp` | The newest crash report the game wrote, from the game folder or from `state` in the data folder when the game couldn't write in its folder, and its minidump, when there is one. A report the loader logged but that was never saved is noted in the summary with the path from the log. The minidump is left out, noted in the summary, when it is too big for the zip |
 | `crash/earlier/crash-<time>.txt`, `crash/dumps.txt` | Up to four crash reports before the newest, so a hang that follows an earlier crash still shows both, and a list of every report and minidump found with their sizes. Only the newest minidump is sent |
 | `game/loader.log`, `game/perf.log` | The loader log and the performance report of the game that's running |
-| `state/*.log` | The launcher's own logs, such as `launcher-run.log` and `wrapper-run.log`, `launcher-app.log` with each start of the launcher, whether it ran as administrator, what **Restart as administrator** did, each action in the launcher window that failed with its addon, files and error, and any panic, whether the running launcher can update itself with its path and the reason when it can't, each failed update check, each update installed or failed with its error, and the restart after it, and, for a game started through the EA app, whether the launcher and the EA app run as administrator, the moment the launch link is sent, every `F1_25.exe` or EAAntiCheat process that appears afterwards with how long it lived and its exit code, and what was seen when the wait for the game timed out, and `loader-fallback.log`, the loader's log when the game couldn't write in its folder |
+| `state/*.log` | The launcher's own logs, such as `launcher-run.log` and `wrapper-run.log`, `launcher-app.log` with each start of the launcher, whether it ran as administrator, what **Restart as administrator** did, each action in the launcher window that failed with its addon, files and error, and any panic, whether the running launcher can update itself with its path and the reason when it can't, each failed update check, each update installed or failed with its error, and the restart after it, and, for a game started through the EA app, whether the launcher and the EA app run as administrator, the moment the launch link is sent, every `F1_25.exe` or EAAntiCheat process that appears afterwards with how long it lived and its exit code, and what was seen when the wait for the game timed out, and `loader-fallback.log` and `perf-fallback.log`, the loader's log and the performance report when the game couldn't write in its folder |
 | `ea-app/*.log` | On Windows, the last 256 KB of the four newest logs the EA app wrote in `%LOCALAPPDATA%\Electronic Arts\EA Desktop\Logs` and `%ProgramData%\EA Desktop\Logs` |
 | `windows/application-events.txt` | On Windows, up to 40 entries from the last 24 hours of the Application event log that name `F1_25.exe`, EAAntiCheat or the EA app, such as Application Error and Windows Error Reporting entries |
 | `sessions/<time>/` | The logs and small files of your three latest game sessions, such as `loader.log`, `perf.log`, `env.txt`, `exit_code` and `end.json` |
