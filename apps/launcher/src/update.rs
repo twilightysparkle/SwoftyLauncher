@@ -43,6 +43,7 @@ pub struct Updates {
     pub expected: Option<String>,
     pub held: Option<String>,
     pub followed_up: bool,
+    pub blocked_logged: Option<Version>,
 }
 
 impl Updates {
@@ -75,7 +76,16 @@ impl Updates {
             expected: std::env::var(updater::UPDATED_ENV).ok().filter(|v| !v.is_empty()),
             held: None,
             followed_up: false,
+            blocked_logged: None,
         }
+    }
+
+    /// The updates at the launcher's start, with a line in launcher-app.log on whether this copy can update
+    /// itself.
+    pub fn started() -> Self {
+        let u = Self::new();
+        crate::app_log::scrubbed(&updater::copy_line(&std::env::current_exe(), &u.copy));
+        u
     }
 
     fn launcher_offer(&self) -> Option<&Release> {
@@ -136,6 +146,7 @@ fn log_change(part: Part, before: &Option<String>, after: &Option<String>) {
         && let Some(e) = after
     {
         eprintln!("swofty-launcher: {} update check: {e}", part.name());
+        crate::app_log::note(&format!("update: {} update check: {e}", part.name()));
     }
 }
 
@@ -225,7 +236,17 @@ impl Shell {
             && u.expected.as_deref() == Some(offer.tag_name.as_str())
             && let Some(text) = updater::did_not_take(u.expected.as_deref(), &update::current_version())
         {
+            crate::app_log::note(&format!("update: {text}"));
             u.phase = Phase::Failed(text);
+        }
+        let blocked = u
+            .blocked_notice()
+            .map(|(version, _, reason)| (updater::blocked_line(&version, reason), version));
+        if let Some((line, version)) = blocked
+            && u.blocked_logged.as_ref() != Some(&version)
+        {
+            crate::app_log::scrubbed(&line);
+            u.blocked_logged = Some(version);
         }
         if u.addon_installed.is_none()
             && !u.adding
@@ -266,10 +287,14 @@ impl Shell {
                 match result {
                     Ok(version) => {
                         eprintln!("swofty-launcher: installed {} {version}", managed::ID);
+                        crate::app_log::note(&format!("update: installed {} {version}", managed::ID));
                         s.updates.addon_installed = Some(version);
                         s.reload(cx);
                     }
-                    Err(e) => eprintln!("swofty-launcher: could not install {}: {e}", managed::ID),
+                    Err(e) => {
+                        eprintln!("swofty-launcher: could not install {}: {e}", managed::ID);
+                        crate::app_log::action("update").addon(managed::ID).failed(&e);
+                    }
                 }
             })
             .ok();
@@ -313,7 +338,6 @@ impl Shell {
             let ran = task.await;
             this.update_in(cx, |s, window, cx| {
                 if let Some(e) = s.finish_updates(ran, cx) {
-                    crate::app_log::action("update").failed(&e);
                     window.notify(Notification::error(e).title(tr("Update failed")), cx);
                 }
             })
@@ -353,7 +377,11 @@ impl Shell {
             u.held = Some(tag.to_owned());
         }
         let error = ran.error();
+        if let Some(e) = &error {
+            crate::app_log::action("update").failed(e);
+        }
         if ran.launcher().is_some() || (u.restarts && ran.restart()) {
+            crate::app_log::note(&updater::installed_line(&ran.done));
             u.phase = Phase::Restarting;
             u.restarting = ran.done.clone();
             let launcher = ran.launcher().map(|v| format!("v{v}"));
@@ -414,6 +442,7 @@ impl Shell {
         let mut command = match exe {
             Ok(exe) => std::process::Command::new(exe),
             Err(e) => {
+                crate::app_log::note(&format!("update: could not find the launcher to restart: {e}"));
                 self.updates.phase = Phase::Failed(trf!(
                     "Updated, but could not restart: {e}. Close and reopen the launcher.",
                     e = e
@@ -427,10 +456,16 @@ impl Shell {
             Some(tag) => command.env(updater::UPDATED_ENV, tag),
             None => command.env_remove(updater::UPDATED_ENV),
         };
-        match command.spawn() {
+        let program = Path::new(command.get_program()).to_path_buf();
+        let spawned = command.spawn();
+        crate::app_log::scrubbed(&updater::restart_line(
+            &program,
+            spawned.as_ref().map(std::process::Child::id),
+        ));
+        match spawned {
             Ok(_) => cx.quit(),
             Err(e) => {
-                self.updates.phase = Phase::Failed(match Block::of(Path::new(command.get_program()), &e) {
+                self.updates.phase = Phase::Failed(match Block::of(&program, &e) {
                     Some(b) => trf!("Updated, but could not restart: {e}", e = b.text()),
                     None => trf!(
                         "Updated, but could not restart: {e}. Close and reopen the launcher.",

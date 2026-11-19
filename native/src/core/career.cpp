@@ -163,6 +163,7 @@ void publish(const runtime::career::Edges &e, const SwoftyCareerState &s)
     if (e.hub == 1) {
         perf::mark("career", "hub entered");
         swofty::log("[career] career.hub entered (mode %s)", mode_name(s.mode));
+        runtime::hub_calendar_team_hq();
         fire(SWOFTY_EVENT_CAREER_HUB, 1, s.mode, &s);
     }
 }
@@ -257,6 +258,7 @@ void on_flow(SwoftyContext *c)
     if (perf_on())
         perf_flow(hash, uint32_t(from), to, name);
     runtime::watchdog_flow(hash, to, name.c_str());
+    runtime::hub_calendar_flow(hash, to);
     runtime::load_stall_flow(hash, to, name.c_str());
     runtime::session_job_probe_flow(to, name.c_str());
     runtime::session_host_flow(hash, to);

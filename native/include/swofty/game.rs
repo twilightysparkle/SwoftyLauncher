@@ -248,10 +248,16 @@ const _: () = assert!(core::mem::offset_of!(Action, str) == 0x8);
 
 #[repr(C)]
 pub struct ActivityDef {
-    _pad_0x0: [u8; 0x10],
+    _pad_0x0: [u8; 0x8],
+    pub id: u16,
+    _pad_0xa: [u8; 0x6],
     pub r#type: u8,
+    _pad_0x11: [u8; 0x1],
+    pub duration: u16,
 }
+const _: () = assert!(core::mem::offset_of!(ActivityDef, id) == 0x8);
 const _: () = assert!(core::mem::offset_of!(ActivityDef, r#type) == 0x10);
+const _: () = assert!(core::mem::offset_of!(ActivityDef, duration) == 0x12);
 
 #[repr(C)]
 pub struct AiDriverConfig {
@@ -677,11 +683,13 @@ const _: () = assert!(core::mem::offset_of!(BankTransactionMessage, category) ==
 pub struct CalendarActivity {
     _pad_0x0: [u8; 0xa],
     pub day: u16,
-    _pad_0xc: [u8; 0x4],
+    pub state: u8,
+    _pad_0xd: [u8; 0x3],
     pub activity: *mut ActivityDef,
     _pad_0x18: [u8; 0x8],
 }
 const _: () = assert!(core::mem::offset_of!(CalendarActivity, day) == 0xa);
+const _: () = assert!(core::mem::offset_of!(CalendarActivity, state) == 0xc);
 const _: () = assert!(core::mem::offset_of!(CalendarActivity, activity) == 0x10);
 const _: () = assert!(core::mem::size_of::<CalendarActivity>() == 0x20);
 
@@ -2666,9 +2674,14 @@ pub struct ScheduleComponent {
     _pad_0x0: [u8; 0x410],
     pub seasons_begin: *mut ScheduleSeason,
     pub seasons_end: *mut ScheduleSeason,
+    _pad_0x420: [u8; 0x8],
+    pub current_season: u32,
+    pub season_over: u8,
 }
 const _: () = assert!(core::mem::offset_of!(ScheduleComponent, seasons_begin) == 0x410);
 const _: () = assert!(core::mem::offset_of!(ScheduleComponent, seasons_end) == 0x418);
+const _: () = assert!(core::mem::offset_of!(ScheduleComponent, current_season) == 0x428);
+const _: () = assert!(core::mem::offset_of!(ScheduleComponent, season_over) == 0x42c);
 
 #[repr(C)]
 pub struct ScheduleSeason {
@@ -3755,6 +3768,7 @@ pub type Car_Create_DetachablePart_t = unsafe extern "C" fn(
 ) -> *mut c_void;
 pub type Car_DetachablePart_Update_t = unsafe extern "C" fn(part: *mut c_void, dt: f32) -> bool;
 pub type Car_FrontWing_Init_t = unsafe extern "C" fn(front_wing: *mut c_void, reset: c_char);
+pub type Car_GearBox_UpdateShiftTimersAndFaults_t = unsafe extern "C" fn(gearbox: *mut c_void, dt: f32);
 pub type Car_PitStop_ApplyTyreAndWingVisuals_t =
     unsafe extern "C" fn(car_visual: *mut c_void, a2: f32, a3: bool);
 pub type Car_Register_DetachablePart_Thunk_t = unsafe extern "C" fn(
@@ -5447,6 +5461,11 @@ pub mod bindings {
     };
     pub const Car_FuelEcu_SetMode_Thunk: Binding = Binding {
         id: "Car_FuelEcu_SetMode_Thunk",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Car_GearBox_UpdateShiftTimersAndFaults: Binding = Binding {
+        id: "Car_GearBox_UpdateShiftTimersAndFaults",
         kind: "func",
         status: Status::Experimental,
     };
@@ -10530,6 +10549,11 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Game_GameInputModule_ApplyRebindableGameplayActionsToActionMap: Binding = Binding {
+        id: "Game_GameInputModule_ApplyRebindableGameplayActionsToActionMap",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Game_GameModes_BuildMode: Binding = Binding {
         id: "Game_GameModes_BuildMode",
         kind: "func",
@@ -11742,11 +11766,6 @@ pub mod bindings {
     };
     pub const Game_PitLane_VehicleExiting: Binding = Binding {
         id: "Game_PitLane_VehicleExiting",
-        kind: "func",
-        status: Status::Experimental,
-    };
-    pub const Game_PitStopActionObserver_SetTransitionSequence: Binding = Binding {
-        id: "Game_PitStopActionObserver_SetTransitionSequence",
         kind: "func",
         status: Status::Experimental,
     };
@@ -21223,6 +21242,11 @@ pub mod bindings {
     pub const site_Car_EngineDriveTorque: Binding = Binding {
         id: "site_Car_EngineDriveTorque",
         kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Car_EngineStepInput_UpdateWearCall: Binding = Binding {
+        id: "site_Car_EngineStepInput_UpdateWearCall",
+        kind: "call",
         status: Status::Experimental,
     };
     pub const site_Car_ErsGearModifierLoad: Binding = Binding {

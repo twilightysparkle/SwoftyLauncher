@@ -66,6 +66,7 @@ t "Post-process pass logic unit test" native/test/run_postfx_test.sh
 t "Shader rules engine unit test" native/test/run_rules_test.sh
 t "Live car signal mapping unit test" native/test/run_live_car_test.sh
 t "Live state memory reads, derivations and telemetry fill" native/test/run_live_test.sh
+t "Live tyre image catalogues, mod routes and archive worker" native/test/run_tyre_images_test.sh
 t "ERS new-lap site unit test" native/test/run_ers_newlap_test.sh
 t "Round track record guard unit test" native/test/run_track_record_test.sh
 t "Team HQ track guard unit test" native/test/run_teamhq_track_test.sh
@@ -117,6 +118,7 @@ t "Grand Prix remembered-track fallback unit test" native/test/run_gp_track_test
 t "Weekend track guard unit test" native/test/run_gp_weekend_track_test.sh
 t "Session enter guard unit test" native/test/run_session_enter_test.sh
 t "AI line set guard unit test" native/test/run_ai_line_set_test.sh
+t "Career hub calendar diagnostic unit test" native/test/run_hub_calendar_test.sh
 t "Audio job queue fix unit test" native/test/run_audio_queue_test.sh
 t "Shader resource view clamp unit test" native/test/run_srv_clamp_test.sh
 t "Ray tracing build guard unit test" native/test/run_rtas_guard_test.sh

@@ -4,19 +4,27 @@
 namespace swofty::game {
 
 struct ActivityDef {
-    uint8_t _pad_0x0[0x10];
+    uint8_t _pad_0x0[0x8];
+    uint16_t id; // L2 experimental
+    uint8_t _pad_0xa[0x6];
     uint8_t type; // L2 experimental
+    uint8_t _pad_0x11[0x1];
+    uint16_t duration; // L2 experimental
 };
+static_assert(offsetof(ActivityDef, id) == 0x8);
 static_assert(offsetof(ActivityDef, type) == 0x10);
+static_assert(offsetof(ActivityDef, duration) == 0x12);
 
 struct CalendarActivity {
     uint8_t _pad_0x0[0xa];
     uint16_t day; // L2 experimental
-    uint8_t _pad_0xc[0x4];
+    uint8_t state; // L2 experimental
+    uint8_t _pad_0xd[0x3];
     ActivityDef *activity; // L2 experimental
     uint8_t _pad_0x18[0x8];
 };
 static_assert(offsetof(CalendarActivity, day) == 0xa);
+static_assert(offsetof(CalendarActivity, state) == 0xc);
 static_assert(offsetof(CalendarActivity, activity) == 0x10);
 static_assert(sizeof(CalendarActivity) == 0x20);
 
@@ -127,9 +135,14 @@ struct ScheduleComponent {
     uint8_t _pad_0x0[0x410];
     ScheduleSeason *seasons_begin; // L2 experimental
     ScheduleSeason *seasons_end; // L2 experimental
+    uint8_t _pad_0x420[0x8];
+    uint32_t current_season; // L2 experimental
+    uint8_t season_over; // L2 experimental
 };
 static_assert(offsetof(ScheduleComponent, seasons_begin) == 0x410);
 static_assert(offsetof(ScheduleComponent, seasons_end) == 0x418);
+static_assert(offsetof(ScheduleComponent, current_season) == 0x428);
+static_assert(offsetof(ScheduleComponent, season_over) == 0x42c);
 
 struct ScheduleSeason {
     uint8_t _pad_0x0[0x40];
@@ -733,6 +746,7 @@ inline constexpr address<"Game_FuelDynamicObjective_Activate"> Game_FuelDynamicO
 inline constexpr address<"Game_FuelDynamicObjective_Activate_2"> Game_FuelDynamicObjective_Activate_2{}; // L2 experimental
 using Game_FullRaceReplaySystem_Init_t = int(void *self, void *serviceProvider, void *componentMap);
 inline constexpr fn<"Game_FullRaceReplaySystem_Init", Game_FullRaceReplaySystem_Init_t> Game_FullRaceReplaySystem_Init{}; // L2 experimental
+inline constexpr address<"Game_GameInputModule_ApplyRebindableGameplayActionsToActionMap"> Game_GameInputModule_ApplyRebindableGameplayActionsToActionMap{}; // L2 experimental, GameInputModule::applyRebindableGameplayActionsToActionMap
 inline constexpr address<"Game_GameModes_BuildMode"> Game_GameModes_BuildMode{}; // L2 experimental
 inline constexpr address<"Game_GameReplaySystem_SubscribeRewindTutorial"> Game_GameReplaySystem_SubscribeRewindTutorial{}; // L2 experimental
 inline constexpr address<"Game_GameSessionConfig_Destroy"> Game_GameSessionConfig_Destroy{}; // L2 experimental
@@ -1002,7 +1016,6 @@ inline constexpr address<"Game_PitLane_SetDoPracticePitStop_2"> Game_PitLane_Set
 inline constexpr address<"Game_PitLane_VehicleEntering"> Game_PitLane_VehicleEntering{}; // L2 experimental
 inline constexpr address<"Game_PitLane_VehicleEnteringInternal"> Game_PitLane_VehicleEnteringInternal{}; // L2 experimental
 inline constexpr address<"Game_PitLane_VehicleExiting"> Game_PitLane_VehicleExiting{}; // L2 experimental
-inline constexpr address<"Game_PitStopActionObserver_SetTransitionSequence"> Game_PitStopActionObserver_SetTransitionSequence{}; // L2 experimental, PitStopActionObserver::setTransitionSequence
 inline constexpr address<"Game_PitStopInstance_PlaySequence"> Game_PitStopInstance_PlaySequence{}; // L2 experimental, PitStopInstance::playSequence
 inline constexpr address<"Game_PitStopLogic_ChangeState"> Game_PitStopLogic_ChangeState{}; // L2 experimental
 inline constexpr address<"Game_PitStopLogic_NeSequenceClipTargetImpl"> Game_PitStopLogic_NeSequenceClipTargetImpl{}; // L2 experimental, PitStopLogic::NeSequenceClipTargetImpl
