@@ -417,8 +417,11 @@ using Sess_Get_CurrentContentSetName_t = NeInlineStr128 *(NeInlineStr128 *out);
 inline constexpr fn<"Sess_Get_CurrentContentSetName", Sess_Get_CurrentContentSetName_t> Sess_Get_CurrentContentSetName{}; // L2 experimental
 using Sess_Get_PlayerVehicleIndex_t = uint8_t(void *ctx, int local_player);
 inline constexpr fn<"Sess_Get_PlayerVehicleIndex", Sess_Get_PlayerVehicleIndex_t> Sess_Get_PlayerVehicleIndex{}; // L2 experimental
+using Sess_Get_VehicleTrackFactor_t = float(void *system, uint8_t vehicle);
+inline constexpr fn<"Sess_Get_VehicleTrackFactor", Sess_Get_VehicleTrackFactor_t> Sess_Get_VehicleTrackFactor{}; // L2 experimental
 using Sess_GridRundown_Update_t = uint32_t *(void *state, uint32_t *route, double dt);
 inline constexpr fn<"Sess_GridRundown_Update", Sess_GridRundown_Update_t> Sess_GridRundown_Update{}; // L2 experimental
+inline constexpr address<"Sess_HumanController_Update"> Sess_HumanController_Update{}; // L2 experimental
 using Sess_InGamePQ_Update_t = uint32_t *(void *state, uint32_t *route, double dt);
 inline constexpr fn<"Sess_InGamePQ_Update", Sess_InGamePQ_Update_t> Sess_InGamePQ_Update{}; // L2 experimental
 inline constexpr address<"Sess_InGameRace_OnStateExit"> Sess_InGameRace_OnStateExit{}; // L2 experimental
@@ -428,6 +431,8 @@ inline constexpr address<"Sess_InGame_SubscribeMessages"> Sess_InGame_SubscribeM
 inline constexpr address<"Sess_InGame_UnsubscribeMessages"> Sess_InGame_UnsubscribeMessages{}; // L2 experimental
 using Sess_InGame_UpdateBase_t = uint32_t *(void *state, uint32_t *route, double dt);
 inline constexpr fn<"Sess_InGame_UpdateBase", Sess_InGame_UpdateBase_t> Sess_InGame_UpdateBase{}; // L2 experimental
+using Sess_Init_TyreComponentSet_t = uint64_t(void *module, void *tyres);
+inline constexpr fn<"Sess_Init_TyreComponentSet", Sess_Init_TyreComponentSet_t> Sess_Init_TyreComponentSet{}; // L2 experimental
 inline constexpr address<"Sess_IntroVideo_CanFinish"> Sess_IntroVideo_CanFinish{}; // L2 experimental
 inline constexpr address<"Sess_IntroVideo_OnStateEnter"> Sess_IntroVideo_OnStateEnter{}; // L2 experimental
 inline constexpr address<"Sess_IntroVideo_OnVideoDoneFadeIn"> Sess_IntroVideo_OnVideoDoneFadeIn{}; // L2 experimental
@@ -770,9 +775,13 @@ using Sess_TyreClass_FromName_t = void *(void *classes, const void *name, uint8_
 inline constexpr fn<"Sess_TyreClass_FromName", Sess_TyreClass_FromName_t> Sess_TyreClass_FromName{}; // L2 experimental
 inline constexpr address<"Sess_TyreCompoundClasses_SortEntries"> Sess_TyreCompoundClasses_SortEntries{}; // L2 experimental
 inline constexpr address<"Sess_TyreCompoundClasses_SortEntriesB"> Sess_TyreCompoundClasses_SortEntriesB{}; // L2 experimental
+using Sess_Tyre_ShowFittedSet_t = void(void *tyre_component, uint8_t apply_set, uint8_t show, uint8_t with_wing, uint16_t force);
+inline constexpr fn<"Sess_Tyre_ShowFittedSet", Sess_Tyre_ShowFittedSet_t> Sess_Tyre_ShowFittedSet{}; // L2 experimental
 using Sess_Tyres_ClosestAvailableCompound_t = uint32_t(void *tyre_rules, uint8_t vehicle, const uint32_t *preference, float wear_scale);
 inline constexpr fn<"Sess_Tyres_ClosestAvailableCompound", Sess_Tyres_ClosestAvailableCompound_t> Sess_Tyres_ClosestAvailableCompound{}; // L2 experimental
 inline constexpr address<"Sess_Veh_UpdateWheelMap"> Sess_Veh_UpdateWheelMap{}; // L2 experimental
+inline constexpr address<"Sess_VehiclePlacementRequest_ParseGroupAndId"> Sess_VehiclePlacementRequest_ParseGroupAndId{}; // L2 experimental
+inline constexpr address<"Sess_VehiclePlacementRequest_Register"> Sess_VehiclePlacementRequest_Register{}; // L2 experimental
 inline constexpr address<"Sess_VehiclePlacement_BroadcastGrid"> Sess_VehiclePlacement_BroadcastGrid{}; // L2 experimental
 inline constexpr address<"Sess_VehiclePlacement_FormatFlags"> Sess_VehiclePlacement_FormatFlags{}; // L2 experimental
 inline constexpr address<"Sess_VehiclePlacement_HandleGridRequest"> Sess_VehiclePlacement_HandleGridRequest{}; // L2 experimental

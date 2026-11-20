@@ -166,6 +166,11 @@ export default defineConfigWithTheme<DocsThemeConfig>({
           {
             text: "Releases",
             items: [
+              { text: "1.10.0", link: "/releases/1.10.0" },
+              { text: "1.9.91", link: "/releases/1.9.91" },
+              { text: "1.9.90", link: "/releases/1.9.90" },
+              { text: "1.9.89", link: "/releases/1.9.89" },
+              { text: "1.9.88", link: "/releases/1.9.88" },
               { text: "1.9.87", link: "/releases/1.9.87" },
               { text: "1.9.86", link: "/releases/1.9.86" },
               { text: "1.9.85", link: "/releases/1.9.85" },
@@ -672,6 +677,7 @@ export default defineConfigWithTheme<DocsThemeConfig>({
                 icon: "file",
                 items: [
                   { text: "The mixin system", link: "/reference/addons/hooking", icon: "file" },
+                  { text: "Adding a binding", link: "/reference/addons/bindings", icon: "file" },
                   { text: "Addon settings", link: "/reference/addons/settings", icon: "file" },
                   { text: "In-game UI", link: "/reference/addons/in-game-ui", icon: "file" },
                   { text: "Post-process passes", link: "/reference/addons/postfx", icon: "file" },
@@ -687,6 +693,11 @@ export default defineConfigWithTheme<DocsThemeConfig>({
                       { text: "Overlay", link: "/reference/std/overlay", icon: "file" },
                       { text: "Telemetry", link: "/reference/std/telemetry", icon: "file" },
                       { text: "Live state", link: "/reference/std/live", icon: "file" },
+                      { text: "Pit lane", link: "/reference/std/pitlane", icon: "file" },
+                      { text: "Tyre damage", link: "/reference/std/tyre-damage", icon: "file" },
+                      { text: "Race control", link: "/reference/std/race-control", icon: "file" },
+                      { text: "Weather setup", link: "/reference/std/weather", icon: "file" },
+                      { text: "Standings", link: "/reference/std/standings", icon: "file" },
                       { text: "Database", link: "/reference/std/db", icon: "file" },
                       { text: "Storage", link: "/reference/std/storage", icon: "file" },
                       { text: "Career", link: "/reference/std/career", icon: "file" },

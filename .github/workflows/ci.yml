@@ -20,20 +20,34 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
-      rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
-      swofty-ui: ${{ github.event_name != 'pull_request' || steps.filter.outputs.swofty-ui == 'true' }}
-      docs: ${{ github.event_name != 'pull_request' || steps.filter.outputs.docs == 'true' }}
-      std: ${{ github.event_name != 'pull_request' || steps.filter.outputs.std == 'true' }}
-      compat: ${{ github.event_name != 'pull_request' || steps.filter.outputs.compat == 'true' }}
+      rust: ${{ steps.scope.outputs.all == 'true' || steps.filter.outputs.rust == 'true' }}
+      swofty-ui: ${{ steps.scope.outputs.all == 'true' || steps.filter.outputs.swofty-ui == 'true' }}
+      docs: ${{ steps.scope.outputs.all == 'true' || steps.filter.outputs.docs == 'true' }}
+      std: ${{ steps.scope.outputs.all == 'true' || steps.filter.outputs.std == 'true' }}
+      compat: ${{ steps.scope.outputs.all == 'true' || steps.filter.outputs.compat == 'true' }}
     steps:
+      # GitHub lists at most 3,000 of a pull request's files, in path order, so the filter would miss every area
+      # whose files come after the first 3,000 (a bulk change to re/bindings hides templates/ and tools/). A pull
+      # request that large runs every job, as a push does.
+      - name: Every area or the filter
+        id: scope
+        env:
+          FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ] || [ "$FILES" -ge 3000 ]; then
+            echo "all=true" >> "$GITHUB_OUTPUT"
+            echo "every job runs ($GITHUB_EVENT_NAME, ${FILES:-0} changed files)"
+          fi
+
       - id: filter
-        if: github.event_name == 'pull_request'
+        if: steps.scope.outputs.all != 'true'
         uses: dorny/paths-filter@v4
         with:
           filters: |
-            # Every area: this workflow, and the line-ending rules every checkout applies.
+            # Every area: this workflow, the actions it shares, and the line-ending rules every checkout applies.
             always: &always
               - .github/workflows/ci.yml
+              - .github/actions/**
               - .gitattributes
             # Every crate, plus the files outside them that the crates embed or their tests read.
             rust:
@@ -43,6 +57,7 @@ jobs:
               - Cargo.lock
               - rust-toolchain.toml
               - rustfmt.toml
+              - .config/nextest.toml
               - apps/**
               - packages/**
               - installer/**
@@ -50,7 +65,7 @@ jobs:
               - addons/builtins/**
               - tools/native-charts/**
               - addons/swoftymod/**
-              - re/db/functions.tsv
+              - re/db/function_names.tsv
               - tools/gamedb/catalog/**
             # build.py puts tools/ on the module path; the app imports erp, pkg and idf from there.
             swofty-ui:
@@ -75,11 +90,30 @@ jobs:
               - *always
               - tools/compat/**
 
-  rust:
-    name: Rust (${{ matrix.os }})
+  # The first answer on a change: formatting needs only the toolchain, so it reports within a minute.
+  format:
+    name: Rust format
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+
+      - run: cargo fmt --all --check
+
+  # Clippy runs beside the tests rather than before them, on hosted runners even for main and without a Rust
+  # cache: it is never the longest job (four to five minutes from cold).
+  clippy:
+    name: Clippy (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -87,37 +121,75 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Installs the toolchain rust-toolchain.toml pins, with rustfmt and clippy.
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          cache: false
-
-      # Only main saves, so pull requests restore main's caches instead of evicting them with their own.
-      # The environment hash would fold in every installed rustc, and runner images differ in the stable
-      # one they preinstall; the key keeps the lockfile and rust-toolchain.toml hash, which is what matters.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          add-rust-environment-hash-key: false
-          shared-key: workspace-debug
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Format
-        run: cargo fmt --all --check
+      - uses: ./.github/actions/setup-rust
 
       # The launcher and the installer are not default members; --workspace reaches them too.
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # --workspace takes in the launcher's and the installer's tests too. The real-file round trips skip
-      # without F1_25_DIR; CI has no game files. --no-fail-fast reports every failing test binary in one run.
+
+  rust:
+    name: Rust tests (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # The tests write their fixtures to the temporary folder. On Windows that is on C:, which is several
+      # times slower than the D: volume the job works on.
+      - name: Temporary folder on the work volume
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: test
+          save: true
+          nextest: true
+
+      # --workspace takes in the launcher's and the installer's tests too. Building as a step of its own shows
+      # the compile and the run apart in the timings.
+      - name: Build the tests
+        run: cargo nextest run --workspace --profile ci --no-run
+
+      # rust-cache saves at the end of a job that succeeded, or of any job once CACHE_ON_FAILURE is true. Set
+      # here, a failing or cancelled test run still saves the finished build; a build that failed or was
+      # cancelled halfway saves nothing, which would otherwise sit under the exact key and never be completed.
+      - name: Keep the build if the tests fail
+        shell: bash
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
+
+      # Every test of every binary in one pool (.config/nextest.toml), with the slow ones listed at the end.
+      # The real-file round trips skip without F1_25_DIR; CI has no game files.
       - name: Test
-        run: cargo test --workspace --no-fail-fast
+        run: cargo nextest run --workspace --profile ci
+
+      - name: Upload the test times
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-junit-${{ runner.os }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Doc tests
+        run: cargo test --workspace --doc
 
       - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
 
       - name: Native chart helper protocol
+        shell: bash
         run: |
           cargo build -p swofty-addon --example native_charts
           python tools/native-charts/protocol-smoke.py target/debug/examples/native_charts
@@ -212,7 +284,7 @@ jobs:
       - name: Registry examples and must-fail cases
         run: python3 tools/std/validate.py
 
-      # This checks their registry data files against the schemas.
+      # This checks the templates' registry data files against the schemas.
       - name: Template data files
         run: python3 tools/std/templates.py --no-build
 
@@ -224,3 +296,4 @@ jobs:
     with:
       ref: ${{ github.sha }}
       retention-days: 7
+

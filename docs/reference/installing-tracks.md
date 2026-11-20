@@ -32,7 +32,7 @@ runtime: swofty/assets.json with 77 asset group(s), 0 resource(s), 0 database ed
 - Both `swofty build` and `swofty apply` activate every `track.add`, in load order, before the other database ops. Those ops can't remove the records activation adds; see [Removing stock records](/reference/ops/database#removing-stock-records).
 - Two `track.add` ops with one track code fail the build and name both addons: `track okayama is added by both mod.okayama and mod.okayama-night; turn one of them off on the Addons page`.
 - Mods in the importer's library that haven't converted yet get a `track.add` from the importer's build hook instead, with the source `library/<id>/track` in Team Simplified's `addon-data` folder.
-- The code is in `packages/core/src/activation/`.
+- The code is in `packages/core/src/games/f1_25/activation/`.
 
 For playing with tracks, see [Simplified Importer](/using/mods#tracks).
 
@@ -59,6 +59,8 @@ warning: Mugello (mod.mugello): track Mugello is left out; the game has room for
 Tracks from track records take their places first: the core adds their rows in game.
 
 Play shows the same count and the first four names as a warning titled **Too many tracks**, and the Addons page marks each addon that loses a track with **Left out: the game holds 64 tracks**. The check runs when Play is pressed, so the marker follows the last Play.
+
+The check fits the tracks of the on addons' op files and track records the way a build fits them, without building the profile or starting any addon's program. A track that an addon's program adds while the profile builds counts in the build's notice only.
 
 A change from any addon to a row of a left-out track is skipped, and the rest of the profile still loads:
 
