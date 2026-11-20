@@ -145,6 +145,12 @@ inline std::string refuse_text(const Entry &e)
            "). Turn on the add-on it was made with to load it.";
 }
 
+inline std::string failed_text()
+{
+    return "The list could not open this career. Pick it on this screen, then press Send Logs in the launcher so it can be "
+           "fixed.";
+}
+
 inline bool setup_after_press(std::string_view flow, uint64_t press_at, uint64_t now)
 {
     return flow == SETUP_FLOW && press_at != 0 && now - press_at <= SETUP_DIAG_MS;
