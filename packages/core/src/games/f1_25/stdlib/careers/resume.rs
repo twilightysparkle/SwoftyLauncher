@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::rows::{PLACEHOLDER_IDS, SAVE_IDS};
-use super::{Career, OWN_WHY, is_guess};
+use super::{Career, OWN_WHY, is_guess, same_or_patch};
 use crate::manifest::AddonManifest;
 use crate::stdlib::range::Range;
 
@@ -44,6 +44,20 @@ impl RowSet {
         }
     }
 
+    /// Adds rows the database file lacks but the game holds once it has loaded, by table (`entrants.teams.team`,
+    /// `entrants.vehicles.vehicle`, `entrants.drivers.driver`): the rows the core adds from registry records.
+    pub fn add(&mut self, added: &BTreeMap<String, BTreeSet<i64>>) {
+        for (table, ids) in added {
+            let rows = match SAVE_IDS.iter().find(|(_, t)| t == table).map(|(field, _)| *field) {
+                Some("team_raw") => &mut self.teams,
+                Some("vehicle_raw") => &mut self.vehicles,
+                Some(_) => &mut self.drivers,
+                None => continue,
+            };
+            rows.extend(ids);
+        }
+    }
+
     /// The id a save's `id` of `field` (`team_raw`, `vehicle_raw`, `driver_raw`) names in the build: itself
     /// when a row has it, else the id its alias gives when a row has that. `None` when no row does.
     pub fn resolve(&self, field: &str, id: i64) -> Option<i64> {
@@ -67,8 +81,8 @@ pub struct MissingRows {
 impl MissingRows {
     pub fn text(&self) -> String {
         match self.addon.is_empty() {
-            false => format!("Missing rows from {}", self.addon),
-            true => format!("Missing rows: {}", self.tables.join(", ")),
+            false => format!("Mismatched rows from {}", self.addon),
+            true => format!("Mismatched rows: {}", self.tables.join(", ")),
         }
     }
 }
@@ -228,14 +242,15 @@ fn at_version(a: &super::CareerAddon, installed: &AddonManifest) -> bool {
         None => a
             .version
             .as_deref()
-            .is_none_or(|made_with| made_with == installed.version.to_string()),
+            .is_none_or(|made_with| same_or_patch(made_with, &installed.version)),
     }
 }
 
 /// One entry per career the save slots back, keyed by the save slot key the core sees; the addons are the
-/// ones the career needs, each with whether profile `order` has it on and at the version the career was
-/// made with. An addon recorded only because it was on is not a need. With `rows`, the database the career
-/// would load into, a career whose team, car or driver row it lacks says so in `missing_rows`.
+/// ones the career needs, each with whether profile `order` has it on and at a version the career loads with:
+/// in the recorded range, else the version the career was made with or a patch update of it. An addon recorded
+/// only because it was on is not a need. With `rows`, the database the career would load into, a career whose
+/// team, car or driver row it lacks says so in `missing_rows`.
 pub fn resume_needs(
     list: &[Career],
     order: &[String],

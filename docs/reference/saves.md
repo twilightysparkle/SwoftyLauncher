@@ -126,13 +126,40 @@ The session sets `SWOFTY_LAUNCHER_SAVES=off` for the game. To stay on Steam's sa
 
 ### The EA app copy
 
-The EA app copy's save device reads and writes plain files under `<title folder>\<save>\<file>`. With **Use launcher saves** on, the core points that device at `$DATA/saves/<profile>/ea`, so the profile save is `$DATA/saves/<profile>/ea/profile/`, and the copy's own `%LOCALAPPDATA%\F1 25\savegame\ea` folder is not opened. The first session copies the copy's profile save into an empty store. The career list reads its careers from `$DATA/saves/<profile>/ea/profile/NXDSMWW.BWW` on the EA app copy and from `$DATA/saves/<profile>/remote/` on Steam, while the profile's plain store has no generation.
+The EA app copy's save device reads and writes plain files under `<title folder>\<save>\<file>`. With **Use launcher saves** on, the core points that device at `$DATA/saves/<profile>/ea`, so the profile save is `$DATA/saves/<profile>/ea/profile/`, and the copy's own `%LOCALAPPDATA%\F1 25\savegame\ea` folder is not opened. The first session copies the copy's profile save into an empty store.
 
 ```text
+[saves] launcher saves are on for profile main: the game's profile save is served from Z:\...\saves\main\ea\profile
 [saves] launcher saves armed (profile main): the EA save device's title folder C:\users\steamuser\AppData\Local\F1 25\savegame\ea is replaced by Z:\...\saves\main\ea; saves are read and written there; the EA copy's own savegame folder is not opened
 ```
 
 If the save device is not the expected one, the session ends with exit code 93 before the game loads a save, as on Steam.
+
+### The save the career list reads
+
+The in-game career list (**Career** on the main menu) is built at **Play** from the profile save file the session loads:
+
+| Session | Save file the list reads |
+|---|---|
+| **Use launcher saves** on, Steam copy | `$DATA/saves/<profile>/remote/savegame@profile#NXDSMWW.BWW` |
+| **Use launcher saves** on, EA app copy | `$DATA/saves/<profile>/ea/profile/NXDSMWW.BWW` |
+| **Use launcher saves** on, store empty | the copy's own save, as with **Use launcher saves** off |
+| **Use launcher saves** off, Steam copy | `userdata/<id3>/3059520/remote/savegame@profile#NXDSMWW.BWW` |
+| **Use launcher saves** off, EA app copy | `%LOCALAPPDATA%\F1 25\savegame\ea\profile\NXDSMWW.BWW` |
+
+The session's plain store (the `plain_saves` root in `settings.json`) adds what the core changes at load:
+
+- A career mode the save file has no slot container of is listed from the newest generation a session wrote at a profile save, the one the core puts containers back from.
+- A mode a pending restore request names is listed from the request's generation when the request replaces the mode or the save file lacks it.
+- With no readable save file, the list shows the careers of the plain store's newest generation.
+
+The build hash takes in the careers the list shows and the names of the drivers and teams the player made. A vault restore, a session, or a save written outside a launcher session changes the list at the next **Play**. The build log names the source:
+
+```text
+ui: the Resume Career list screen has 4 career(s); 0 need something this build lacks
+ui: the Resume Career list reads C:\Users\you\AppData\Local\F1 25\savegame\ea\profile\NXDSMWW.BWW
+ui: the Resume Career list reads /home/you/.local/share/swofty/saves/default/remote/savegame@profile#NXDSMWW.BWW; driver_career_progressive from generation 41 of /home/you/.local/share/swofty/saves/default/plain
+```
 
 ## Native plain store
 
@@ -146,9 +173,9 @@ Without the key the core writes and injects nothing. A key with another `schema`
 
 The core writes a generation after each finished profile load (`event: "load"`, the tree after any injection) and after each finished profile save (`event: "save"`) on a worker thread, so a save never waits for it. A generation is `generations/<12 digits>/manifest.json` and `containers/<fnv64>.bag`, then `CURRENT`. Every file is written to a temporary name, flushed to disk, renamed, and its folder is flushed. `CURRENT` moves last. A generation number is above `CURRENT` and above every folder on disk, so a number is never reused. The core never deletes a generation.
 
-A `.bag` is one root container as `Game_SaveData_WriteBag` emits it. The load generation holds every root child the game matched to a mode (`source: "game"`, `registered: true`) and every container the splice kept (`source: "kept"`). The save generation holds the kept containers as written and the registered containers as the game wrote them: from the end of the kept entries to the end of the containers block the core copies the bytes the save writes into the stream, splits them by the bag format and keeps them only when exactly the registered children come out whole. When that fails the generation holds the registered containers' load-time bytes marked `"as_of": "load"` and the core logs why. Every manifest container has `pair`: the mode name for `gm_<mode>` and `<mode>_SaveSlotGameModeComponent`, null for any other. A container put back this session has `source: "injected"` in the load generation. `slots` come from the slot managers the career list reads; the guid is `0x` and 16 hex digits. `loaded_addons` are the enabled ids in the settings.json `addons` list.
+A `.bag` is one root container as `Game_SaveData_WriteBag` emits it. The load generation holds every root child the game matched to a mode (`source: "game"`, `registered: true`) and every container the splice kept (`source: "kept"`). The save generation holds the kept containers as written and the registered containers as the game wrote them: from the end of the kept entries to the end of the containers block the core copies the bytes the save writes into the stream, splits them by the bag format and keeps them only when exactly the registered children come out whole. When that fails the generation holds the registered containers' load-time bytes marked `"as_of": "load"` and the core logs why. Every manifest container has `pair`: the mode name for `gm_<mode>` and `<mode>_SaveSlotGameModeComponent`, null for any other. A container put back this session has `source: "injected"` in the load generation. `slots` come from the game's slot managers at load; the guid is `0x` and 16 hex digits. `loaded_addons` are the enabled ids in the settings.json `addons` list.
 
-At load the core takes the newest `event: "save"` generation written by a session that had the core and brings back each container the loaded tree lacks. A container whose mode is not registered joins the splice's kept set, so the next profile save writes it back. A container whose mode is registered goes into the game's own bag through the game's bag reader before the mode reads it: when the file has the container with no careers, the mode reads it again from our bytes; when the file lacks it, the root's registered child reads a bag made from them. The two halves of a mode's pair (`gm_<mode>` and `<mode>_SaveSlotGameModeComponent`) come back or are replaced together from one generation, never one half from another generation; an absent half joins a present one only when the present half has the same SHA-256 as in the generation, otherwise the core logs `did not put back <name>: <why>`. The game's own container with careers is never replaced, and a container the newest save generation lacks is not restored from an older one, so a deletion stays.
+At load the core takes the newest `event: "save"` generation written by a session that had the core and brings back each container the loaded tree lacks. A container whose mode is not registered joins the splice's kept set, so the next profile save writes it back. A container whose mode is registered and that the file lacks is read by the root's registered child from a bag made from our bytes after the root has loaded. A mode reads its container once: its tables keep what a read put in them, so a second read appends to them and runs past their end. The core never reads a container the game has read again, so a container the file holds with no careers stays as the game read it and the core logs `did not put back <mode>: the loaded save holds it without careers ...`; a **Restore** of that mode puts it back at the next Play. The two halves of a mode's pair (`gm_<mode>` and `<mode>_SaveSlotGameModeComponent`) come back or are replaced together from one generation, never one half from another generation; an absent half joins a present one only when the present half has the same SHA-256 as in the generation, otherwise the core logs `did not put back <name>: <why>`. The game's own container with careers is never replaced, and a container the newest save generation lacks is not restored from an older one, so a deletion stays.
 
 ```text
 [saves] put back driver_career_progressive: 2 career(s) from generation 41
@@ -161,7 +188,9 @@ At load the core takes the newest `event: "save"` generation written by a sessio
 
 A container is checked against the size and SHA-256 in its manifest before it is injected.
 
-`inject.json` asks for a restore at the next load: `{"schema":1,"requests":[{"id":"r1","generation":37,"container":"<name>","replace":true}]}`. The core adds an absent container from that generation and, when `replace` is true, replaces a kept or registered container. It writes `injected.json` (`{"schema":1,"results":[{"id":"r1","ok":true,"detail":"..."}]}`) before it deletes `inject.json`. Each request logs `[saves] inject request <id>: <detail>` or `[saves] inject request <id> refused: <why>`.
+`inject.json` asks for a restore at the next load: `{"schema":1,"requests":[{"id":"r1","generation":37,"container":"<name>","replace":true}]}`. The core adds an absent container from that generation and, when `replace` is true, replaces a kept or registered container. A registered container is replaced as the root's loop reaches it: the mode reads a bag made from our bytes in place of the one from the file, so it reads its container once. The first half of a mode the loop reaches has every half of the request's generation read into a bag first, so both halves are replaced or neither; a half the file lacks is read by its registered child after the root load. Each replaced half logs `[saves] <name>: the game reads generation <n>'s copy in place of the loaded one`.
+
+The load takes the requests by renaming `inject.json` to `inject.applying.json` before it applies any of them. It writes `injected.json` (`{"schema":1,"results":[{"id":"r1","ok":true,"detail":"..."}]}`) and then deletes `inject.applying.json`; an `inject.json` the launcher wrote while the game ran stays for the next load. Each request logs `[saves] inject request <id>: <detail>` or `[saves] inject request <id> refused: <why>`. A load that stops before it answers (the game closes or crashes while it applies them) leaves `inject.applying.json`, which no later load applies. When the session ends, before the next Play and at launcher start, while F1 25 is closed, the launcher answers each of its requests with `ok: false` and the detail `F1 25 stopped while this restore was applied, so the launcher withdrew it; the next Play loads the save without it`, deletes the file and logs `saves: withdrew restore request <id> (<container> from generation <n>): ...`.
 
 The registered capture, the save capture and the registered put-back run only on the Steam KB build and Steam 1.0.145, where their layouts were read; on any other build, the EA copy included, the core logs one `[build]` line (`the plain store's registered containers off on <exe>: ... is proven on ... only`) and leaves them off. Each step has a kill switch that leaves the game's behaviour as it was: `SWOFTY_PLAIN_REGISTERED=0` leaves the registered containers' load capture out, `SWOFTY_PLAIN_SAVE_CAPTURE=0` leaves the save capture out (the generation then holds the load-time bytes), and `SWOFTY_PLAIN_PUTBACK=0` stops the registered put-back and registered replace requests. A bag or object the core cannot validate is not touched; the core logs `could not put back <name>: <why>` and the game's own container stays.
 
@@ -362,6 +391,7 @@ The core writes the launcher's own copy of every save container from inside the 
     manifest.json                 event, session, containers with their slots
     containers/<fnv64>.bag        one root container's bytes as the game's bag writer emits them
   inject.json                     launcher requests for the core
+  inject.applying.json            the requests a profile load took and has not answered yet
   injected.json                   the core's answers
   pins.json                       generations the launcher keeps
 ```
@@ -416,7 +446,7 @@ The Career Saves page lists the careers of the newest generation grouped by mode
 ]}
 ```
 
-At the next profile load the core applies each request, writes `injected.json` and deletes `inject.json`. The row shows **Restore waits for Play** until then, and the page shows the core's answer afterwards:
+At the next profile load the core takes the requests (`inject.applying.json`), applies each one, writes `injected.json` and deletes `inject.applying.json`. The row shows **Restore waits for Play** until then, and the page shows the core's answer afterwards:
 
 ```json
 {"schema":1,"results":[{"id":"r1795000000-gm_driver_career_progressive","ok":true,"detail":"1 career(s) from generation 37"}]}
@@ -482,6 +512,31 @@ swofty: the profile save in /home/you/.local/share/Steam/userdata/843502855/3059
 ```
 
 A session that read the profile save and then sat on the start screen for 120 s or more shows the known problem `stalled_save` (**F1 25 stayed on the loading screen after reading your save**) in the crash window.
+
+### A save stuck in a started race weekend
+
+At every Team HQ entry the core logs the career's current weekend ([Weekend diagnostics](/reference/std/career#weekend-diagnostics)). A weekend past not started with no session complete is logged as `weekend already started, session never ran`. A load of such a save opens Team HQ with no Advance, and the weekend's first session never loads.
+
+The launcher learns such a save from its sessions. A session counts when its last Team HQ weekend line is `weekend already started, session never ran` and no `StateLoadSession` comes after it. The save it learns is the one the session ended on, keyed by the SHA-256 of `savegame@profile#NXDSMWW.BWW` in the session's `after-session` snapshot. Each session folder is read once, after its `after-session` snapshot is in the vault. `$DATA/state/stuck-weekends.json` keeps what was learned:
+
+```json
+{
+  "saves": [
+    { "source": "launcher-kok", "sha256": "4be1…", "size": 932920, "weekend": { "round": 12, "rounds": 22, "session": "practice_1", "track": "game/hungaroring" }, "sessions": ["20261120-104632", "20261120-105635"], "profile": "kok", "found_at": 1795173800 }
+  ],
+  "read": ["20261120-104632", "20261120-105635", "20261120-111910"]
+}
+```
+
+`stuck::sweep` runs at launcher start and after every Play. Each find is one line:
+
+```text
+saves: session 20261120-104632 ended with its career in the round 12 of 22 (hungaroring) weekend, started with no session run; the profile save 4be1c0d2a9f3 (932920 bytes) of launcher-kok holds it, and the Career Saves page offers an earlier version
+```
+
+While a learned save is in its save folder, the Career Saves page and the Addons page show a banner that names the round, with **Restore**, **Review the restore** and **Dismiss**. The offer is the newest snapshot of the same vault that is not a learned save. **Restore** is the whole-save restore of the offered snapshot, which keeps the save it replaces as `before-restore`; every career in the save goes back to that version. **Dismiss** leaves the save as it is. With no other version the banner says so and offers no restore. The launcher never changes the save by itself.
+
+A session that ended this way shows the known problem `stuck_weekend` (**Your career is stuck at the start of a race weekend**) in the crash window, also when F1 25 then hit its error on closing.
 
 ### Back up and restore
 

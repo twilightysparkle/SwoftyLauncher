@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/runtime/focus_logic.hpp"
 #include "core/runtime/presence_id_logic.hpp"
 
 #include "core/testing/direct_start_logic.hpp"
@@ -138,6 +139,14 @@ void popup_setup();
 void popup_tick();
 void hud_rebuilt();
 bool typing(const char *what);
+inline bool game_in_front()
+{
+    HWND w = GetForegroundWindow();
+    DWORD pid = 0;
+    if (w)
+        GetWindowThreadProcessId(w, &pid);
+    return focus::game_focused(pid, GetCurrentProcessId(), w && IsIconic(w));
+}
 void mfd_setup();
 void mfd_tick();
 int popup_show(const std::string &title, const std::string &body, const std::string &by);
@@ -236,6 +245,7 @@ void team_record_inserted(std::function<void(uint16_t, uint8_t *)> fn);
 void quali_tyres_box(uint8_t mask, const std::string &line);
 void hud_setup();
 void hud_arm();
+void hud_hook_window(HWND wnd);
 void focus_setup();
 void hud_fatal();
 void grade_setup();

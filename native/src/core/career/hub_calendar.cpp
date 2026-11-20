@@ -15,12 +15,13 @@
 // human's calendar activities running today and what the game's calendar check makes of them. When StateSession ends
 // within FAST_END_MS of entering after the hub opened, it logs "[career] session ended <N> ms after start" with the
 // current weekend and the calendar again. At career.hub (Team HQ) entered it logs the current weekend, as "[career]
-// weekend already started, session never ran" when the weekend is past not started with no session complete.
+// weekend already started, session never ran" when the weekend is past not started with no session complete, followed
+// by "[career] Team HQ calendar" with today's calendar items.
 // career.calendar.add_activity reports each contract event or secret meeting added, with its day and today. Reads
 // only, every one guarded: the ScheduleComponent (current season, season over, seasons), the season's driver
 // calendars, their activities and definitions through KB structs (L2), the clock through
 // CareerTimeComponent.current_minutes, and the weekend through moments::career_weekend. A build whose game headers lack
-// a field logs that the calendar is not readable.
+// one of those fields fails to compile.
 //
 // The one write, the season break fix (hub_calendar_logic.hpp): as the hub opens, a started SeasonBreak listed ahead of
 // a started race weekend running today, with nothing else the check weighs before that weekend, gets
@@ -43,6 +44,8 @@ namespace {
 namespace g = swofty::game;
 namespace hc = runtime::hub_calendar;
 namespace mem = swofty::mem;
+
+template <class...> constexpr bool missing_layout = false;
 
 constexpr size_t MAX_SEASONS = 64;
 constexpr size_t MAX_CALENDARS = 256;
@@ -104,7 +107,7 @@ template <class T = g::CareerTimeComponent> bool today(uint16_t &day)
         day = uint16_t(minutes / hc::MINUTES_PER_DAY);
         return true;
     } else {
-        (void)day;
+        static_assert(missing_layout<T>, "the game headers lack CareerTimeComponent.current_minutes");
         return false;
     }
 }
@@ -167,7 +170,9 @@ Snapshot snapshot()
             s.stop = "the calendar's activity list does not read";
         return s;
     } else {
-        s.stop = "this core was built without the calendar layout";
+        static_assert(missing_layout<S, Z, C, A, D>,
+                      "the game headers lack a calendar field: ScheduleComponent.current_season or season_over, "
+                      "CalendarActivity.state, ActivityDef.id or duration, or another field snapshot() reads");
         return s;
     }
 }
@@ -286,6 +291,13 @@ void ended(uint64_t ms, uint64_t hub_ms, const char *how)
     log_items(s);
 }
 
+void stuck_calendar()
+{
+    Snapshot s = snapshot();
+    swofty::log("[career] Team HQ calendar: %s", calendar(s).c_str());
+    log_items(s);
+}
+
 template <class C = g::DriverCalendar> bool calendar_driver(uintptr_t calendar, uint32_t &driver)
 {
     if constexpr (requires(C *c) { c->driver; }) {
@@ -338,9 +350,10 @@ void hub_calendar_team_hq()
     hc::Weekend w;
     if (!current_weekend(w))
         swofty::log("[career] Team HQ weekend: the current weekend is not readable");
-    else if (hc::never_ran(w))
+    else if (hc::never_ran(w)) {
         swofty::log("[career] weekend already started, session never ran: %s", hc::describe(w).c_str());
-    else
+        stuck_calendar();
+    } else
         swofty::log("[career] Team HQ weekend: %s", hc::describe(w).c_str());
 }
 

@@ -8,6 +8,7 @@
 //!     manifest.json
 //!     containers/<fnv64>.bag
 //!   inject.json                     launcher requests for the core
+//!   inject.applying.json            the requests a profile load took and has not answered yet
 //!   injected.json                   the core's answers
 //!   pins.json                       generations the launcher keeps (launcher-owned)
 //! ```
@@ -34,6 +35,9 @@ pub const DIR: &str = "plain";
 pub const CURRENT: &str = "CURRENT";
 pub const GENERATIONS: &str = "generations";
 const PINS: &str = "pins.json";
+/// How many generations back from `CURRENT` the core looks for the one it puts containers back from
+/// (native/src/core/career/plain_saves_logic.hpp `MAX_SCAN`).
+pub const SCAN: usize = 4096;
 
 pub fn root_of_profile(data: &Path, profile: &str) -> PathBuf {
     crate::saves::launcher::root(data).join(profile).join(DIR)
@@ -168,6 +172,18 @@ impl Plain {
             .find_map(|n| self.manifest(n))
     }
 
+    /// The newest generation a session with the core wrote at a profile save: the one the core puts containers back
+    /// from at load. Like the core, it looks at the newest [`SCAN`] generations only.
+    pub fn newest_session_save(&self) -> Option<Manifest> {
+        let current = self.current()?;
+        self.numbers()
+            .into_iter()
+            .filter(|n| *n <= current)
+            .take(SCAN)
+            .filter_map(|n| self.manifest(n))
+            .find(Manifest::is_session_save)
+    }
+
     pub fn careers(&self) -> Vec<CareerRow> {
         let Some(m) = self.newest() else {
             return Vec::new();
@@ -225,6 +241,10 @@ impl Plain {
         inject::answers(&self.root)
     }
 
+    pub fn applying(&self) -> Vec<inject::Request> {
+        inject::applying(&self.root)
+    }
+
     /// Ask the core to put a mode back from `generation`: both halves, `gm_<mode>` and
     /// `<mode>_SaveSlotGameModeComponent`, in one request each from the same generation. `mode` may also be
     /// the name of either half.
@@ -247,6 +267,29 @@ impl Plain {
             .map(|n| inject::ask(&self.root, generation, n, true, now))
             .collect()
     }
+}
+
+/// Withdraw the requests every plain store under `data` holds from a profile load that stopped before it
+/// answered them, so the next Play does not apply them again. Only while F1 25 is closed. Lines for the
+/// log.
+pub fn withdraw_all_unanswered(data: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for root in prune::roots(data) {
+        match inject::withdraw_unanswered(&root) {
+            Ok(withdrawn) => out.extend(withdrawn.iter().map(|r| {
+                format!(
+                    "saves: withdrew restore request {} ({} from generation {}): F1 25 stopped while it was applied, so the \
+                     next Play loads the save without it",
+                    r.id, r.container, r.generation
+                )
+            })),
+            Err(e) => out.push(format!(
+                "saves: could not withdraw the unanswered restore requests of {}: {e}",
+                root.display()
+            )),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

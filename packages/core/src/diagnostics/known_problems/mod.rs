@@ -21,6 +21,7 @@ mod slow_init;
 mod stall;
 mod system;
 mod tyres;
+pub mod weekend;
 mod wording;
 
 #[cfg(test)]
@@ -33,13 +34,15 @@ use crate::store::Store;
 
 use broken_addons::{
     aggressive_ai, aggressive_ai_crash, pitlane, pitlane_crash, skip_cutscenes, skip_cutscenes_crash,
+    unloaded_ai_line, unloaded_ai_line_crash,
 };
+pub use career::stuck_weekend;
 use career::{
     calendar_event_missing, career_content_off, career_driver_missing, career_track_crash,
     entrant_list_crash, imported_calendar_crash, imported_calendar_empty_season, missing_entrant_list,
-    missing_track_stat, morph_driver_crash, race_driver_missing, retirement_driver_crash,
-    sequencer_record_crash, third_car_line, third_car_line_crash, weekends_track_crash,
-    weekends_track_record_bad_index,
+    missing_track_stat, morph_driver_crash, race_driver_missing, retirement_driver_crash, sent_to_team_hq,
+    sent_to_team_hq_crash, sequencer_record_crash, third_car_line, third_car_line_crash,
+    weekends_track_crash, weekends_track_record_bad_index,
 };
 use crash_record::{Fatal, fatal, loaded_modules, wine};
 pub use evidence::Evidence;
@@ -90,6 +93,12 @@ pub fn crash(session: &SessionRecord, game: Option<&Path>, store: &Store) -> Opt
 pub fn stall(session: &SessionRecord, game: Option<&Path>, store: &Store) -> Option<Diagnosis> {
     perf_start_screen(&read_perf(&session.dir)?).filter(|s| *s >= BOOT_STALL_SECS)?;
     stalled(&evidence(session, game, store))
+}
+
+/// Why the career of `session`, which ended without a crash, can't go on: it
+/// ended in a race weekend that started with no session run.
+pub fn stuck(session: &SessionRecord, game: Option<&Path>, store: &Store) -> Option<Diagnosis> {
+    stuck_weekend(&evidence(session, game, store))
 }
 
 /// Why `session`, which ended without a crash, ran with cars that had no
@@ -147,7 +156,7 @@ type Rule = fn(&Crash) -> Option<Diagnosis>;
 const RULES: &[Rule] = &[
     |c| low_disk(&c.evidence.loader).map(|(drive, free, need)| low_disk_space(&drive, free, need)),
     |c| (c.evidence.code == Some(APP_CONTROL)).then(app_control),
-    |c| quit_fault(c.evidence).then(quit_fault_diagnosis),
+    |c| quit_fault(c.evidence).then(|| stuck_weekend(c.evidence).unwrap_or_else(quit_fault_diagnosis)),
     hooks::crash_in_hook,
     |c| aggressive_ai_crash(c.evidence, &c.fatal).then(|| aggressive_ai(c.evidence)),
     |c| skip_cutscenes_crash(c.evidence, &c.fatal).then(|| skip_cutscenes(c.evidence)),
@@ -155,8 +164,10 @@ const RULES: &[Rule] = &[
     memory::heap_exhausted,
     |c| hang_watchdog(c.evidence, &c.fatal).then(|| hang(c.evidence, &c.fatal, &c.mods)),
     |c| pitlane_crash(c.evidence, &c.fatal).then(|| pitlane(c.evidence)),
+    |c| unloaded_ai_line_crash(&c.fatal).then(|| unloaded_ai_line(c.evidence, &c.fatal)),
     |c| hardware_settings_crash(c.evidence, &c.fatal).then(|| hardware_settings(c.evidence)),
     |c| entrant_list_crash(c.evidence, &c.fatal).then(|| missing_entrant_list(c.evidence)),
+    |c| sent_to_team_hq_crash(c.evidence, &c.fatal).then(|| sent_to_team_hq(c.evidence, &c.fatal)),
     |c| {
         let content_off = !c.evidence.off.is_empty() || missing_track_stat(&c.evidence.loader).is_some();
         (content_off && career_track_crash(c.evidence, &c.fatal)).then(|| career_content_off(c.evidence))

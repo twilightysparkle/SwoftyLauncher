@@ -1038,13 +1038,13 @@ fn a_career_whose_team_and_car_rows_the_build_lacks_says_which_addon_made_them()
             tables: vec!["team".into(), "vehicle".into()]
         })
     );
-    assert_eq!(gap(0).unwrap().text(), "Missing rows from F1 1990");
+    assert_eq!(gap(0).unwrap().text(), "Mismatched rows from F1 1990");
     assert_eq!(gap(1).unwrap().addon, "F1 1990");
     assert_eq!(gap(1).unwrap().tables, ["team", "vehicle", "driver"]);
     assert_eq!(gap(2), None, "rows the build has are not missing");
     let unknown = gap(3).unwrap();
     assert_eq!(unknown.addon, "");
-    assert_eq!(unknown.text(), "Missing rows: team");
+    assert_eq!(unknown.text(), "Mismatched rows: team");
     assert_eq!(
         gap(4),
         None,
@@ -1055,6 +1055,37 @@ fn a_career_whose_team_and_car_rows_the_build_lacks_says_which_addon_made_them()
             .iter()
             .all(|n| n.missing_rows.is_none())
     );
+}
+
+#[test]
+fn a_career_driving_a_car_the_core_adds_from_the_registry_is_not_missing_rows() {
+    let list = parse(
+        r#"[{"career":"driver_career:667c9aad208c7d9c","slot":"667c9aad208c7d9c","mode":"driver_career",
+              "team_raw":476,"vehicle_raw":509,"driver_raw":16386,
+              "addons":[{"id":"swofty.classic-seasons-2016","version":"0.8.2","why":"the career's team, car or driver"}]}]"#,
+    );
+    let installed: BTreeMap<String, AddonManifest> =
+        [named("swofty.classic-seasons-2016", "F1 2016 GP/TT Addon")]
+            .into_iter()
+            .collect();
+    let mut rows = ids(&[476, 500], &[3], &[]);
+    let gap = resume_needs(&list, &[], &installed, Some(&rows))[0]
+        .missing_rows
+        .clone()
+        .unwrap();
+    assert_eq!(
+        gap.tables,
+        ["vehicle"],
+        "the database file alone lacks the registry's car"
+    );
+    assert_eq!(gap.text(), "Mismatched rows from F1 2016 GP/TT Addon");
+    rows.add(&[("entrants.vehicles.vehicle".to_owned(), [509].into())].into());
+    assert_eq!(
+        resume_needs(&list, &[], &installed, Some(&rows))[0].missing_rows,
+        None
+    );
+    rows.add(&[("entrants.engines.Engine".to_owned(), [600].into())].into());
+    assert!(!rows.vehicles.contains(&600) && !rows.teams.contains(&600));
 }
 
 #[test]
@@ -1098,4 +1129,179 @@ fn a_saved_id_the_build_aliases_to_a_row_is_not_missing() {
         resume_needs(&list, &[], &installed, Some(&rows))[0].missing_rows,
         None
     );
+}
+
+fn installed_at(versions: &[(&str, &str)]) -> BTreeMap<String, AddonManifest> {
+    versions
+        .iter()
+        .map(|(id, v)| ((*id).to_owned(), manifest(id, v)))
+        .collect()
+}
+
+#[test]
+fn a_patch_update_of_the_recorded_version_is_not_a_mismatch() {
+    let recorded = [
+        ("a.patch", "1.0.5", "1.0.6"),
+        ("a.same", "1.0.5", "1.0.5"),
+        ("a.short", "1.0", "1.0.3"),
+        ("a.zero", "0.7.1", "0.7.3"),
+        ("a.older", "1.0.5", "1.0.4"),
+        ("a.pre", "1.0.5", "1.0.5-beta.1"),
+        ("a.minor", "1.0.5", "1.1.0"),
+        ("a.major", "1.0.5", "2.0.5"),
+        ("a.zero_minor", "0.7.1", "0.8.0"),
+        ("a.off", "1.0.5", "1.0.6"),
+        ("a.gone", "1.0.5", ""),
+    ];
+    let addons: Vec<String> = recorded
+        .iter()
+        .map(|(id, was, _)| format!(r#"{{"id":"{id}","version":"{was}","why":"{OWN_WHY}"}}"#))
+        .collect();
+    let list = parse(&format!(
+        r#"[{{"career":"c1","slot":"1","addons":[{}]}}]"#,
+        addons.join(",")
+    ));
+    let installed = installed_at(
+        &recorded
+            .iter()
+            .filter(|(_, _, now)| !now.is_empty())
+            .map(|(id, _, now)| (*id, *now))
+            .collect::<Vec<_>>(),
+    );
+    let order: Vec<String> = recorded
+        .iter()
+        .map(|(id, _, _)| (*id).to_owned())
+        .filter(|id| id != "a.off")
+        .collect();
+    let out = resume_needs(&list, &order, &installed, None);
+    let by = |id: &str| out[0].addons.iter().find(|a| a.id == id).unwrap().clone();
+    for id in ["a.patch", "a.same", "a.short", "a.zero"] {
+        assert!(by(id).on && by(id).at_version, "{id} loads at its version");
+    }
+    for id in ["a.older", "a.pre", "a.minor", "a.major", "a.zero_minor"] {
+        assert!(by(id).on && !by(id).at_version, "{id} is at another version");
+    }
+    assert_eq!(
+        (by("a.patch").made_with.as_str(), by("a.patch").version.as_str()),
+        ("1.0.5", "1.0.6")
+    );
+    let gone = by("a.gone");
+    assert!(
+        !gone.on && !gone.at_version,
+        "an addon that isn't installed is missing"
+    );
+    assert!(!by("a.off").on, "an addon that is off is missing");
+}
+
+fn saved_careers() -> Vec<Career> {
+    let own = |id: &str| format!(r#"{{"id":"{id}","version":"1.0.5","why":"{OWN_WHY}"}}"#);
+    parse(&format!(
+        r#"[{{"career":"played","profile":"p","slot":"1","listed_session":"1795144582000","last_played":1795167539,
+              "addons":[{},{},{},{{"id":"x.guess","version":"1.0.5","why":"{ROWS_WHY}"}}]}},
+           {{"career":"listed","profile":"p","slot":"2","listed_session":"1795170570918","last_played":1795167539,
+              "addons":[{}]}},
+           {{"career":"elsewhere","profile":"other","slot":"3","listed_session":"1795144582000","last_played":1795167539,
+              "addons":[{}]}},
+           {{"career":"gone","profile":"p","slot":"4","status":"deleted","listed_session":"1795144582000",
+              "last_played":1795167539,"addons":[{}]}}]"#,
+        own("x.2017"),
+        own("x.minor"),
+        own("x.off"),
+        own("x.2017"),
+        own("x.2017"),
+        own("x.2017"),
+    ))
+}
+
+#[test]
+fn a_career_saved_at_a_patch_update_records_it_and_lists_clean() {
+    let mut list = saved_careers();
+    let installed = installed_at(&[
+        ("x.2017", "1.0.6"),
+        ("x.minor", "1.1.0"),
+        ("x.off", "1.0.6"),
+        ("x.guess", "1.0.6"),
+    ]);
+    let on: Vec<String> = ["x.2017", "x.minor", "x.guess"].map(str::to_owned).into();
+    let mine = |c: &Career| c.profile.as_deref() == Some("p");
+    assert!(refresh_versions(&mut list, &mine, &on, &installed));
+    let version = |c: usize, id: &str| {
+        list[c]
+            .addons
+            .iter()
+            .find(|a| a.id == id)
+            .and_then(|a| a.version.clone())
+            .unwrap()
+    };
+    assert_eq!(version(0, "x.2017"), "1.0.6");
+    assert_eq!(
+        version(0, "x.minor"),
+        "1.0.5",
+        "another minor version is not recorded"
+    );
+    assert_eq!(
+        version(0, "x.off"),
+        "1.0.5",
+        "an addon that was off is not recorded"
+    );
+    assert_eq!(
+        version(0, "x.guess"),
+        "1.0.5",
+        "an addon that was only on is not a need"
+    );
+    assert_eq!(version(1, "x.2017"), "1.0.5", "a career the session did not save");
+    assert_eq!(version(2, "x.2017"), "1.0.5", "another profile's career");
+    assert_eq!(version(3, "x.2017"), "1.0.5", "a career deleted in game");
+    assert!(!refresh_versions(&mut list, &mine, &on, &installed));
+
+    let needs = resume_needs(&list[..2], &on, &installed, None);
+    let played = |id: &str| needs[0].addons.iter().find(|a| a.id == id).unwrap().clone();
+    assert!(played("x.2017").at_version);
+    assert_eq!(played("x.2017").made_with, "1.0.6");
+    assert!(
+        !played("x.minor").at_version,
+        "another minor version still asks first"
+    );
+
+    let back = installed_at(&[("x.2017", "1.0.5"), ("x.minor", "1.1.0")]);
+    let needs = resume_needs(&list[..2], &on, &back, None);
+    assert!(
+        !needs[0].addons[0].at_version,
+        "the career was saved with 1.0.6, so 1.0.5 is older"
+    );
+    assert!(needs[1].addons[0].at_version);
+}
+
+#[test]
+fn a_session_records_the_patch_update_a_saved_career_was_saved_with() {
+    let root = std::env::temp_dir().join(format!("swofty-careers-patch-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let addon = root.join("addons").join("x.2017");
+    std::fs::create_dir_all(&addon).unwrap();
+    std::fs::write(
+        addon.join("swofty.json"),
+        r#"{ "schema_version": 1, "id": "x.2017", "name": "X 2017", "version": "1.0.6", "author": "a",
+             "compat": { "game": "f1_25" } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("profiles")).unwrap();
+    std::fs::write(
+        root.join("profiles").join("p.json"),
+        r#"{"schema_version":1,"name":"p","addons":[{"id":"x.2017","enabled":true}]}"#,
+    )
+    .unwrap();
+    let index = data_path(&root);
+    std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+    std::fs::write(
+        &index,
+        format!(
+            r#"{{"version":1,"careers":[{{"career":"played","profile":"p","slot":"1","listed_session":"1795144582000",
+                "last_played":1795167539,"addons":[{{"id":"x.2017","version":"1.0.5","why":"{OWN_WHY}"}}]}}]}}"#
+        ),
+    )
+    .unwrap();
+    record_session(&root, "p", "", BTreeMap::new).unwrap();
+    let list = read(&index);
+    assert_eq!(list[0].addons[0].version.as_deref(), Some("1.0.6"));
+    std::fs::remove_dir_all(&root).ok();
 }

@@ -13,6 +13,7 @@ use swofty_i18n::{tr, trf};
 
 use super::model::*;
 use super::state::*;
+use super::steward;
 use crate::shell::Launching;
 use crate::shell::host::Host;
 use crate::shell::host::PromptHost;
@@ -148,8 +149,7 @@ impl Shell {
     }
 
     pub(super) fn room_default_name(&self) -> String {
-        let you = self.account.session.as_ref().map_or("Your", |m| m.name.as_str());
-        format!("{you}'s room")
+        default_room_name(self.account.session.as_ref().map(|m| m.name.as_str()))
     }
 
     pub(super) fn room_open_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -189,6 +189,41 @@ impl Shell {
     pub(super) fn room_close_view(&mut self, cx: &mut Context<Self>) {
         self.rooms.viewing = None;
         cx.notify();
+    }
+
+    /// Back to the list of rooms from the room page: a room looked at closes, and a room joined keeps running.
+    pub(crate) fn room_step_out(&mut self, cx: &mut Context<Self>) {
+        match self.rooms.focus() {
+            RoomFocus::InRoom => self.rooms.away = true,
+            RoomFocus::Viewing(_) => self.rooms.viewing = None,
+            RoomFocus::List => return,
+        }
+        cx.notify();
+    }
+
+    pub(super) fn room_step_in(&mut self, cx: &mut Context<Self>) {
+        self.rooms.away = false;
+        self.open_page(Page::Multiplayer, cx);
+    }
+
+    /// A room from the Time Trial page's rooms card, looked at on the Multiplayer page.
+    pub(super) fn room_open_from_card(&mut self, code: String, cx: &mut Context<Self>) {
+        self.open_page(Page::Multiplayer, cx);
+        self.room_open(code, cx);
+    }
+
+    /// The create form, opened on the Multiplayer page from the rooms card.
+    pub(super) fn room_create_from_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(Page::Multiplayer, cx);
+        if !self.rooms.form {
+            self.room_open_form(window, cx);
+        }
+    }
+
+    /// A private room's code typed on the rooms card, joined on the Multiplayer page.
+    pub(super) fn room_join_code_from_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(Page::Multiplayer, cx);
+        self.room_join_code(window, cx);
     }
 
     pub(super) fn room_copy_code(&mut self, code: String, cx: &mut Context<Self>) {
@@ -354,6 +389,7 @@ impl Multiplayer {
                         m.state = Some(session.state());
                         m.session = Some(session);
                         m.form = false;
+                        m.away = false;
                     }
                     Err(e) => m.error = Some(e),
                 }
@@ -376,7 +412,12 @@ impl Multiplayer {
         let dialog = window.has_active_dialog(cx);
         let (m, needs) = <H as Host<Self>>::split(host);
         let mut changed = !dialog && m.drop_held();
-        changed |= m.watch_game(needs.running, needs.busy);
+        changed |= m.watch_game(
+            needs.running,
+            needs.busy,
+            || session_ended(needs.store),
+            Instant::now(),
+        );
         if m.leaving && m.session.as_ref().is_none_or(Session::is_finished) {
             m.finish_leaving();
             changed = true;
@@ -414,8 +455,15 @@ impl Multiplayer {
             m.copied = None;
             changed = true;
         }
+        let offered = m.steward_offered(needs.running);
+        if !offered {
+            changed |= m.steward.forget();
+        }
         if changed {
             cx.notify();
+        }
+        if offered && m.steward.due(now) {
+            Self::read_steward(host, cx);
         }
         let m = <H as Host<Self>>::split(host).0;
         if m.session.is_none() && m.lobby.game_due(now) {
@@ -430,6 +478,32 @@ impl Multiplayer {
             Self::read_print(host, cx);
         }
         Self::load_shown_faces(host, cx);
+    }
+
+    /// Reads the League Stewarding page the host's game names, off the UI thread.
+    pub(super) fn read_steward<H: Host<Self>>(host: &mut H, cx: &mut Context<H>) {
+        let (m, needs) = host.split();
+        let Some(dir) = needs.game_dir.map(Path::to_path_buf) else {
+            return;
+        };
+        let started = steward::process_started(needs.processes, &dir);
+        let store = needs.store.clone();
+        m.steward.reading = true;
+        cx.spawn(async move |this, cx| {
+            let url = cx
+                .background_executor()
+                .spawn(async move { steward::read(&store, &dir, started) })
+                .await;
+            this.update(cx, |host, cx| {
+                let (m, needs) = host.split();
+                let offered = m.steward_offered(needs.running);
+                if m.steward.took(url, offered, Instant::now()) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Closes the copy's F1 25 so the room can start it. False when a stop failed, which a notice says.

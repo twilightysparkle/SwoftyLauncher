@@ -24,11 +24,11 @@ pub use index_file::{
     data_path, keep, kept_ids, migrate, parse, read, rename_profile, replace_profile, sync,
 };
 pub use list::{
-    READY as SEVERITY_READY, ResumeRow, RowAddon, VERSION as SEVERITY_VERSION, date_text, resume_list_for,
-    resume_rows, save_file_careers, save_state, wanted as resume_list_wanted,
+    ListSave, READY as SEVERITY_READY, ResumeRow, RowAddon, VERSION as SEVERITY_VERSION, date_text,
+    list_save, resume_list_for, resume_rows, save_file_careers, wanted as resume_list_wanted,
 };
 pub use play::{in_save_of, missing, needing, play_line, stop_line, unowned_line};
-pub use record::{lost_cars, record_cars, record_session};
+pub use record::{lost_cars, record_cars, record_session, refresh_versions};
 pub use resume::{
     CareerNeeds, MissingRows, ResumeNeed, RowSet, mark_missing_modes, mode_owners, mode_suffix, of_profile,
     resume_needs, session_needs,
@@ -63,6 +63,14 @@ fn is_proven(a: &CareerAddon) -> bool {
 
 fn launcher_wrote(a: &CareerAddon) -> bool {
     is_guess(a) || is_proven(a)
+}
+
+/// Whether addon version `now` matches the version `made_with` a career records with no range: the same
+/// version, or a patch update of it (the same major and minor, and newer).
+fn same_or_patch(made_with: &str, now: &semver::Version) -> bool {
+    made_with == now.to_string()
+        || crate::stdlib::range::version(made_with)
+            .is_some_and(|was| (was.major, was.minor) == (now.major, now.minor) && *now >= was)
 }
 
 fn label_of(c: &Career) -> &str {

@@ -50,6 +50,8 @@ pub(super) struct Inputs {
     pub db_src: PathBuf,
     /// The in-game loader is there, so the launcher's menus are built.
     pub menus: bool,
+    /// The careers the Resume Career list shows, when the list is on.
+    pub resume_save: Option<crate::stdlib::careers::ListSave>,
     /// How many lines and warnings the build had before the ones a saved build keeps.
     pub saved_from: (usize, usize),
 }
@@ -57,24 +59,27 @@ pub(super) struct Inputs {
 pub(super) fn stamp_resume_list(
     hash: &mut BuildHash,
     data: &std::path::Path,
-    profile: &str,
+    profile: &crate::profile::Profile,
     game: &crate::install::Game,
     wanted: bool,
-) -> Result<()> {
+) -> Result<Option<crate::stdlib::careers::ListSave>> {
     if !wanted {
         hash.update("resume list|off;");
-        return Ok(());
+        return Ok(None);
     }
     let careers = crate::stdlib::careers::data_path(data);
     let stamp = match careers.is_file() {
         true => sha256_file(&careers)?,
         false => "absent".to_owned(),
     };
-    hash.update(format!(
-        "resume list|{stamp}|{};",
-        crate::stdlib::careers::save_state(data, profile, game)
-    ));
-    Ok(())
+    let ids = match crate::stdlib::reports::found(data, Some(&game.dir), crate::stdlib::reports::IDS) {
+        Some(p) => sha256_file(&p)?,
+        None => "absent".to_owned(),
+    };
+    let launcher_saves = profile.launcher_saves && !profile.is_vanilla();
+    let saved = crate::stdlib::careers::list_save(data, &profile.name, launcher_saves, game);
+    hash.update(format!("resume list|{stamp}|{ids}|{};", saved.state()));
+    Ok(Some(saved))
 }
 
 impl Inputs {
@@ -197,16 +202,17 @@ impl Inputs {
         session.set_mods(mods.into_iter());
         hash.json(&session);
         let menus = loader_dir().is_some();
+        let mut resume_save = None;
         if menus {
             for rel in MENU_ERPS.iter().chain(MENU_READS) {
                 let p = resolve(&ui_file(rel));
                 let meta = std::fs::metadata(&p).map_err(io_err(&p))?;
                 hash.update(format!("{rel}|{}|{:?}", meta.len(), meta.modified().ok()));
             }
-            stamp_resume_list(
+            resume_save = stamp_resume_list(
                 &mut hash,
                 &store.root,
-                profile,
+                p,
                 game,
                 crate::stdlib::careers::resume_list_wanted(),
             )?;
@@ -285,6 +291,7 @@ impl Inputs {
             lent_ids,
             db_src,
             menus,
+            resume_save,
             saved_from,
         };
         let pipeline = Pipeline {

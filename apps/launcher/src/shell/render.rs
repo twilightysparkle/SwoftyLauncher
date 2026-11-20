@@ -98,7 +98,7 @@ impl Render for Shell {
             Page::Shaders => self.shaders.clone().into_any_element(),
             Page::Database => self.db_page(p, cx),
             Page::Careers => self.careers_page(p, wide, cx),
-            Page::Multiplayer => self.multiplayer_page(p, cx),
+            Page::Multiplayer => self.multiplayer_page(p, window, cx),
             Page::Online => self.online_page(p, window, cx),
             Page::Moderation => self.time_trial_page(p, window, cx),
             Page::Store => self.store_page(p, window, cx),
@@ -115,6 +115,14 @@ impl Render for Shell {
             .relative()
             .track_focus(&self.root_focus)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.nav_key(ev, window, cx)))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, _, cx| {
+                    if this.page_back(cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .size_full()
             .on_drag_move::<ExternalPaths>(cx.listener(|this, _, _, cx| {
                 if !this.overlays.dropping {
@@ -128,7 +136,7 @@ impl Render for Shell {
             .bg(p.background)
             .text_color(p.text)
             .text_size(px(14.))
-            .child(self.top_bar(p, layout_width, cx))
+            .child(self.top_bar(p, layout_width, window, cx))
             .child(
                 h_flex().flex_1().min_h_0().items_start().bg(p.background).child(
                     h_flex()

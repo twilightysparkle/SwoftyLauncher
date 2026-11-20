@@ -32,7 +32,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      # No Rust cache: on an EC2 runner a cold release build takes about as long as restoring one.
+      # No Rust cache: a cold release build takes about as long as restoring one.
       - uses: ./.github/actions/setup-rust
 
       # Only the two binaries the release ships, not the installer or the addon template.
