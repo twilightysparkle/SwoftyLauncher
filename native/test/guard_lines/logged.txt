@@ -163,6 +163,9 @@
 [log engine/anim_clip_time_guard.cpp]
 [anim] an animation clip got a time that is not a finite number, so it shows the clip's first frame%s
 
+[log engine/anim_packet_time_guard.cpp]
+[anim] an animation packet (%s) got a time that is not a finite number from F1_25.exe+0x%llx, so it shows its first key%s
+
 [log engine/audio_queue.cpp]
 [audio] queue fix: the overflow queue at %p is not readable; requests pass through
 [audio] queue fix: moved %zu queued worker request(s) from slots 12-23 to slots 0-11 %s (%llu in all%s)%s
@@ -295,6 +298,9 @@
 
 [log session/estimate_laptime_guard.cpp]
 [session] a virtual session lap estimate has no tyre object for vehicle %u, so it returns the lap time unchanged%s
+
+[log session/marshal_lights_guard.cpp]
+[guard] +0x%llx null object skipped: the first marshal light is in no marshal light zone, so the zone walk erases it and ends at the start of the light list instead of reading before it%s
 
 [log session/quali_tyres_guard.cpp]
 [tyres] %s: option %u (%s) is qualifying only, refused in session %u%s

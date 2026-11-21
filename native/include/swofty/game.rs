@@ -2891,6 +2891,45 @@ pub struct SpectatorDirectorGap {
 const _: () = assert!(core::mem::offset_of!(SpectatorDirectorGap, gap_mode) == 0xe4);
 
 #[repr(C)]
+pub struct SpeechLine {
+    _pad_0x0: [u8; 0x80],
+    pub speaker: u64,
+    pub duration_ms: u32,
+    pub id: u32,
+    _pad_0x90: [u8; 0xa8],
+    pub subtitle_stem: *mut c_char,
+    pub category: u8,
+    _pad_0x141: [u8; 0x3],
+    pub state: u32,
+}
+const _: () = assert!(core::mem::offset_of!(SpeechLine, speaker) == 0x80);
+const _: () = assert!(core::mem::offset_of!(SpeechLine, duration_ms) == 0x88);
+const _: () = assert!(core::mem::offset_of!(SpeechLine, id) == 0x8c);
+const _: () = assert!(core::mem::offset_of!(SpeechLine, subtitle_stem) == 0x138);
+const _: () = assert!(core::mem::offset_of!(SpeechLine, category) == 0x140);
+const _: () = assert!(core::mem::offset_of!(SpeechLine, state) == 0x144);
+
+#[repr(C)]
+pub struct SpeechSpeaker {
+    _pad_0x0: [u8; 0x18],
+    pub name: *mut c_char,
+}
+const _: () = assert!(core::mem::offset_of!(SpeechSpeaker, name) == 0x18);
+
+#[repr(C)]
+pub struct SpeechSystem {
+    _pad_0x0: [u8; 0x728],
+    pub speakers: *mut u8,
+    _pad_0x730: [u8; 0x9c],
+    pub speaker_count: u32,
+    _pad_0x7d0: [u8; 0x3c0],
+    pub radio_delay: f64,
+}
+const _: () = assert!(core::mem::offset_of!(SpeechSystem, speakers) == 0x728);
+const _: () = assert!(core::mem::offset_of!(SpeechSystem, speaker_count) == 0x7cc);
+const _: () = assert!(core::mem::offset_of!(SpeechSystem, radio_delay) == 0xb90);
+
+#[repr(C)]
 pub struct SponsorEntry {
     _pad_0x0: [u8; 0x10],
     pub name: *const c_char,
@@ -4686,6 +4725,18 @@ pub type Gdb_Load_GameDatabase_t =
     unsafe extern "C" fn(db: *mut GdbDatabase, cfg: *mut c_void) -> *mut GdbDatabase;
 pub type Gdb_Lookup_Key_t = unsafe extern "C" fn(path: *const c_char) -> *mut *mut c_void;
 pub type Ne_AnimClipPlayer_Sample_Thunk_t = unsafe extern "C" fn(player: *mut c_void, time: f32);
+pub type Ne_AnimPacketB1_Sample_t =
+    unsafe extern "C" fn(packet: *mut c_void, binding: *mut c_void, time: f32, out: *mut c_void);
+pub type Ne_AnimPacketB4_Sample_t =
+    unsafe extern "C" fn(packet: *mut c_void, binding: *mut c_void, time: f32, out: *mut c_void);
+pub type Ne_AnimPacketL1_Sample_t =
+    unsafe extern "C" fn(packet: *mut c_void, binding: *mut c_void, time: f32, out: *mut c_void);
+pub type Ne_AnimPacketL3_SampleTrack_t =
+    unsafe extern "C" fn(packet: *mut c_void, track: *mut c_void, index: u32, time: f32, out: *mut c_void);
+pub type Ne_AnimPacketL4_SampleTrack_t =
+    unsafe extern "C" fn(packet: *mut c_void, track: *mut c_void, index: u32, time: f32, out: *mut c_void);
+pub type Ne_AnimPacketS4_SampleTrack_t =
+    unsafe extern "C" fn(packet: *mut c_void, track: *mut c_void, index: u32, time: f32, out: *mut c_void);
 pub type Ne_Compare_StringNoCase_t = unsafe extern "C" fn(a: *const c_char, b: *const c_char) -> i32;
 pub type Ne_Crt_FloatToInt32Checked_t = unsafe extern "C" fn(bits: u32) -> c_int;
 pub type Ne_Crt_InvalidParameterAbortStub_140e0fd20_t = unsafe extern "C" fn();
@@ -10944,6 +10995,11 @@ pub mod bindings {
         kind: "func",
         status: Status::Experimental,
     };
+    pub const Game_Game_RetireLocalPlayer: Binding = Binding {
+        id: "Game_Game_RetireLocalPlayer",
+        kind: "func",
+        status: Status::Experimental,
+    };
     pub const Game_Game_SetCurrentGameMode: Binding = Binding {
         id: "Game_Game_SetCurrentGameMode",
         kind: "func",
@@ -13696,6 +13752,36 @@ pub mod bindings {
     };
     pub const Ne_AnimLayer_ApplyChannels: Binding = Binding {
         id: "Ne_AnimLayer_ApplyChannels",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Ne_AnimPacketB1_Sample: Binding = Binding {
+        id: "Ne_AnimPacketB1_Sample",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Ne_AnimPacketB4_Sample: Binding = Binding {
+        id: "Ne_AnimPacketB4_Sample",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Ne_AnimPacketL1_Sample: Binding = Binding {
+        id: "Ne_AnimPacketL1_Sample",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Ne_AnimPacketL3_SampleTrack: Binding = Binding {
+        id: "Ne_AnimPacketL3_SampleTrack",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Ne_AnimPacketL4_SampleTrack: Binding = Binding {
+        id: "Ne_AnimPacketL4_SampleTrack",
+        kind: "func",
+        status: Status::Experimental,
+    };
+    pub const Ne_AnimPacketS4_SampleTrack: Binding = Binding {
+        id: "Ne_AnimPacketS4_SampleTrack",
         kind: "func",
         status: Status::Experimental,
     };
@@ -23127,6 +23213,16 @@ pub mod bindings {
     pub const site_Sess_InGameSessionCompleteAiCall: Binding = Binding {
         id: "site_Sess_InGameSessionCompleteAiCall",
         kind: "call",
+        status: Status::Experimental,
+    };
+    pub const site_Sess_MarshalLights_PrevLightLoad: Binding = Binding {
+        id: "site_Sess_MarshalLights_PrevLightLoad",
+        kind: "site",
+        status: Status::Experimental,
+    };
+    pub const site_Sess_MarshalLights_WalkDone: Binding = Binding {
+        id: "site_Sess_MarshalLights_WalkDone",
+        kind: "site",
         status: Status::Experimental,
     };
     pub const site_Sess_PitEvalListNext: Binding = Binding {

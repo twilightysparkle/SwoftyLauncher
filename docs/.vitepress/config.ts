@@ -166,6 +166,10 @@ export default defineConfigWithTheme<DocsThemeConfig>({
           {
             text: "Releases",
             items: [
+              { text: "1.10.19", link: "/releases/1.10.19" },
+              { text: "1.10.18", link: "/releases/1.10.18" },
+              { text: "1.10.17", link: "/releases/1.10.17" },
+              { text: "1.10.16", link: "/releases/1.10.16" },
               { text: "1.10.15", link: "/releases/1.10.15" },
               { text: "1.10.14", link: "/releases/1.10.14" },
               { text: "1.10.13", link: "/releases/1.10.13" },
@@ -711,6 +715,7 @@ export default defineConfigWithTheme<DocsThemeConfig>({
                       { text: "Pit lane", link: "/reference/std/pitlane", icon: "file" },
                       { text: "Tyre damage", link: "/reference/std/tyre-damage", icon: "file" },
                       { text: "Race control", link: "/reference/std/race-control", icon: "file" },
+                      { text: "Voice lines", link: "/reference/std/speech", icon: "file" },
                       { text: "Weather setup", link: "/reference/std/weather", icon: "file" },
                       { text: "Standings", link: "/reference/std/standings", icon: "file" },
                       { text: "Database", link: "/reference/std/db", icon: "file" },
