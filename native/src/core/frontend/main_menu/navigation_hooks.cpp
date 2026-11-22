@@ -6,6 +6,7 @@
 
 #include "core/frontend/main_menu/context.hpp"
 #include "core/frontend/main_menu_logic.hpp"
+#include "core/frontend/tt_blocked.hpp"
 #include <safetyhook.hpp>
 
 #include <swofty/game.hpp>
@@ -79,6 +80,8 @@ void fire_detour(void *router, void *vm, NeStr **name, uint64_t a4) { menu.navig
 
 uint64_t Navigation::container_command(void *container, NeStr **message, void *third)
 {
+    if (message && *message && tt_blocked::refuses_command(ne_text(*message)))
+        return 0;
     if (menu.patched.load() && message && *message && back_mode() == Back::route && !off("SWOFTY_MAIN_MENU_PICKERBACK")) {
         Mode m = Mode(nav.mode.load());
         if (m == Mode::time_trial && ne_text(*message) == "entrant_goto_select" && nav.expect.load() == int(Expect::none)) {
@@ -384,6 +387,7 @@ void Navigation::hook_gohome()
 
 void Navigation::hook_container()
 {
+    std::lock_guard<std::mutex> g(container_hook_lock);
     if (h_container)
         return;
     auto at = runtime::find(S_CONTAINER, "home", "core");

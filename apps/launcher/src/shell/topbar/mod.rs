@@ -61,6 +61,10 @@ impl Shell {
         self.account.allowed() || (cfg!(debug_assertions) && std::env::var_os("SWOFTY_FAKE_MP").is_some())
     }
 
+    pub(crate) fn tab_home(&self, tab: Tab) -> Page {
+        tab.home_with(self.nav_mp())
+    }
+
     pub(crate) fn sub_nav(&self, layout_width: f32) -> Option<SubNav> {
         let tab = self.navigation.page.tab();
         let (links, fixed) = match tab {
@@ -74,12 +78,10 @@ impl Shell {
                 (links, 3)
             }
             Some(Tab::Online) => {
-                let access = self.nav_mp();
-                let links: Vec<Link> = online_pages(access, self.tt_admin())
+                let links: Vec<Link> = online_pages(self.nav_mp(), self.tt_admin())
                     .into_iter()
                     .map(|page| match page {
                         Page::Multiplayer => Link::named(page, self.rooms_tab_label()),
-                        Page::Online if access => Link::named(page, self.trial_tab_label()),
                         page => Link::new(page, None),
                     })
                     .collect();
@@ -172,6 +174,10 @@ impl Shell {
     }
 
     pub(crate) fn nav_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reset_scale_key(ev, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         let key = ev.keystroke.key.as_str();
         let plain = !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform;
         if key == "escape" && self.navigation.page == Page::Addons && cx.stop_active_drag(window) {

@@ -112,6 +112,7 @@ pub(crate) fn run(store: &Store, profile: &str, args: &RunArgs, g: &Game) -> Res
     let apply = (request.apply || args.apply) && !stock;
     quarantine::Report::clear(&store.root).ok();
     launch::Failure::clear(&store.root).ok();
+    crate::commands::laps::note_integrity(store, None, false, &info);
     let session = Session {
         store,
         game: g,

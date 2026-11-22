@@ -173,8 +173,8 @@ pub fn resolve(profile: &Profile, installed: &BTreeMap<String, AddonManifest>) -
             }
         }
         for c in m.conflicts.iter().filter(|c| c.touches.is_none()) {
-            if let Some(other) = addons.keys().find(|o| **o != m.id && glob_match(&c.id, o)) {
-                return Err(Error::Resolve(format!("{} conflicts with {other}", m.id)));
+            if let Some(other) = addons.values().find(|o| o.id != m.id && glob_match(&c.id, &o.id)) {
+                return Err(conflict(m, other));
             }
         }
         if m.conflicts.iter().any(|c| c.touches.is_some()) {
@@ -235,8 +235,10 @@ pub fn resolve(profile: &Profile, installed: &BTreeMap<String, AddonManifest>) -
 /// none of those on: the shared part of a family such as Classic Seasons,
 /// which adds nothing to pick on its own. When the base has a catalog
 /// category, its family is the addons of that category that need it, so a
-/// career addon that needs Classic Seasons doesn't count as a season. Each
-/// comes as its name and the names of its family.
+/// career addon that needs Classic Seasons doesn't count as a season. A base
+/// with its own launcher pages or imports, such as Simplified for Swofty's
+/// Mod Importer, is a tool that works without its family and is never one.
+/// Each comes as its name and the names of its family.
 pub fn lonely_bases(
     profile: &Profile,
     installed: &BTreeMap<String, AddonManifest>,
@@ -248,6 +250,9 @@ pub fn lonely_bases(
         let Some(base) = installed.get(*id) else {
             continue;
         };
+        if has_own_pages(base) {
+            continue;
+        }
         let category = catalog
             .iter()
             .find(|a| a.id == *id)
@@ -279,6 +284,12 @@ pub fn lonely_bases(
     out
 }
 
+fn has_own_pages(m: &AddonManifest) -> bool {
+    m.launcher
+        .as_ref()
+        .is_some_and(|l| !l.sections.is_empty() || !l.imports.is_empty())
+}
+
 fn launcher_cap_passed(m: &AddonManifest, launcher: &semver::Version) -> Option<semver::VersionReq> {
     use semver::Op;
     let req = m.compat.launcher.as_ref().filter(|r| !r.matches(launcher))?;
@@ -298,6 +309,19 @@ pub fn launcher_refusal(m: &AddonManifest, launcher: &semver::Version) -> Option
         "{} needs Swofty Launcher {req}; this is {launcher}. Update the launcher, or turn the addon off",
         m.id
     ))
+}
+
+/// The conflict between two addons that are on, by their names; two addons with the same name also show
+/// their ids.
+fn conflict(addon: &AddonManifest, other: &AddonManifest) -> Error {
+    let label = |m: &AddonManifest| match addon.name == other.name {
+        true => format!("{} ({})", m.name, m.id),
+        false => m.name.clone(),
+    };
+    Error::AddonConflict {
+        addon: label(addon),
+        other: label(other),
+    }
 }
 
 fn check_launcher<'a>(
@@ -483,6 +507,55 @@ mod tests {
     }
 
     #[test]
+    fn a_conflict_names_both_addons_and_the_fix() {
+        let named = |id: &str, name: &str, extra: &str| {
+            let (_, mut a) = m(id, extra);
+            a.name = name.into();
+            (id.to_owned(), a)
+        };
+        let installed = BTreeMap::from([
+            m(CORE_ID, ""),
+            named(
+                "william09leo.heavier-damage-realism",
+                "Heavier Damage + 2026 Realism Performance",
+                r#","conflicts":[{"id":"formula-nascar.*"}]"#,
+            ),
+            named("formula-nascar.handling", "Formula NASCAR", ""),
+        ]);
+        let both = profile(&["william09leo.heavier-damage-realism", "formula-nascar.handling"]);
+        let err = resolve(&both, &installed).unwrap_err();
+        assert!(
+            matches!(&err, Error::AddonConflict { addon, other }
+                if addon == "Heavier Damage + 2026 Realism Performance" && other == "Formula NASCAR"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "Heavier Damage + 2026 Realism Performance conflicts with Formula NASCAR. Turn one of them off on \
+             the Addons page"
+        );
+        assert!(resolve(&profile(&["william09leo.heavier-damage-realism"]), &installed).is_ok());
+
+        let twins = BTreeMap::from([
+            m(CORE_ID, ""),
+            named("a.rain", "Rain", r#","conflicts":[{"id":"b.rain"}]"#),
+            named("b.rain", "Rain", ""),
+        ]);
+        assert_eq!(
+            resolve(&profile(&["a.rain", "b.rain"]), &twins)
+                .unwrap_err()
+                .to_string(),
+            "Rain (a.rain) conflicts with Rain (b.rain). Turn one of them off on the Addons page"
+        );
+        let touching = BTreeMap::from([
+            m(CORE_ID, ""),
+            named("a.x", "X", r#","conflicts":[{"id":"b.y","touches":"db:a.b"}]"#),
+            named("b.y", "Y", ""),
+        ]);
+        assert!(resolve(&profile(&["a.x", "b.y"]), &touching).is_ok());
+    }
+
+    #[test]
     fn an_addon_on_but_not_installed_is_left_out() {
         let installed = BTreeMap::from([m(CORE_ID, ""), m("a.x", "")]);
         let plan = resolve(&profile(&["a.x", "a.gone"]), &installed).unwrap();
@@ -562,6 +635,31 @@ mod tests {
             .is_empty()
         );
         assert!(lonely_bases(&profile(&["cs.base", "a.local"]), &installed, &catalog).is_empty());
+    }
+
+    #[test]
+    fn a_base_with_its_own_launcher_pages_is_never_lonely() {
+        let catalog: Vec<crate::catalog::Addon> = serde_json::from_value(serde_json::json!([
+            {"id": "u.package", "name": "MyTeam Package", "author": "u", "category": "cars",
+             "versions": [{"version": "1.0.6", "size": 1, "sha256": "x", "url": "u",
+                           "requires": [{"id": "teamsimplified.mods", "version": ">=0.13.9"}]}]},
+            {"id": "m.driver-models", "name": "More Driver Models", "author": "m",
+             "versions": [{"version": "0.1.14", "size": 1, "sha256": "x", "url": "u",
+                           "requires": [{"id": "teamsimplified.mods", "version": ">=0.9.0"}]}]}
+        ]))
+        .unwrap();
+        let pages = r#","launcher":{"program":{"linux":"bin/helper","windows":"bin/helper.exe"},
+            "sections":[{"id":"mods","title":"Simplified Importer","icon":"package"}],"imports":["zip"]}"#;
+        let imports = r#","launcher":{"program":{"linux":"bin/helper"},"imports":["zip"]}"#;
+        let helper_only = r#","launcher":{"program":{"linux":"bin/helper"},"build":true}"#;
+        for (extra, lonely) in [(pages, false), (imports, false), (helper_only, true), ("", true)] {
+            let installed = BTreeMap::from([m(CORE_ID, ""), m("teamsimplified.mods", extra)]);
+            assert_eq!(
+                !lonely_bases(&profile(&["teamsimplified.mods"]), &installed, &catalog).is_empty(),
+                lonely,
+                "{extra}"
+            );
+        }
     }
 
     #[test]

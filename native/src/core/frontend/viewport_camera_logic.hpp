@@ -34,16 +34,32 @@ public:
         return true;
     }
 
+    bool recover(uint8_t type, Kind fallback = OTHER)
+    {
+        // The game writes native types 0 through 8, with 8 resolved from the camera object and definition.
+        return kind() == UNKNOWN && type <= 8 && observe(0, type, fallback);
+    }
+
 private:
     static constexpr Kind classify(uint8_t type)
     {
         switch (type) {
+        case 0:
+            return WING;
+        case 1:
+            return NOSE;
+        case 2:
+            return NOSE_ALT;
         case 3:
             return COCKPIT;
         case 4:
             return TCAM;
         case 5:
             return TCAM_OFFSET;
+        case 6:
+            return CHASE_NEAR;
+        case 7:
+            return CHASE_FAR;
         default:
             return OTHER;
         }

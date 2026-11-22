@@ -133,8 +133,9 @@ typedef void (*SwoftyPaintFn)(SwoftyPaint *paint, void *user);
 /* Overlay v2: the SwoftyOverlay entries after image() exist when the running swofty_core.dll exports
    SwoftyCoreOverlayVersion and it returns 2 or more (swofty/overlay.hpp checks); the v3 entries after
    ui_scale() exist when it returns 3 or more. A text style and an input snapshot are read and written
-   up to their size field, so later fields can be added. */
-#define SWOFTY_OVERLAY_VERSION 3
+   up to their size field, so later fields can be added. The v4 entry after focus() exists when it returns 4 or
+   more. */
+#define SWOFTY_OVERLAY_VERSION 4
 
 enum {
     SWOFTY_TEXT_LEFT = 0x00,
@@ -258,6 +259,8 @@ typedef struct SwoftyOverlay {
     /* v3 */
     int (*input)(const SwoftyPaint *paint, SwoftyInput *out);
     int (*focus)(int on);
+    /* v4 */
+    int (*load_image_rgba)(const char *id, uint32_t width, uint32_t height, const void *rgba);
 } SwoftyOverlay;
 
 #define SWOFTY_TELEMETRY_VERSION 2
@@ -935,7 +938,8 @@ typedef struct SwoftyServices {
    Table version 2 adds report_season: the addon that owns the active career's data group (its career
    content or career.mode record) says the season at the Championship's season_index is year; the core
    then fires career.season.start once per career and year, activates the season's records and freezes
-   its snapshot. Any other caller gets SWOFTY_REFUSED; no career loaded, SWOFTY_ASSET_LATE.
+   its snapshot. Any other caller gets SWOFTY_REFUSED; no career loaded, SWOFTY_ASSET_LATE. A report from
+   off the flow thread also gets SWOFTY_ASSET_LATE, and the core runs it at the next flow tick.
    Table version 3 adds apply_teams: the request {"season": <a career.season record>}; each listed slot
    (1-12) races as its team (the data group's slot table, the Championship's participants), and a team
    with no career rows gets them, built from its donor's (contracts, R&D, standings, initial cash, renown
@@ -1565,6 +1569,73 @@ typedef struct SwoftyMem {
     void (*invalidate)(void);
 } SwoftyMem;
 
+/* Game assets (standard library, swofty/game_assets.hpp), from the core export SwoftyCoreGameAssets; not a SwoftyApi
+   field, so SWOFTY_API_VERSION is unchanged and the table carries its own version. NULL export or table: a core
+   without it. Table version 1. Every call reads the game's archives in the game folder, with the overlay archives
+   the launcher layers on them on top; it blocks on file reads, so call it off the game's threads. Calls are safe
+   from any thread. The results are the SWOFTY_ASSET_* codes plus SWOFTY_TOO_SMALL; unavailable when the game
+   folder is unknown, invalid for a bad argument or a resource, catalogue or name the game does not have.
+   read: the decompressed bytes of fragment `fragment` of the resource at an eaid:// URI, or of all its fragments one
+   after another with SWOFTY_GAME_ALL_FRAGMENTS; *len is set to the size, and a NULL buf or a cap below it returns
+   SWOFTY_TOO_SMALL. The first call for a package (eaid://<package>/...) opens the index of every archive in
+   2025_asset_groups/<package>/ and keeps it. texture: the header of the texture or texture array at uri (its first
+   fragment): the engine format id, the size of the top level, the level and layer counts. texture_rgba: one level of
+   one layer decoded to straight RGBA8 rows, top row first, width*height*4 bytes; formats 52 and 54 (BC1), 55 and 57
+   (BC3), 65 (BC5, blue 0 and alpha 255) and 69 and 70 (BC7). catalogue_find: the texture array of a UI image
+   catalogue entry and its layer: catalogue is the dotted name of a list in a UI database, the first part naming
+   eaid://ui_package/databases/<part>.uidb ("overrides.team_logos.driver_career_2024_team_select"), name an entry's
+   Name ("redbull"); texture_uri gets the array's eaid:// URI (SWOFTY_TOO_SMALL with *len when cap is too small).
+   catalogue_name: the Name of the entry at index (an empty name for an entry without one), SWOFTY_ASSET_LATE past
+   the last entry. */
+#define SWOFTY_GAME_ASSETS_VERSION 1
+#define SWOFTY_GAME_ALL_FRAGMENTS 0xffffffffu
+
+typedef struct SwoftyGameTexture {
+    uint32_t format, width, height, levels, layers;
+} SwoftyGameTexture;
+
+typedef struct SwoftyGameAssets {
+    uint32_t version;
+    int (*available)(void);
+    int (*read)(const char *uri, uint32_t fragment, void *buf, size_t cap, size_t *len);
+    int (*texture)(const char *uri, SwoftyGameTexture *out);
+    int (*texture_rgba)(const char *uri, uint32_t layer, uint32_t level, void *rgba, size_t cap, uint32_t *width,
+                        uint32_t *height);
+    int (*catalogue_find)(const char *catalogue, const char *name, char *texture_uri, size_t cap, size_t *len,
+                          uint32_t *layer);
+    int (*catalogue_name)(const char *catalogue, uint32_t index, char *name, size_t cap, size_t *len);
+} SwoftyGameAssets;
+
+/* Game memory writes (standard library, swofty/game_mem.hpp, experimental), from the core export SwoftyCoreGameMem;
+   not a SwoftyApi field, so SWOFTY_API_VERSION is unchanged and the table carries its own version. Table version 1.
+   The owner of every call is the addon whose code calls it (the module of the return address), as the core's
+   loader.log names it.
+   write_data: copies n bytes from bytes into the data binding id at offset. size is the size the caller declares
+   for the binding (sizeof of its type in swofty/game.hpp). The core checks that id is a data binding of the binding
+   set that resolved on this build, that offset + n fits in size, that size is the one every earlier write of id
+   declared, that the size bytes lie in one section of the game exe's image that is not code, that no other addon
+   holds one of the bytes, and with expect (n bytes, or NULL) that the bytes there are expect now. It saves the
+   bytes there on the owner's first write of the range, makes the pages writable for the copy only and puts their
+   protection back. SWOFTY_ASSET_OK, SWOFTY_ASSET_UNAVAILABLE for an unknown or unresolved id or one that is not a
+   data binding, SWOFTY_ASSET_INVALID for any other check that fails (the reason goes to loader.log).
+   restore_data: copies back the saved bytes of the owner's writes of id (NULL: of every binding), newest first.
+   SWOFTY_ASSET_OK also when the owner wrote nothing there.
+   alloc: size bytes aligned to align (a power of two up to 4096) from the game allocator object allocator through
+   its vtable (+0x18 alloc(self, size, align)); NULL allocator: the game's default allocator (g_Ne_DefaultAllocator).
+   NULL when the allocator is not a game object whose slot points into the exe image, the arguments are out of
+   range or the game's call returns NULL. free: gives p back to allocator (+0x38 free(self, p), NULL: the default
+   one); a NULL p does nothing. Memory from alloc belongs to the game's heap and may be handed to game objects that
+   free it themselves. Every call is safe from any thread. */
+#define SWOFTY_GAME_MEM_VERSION 1
+
+typedef struct SwoftyGameMem {
+    uint32_t version;
+    int (*write_data)(const char *id, size_t size, size_t offset, const void *bytes, size_t n, const void *expect);
+    int (*restore_data)(const char *id);
+    void *(*alloc)(void *allocator, size_t size, size_t align);
+    void (*free)(void *allocator, void *p);
+} SwoftyGameMem;
+
 typedef struct SwoftyApi {
     uint32_t version;
     void (*log)(const char *fmt, ...);
@@ -1596,7 +1667,7 @@ typedef struct SwoftyApi {
 typedef int (*SwoftyAddonInitFn)(const SwoftyApi *api);
 typedef SwoftyAddonInitFn SwoftyModInitFn;
 
-/* Lap host, from the core export SwoftyCoreLapHost; not a SwoftyApi field. Table version 2. What a lap module
+/* Lap host, from the core export SwoftyCoreLapHost; not a SwoftyApi field. Table version 4. What a lap module
    (a plugin that records laps and serves lap boards) needs from the core beyond the SDK. A string a function
    returns belongs to the calling thread until its next call of this table; never NULL. NULL table: a core
    without it.
@@ -1627,7 +1698,21 @@ typedef SwoftyAddonInitFn SwoftyModInitFn;
    line or the pause, on the flow thread, and the finish before the lap's file is written. A core before 1.10.0
    refuses the pause marks. The core stamps the moment and hands it to the launcher, which sends it off the game's
    threads; 1 queued, 0 refused. A module takes a table of at least SWOFTY_LAP_HOST_V1_SIZE bytes and
-   calls mark only on version 2 or later. */
+   calls mark only on version 2 or later.
+   Table version 4 adds input at the end: the input devices Windows lists and the core's virtual pad, for the lap
+   file's input record. out->size is the caller's sizeof(SwoftyLapInput); the core fills at most that many bytes and
+   answers 1, or 0 for a NULL or short out. It never waits: the device list is read on a thread of the core's own,
+   at most every 5 seconds while someone asks, so the first answer of a process has age_s below 0 and no devices.
+   pad_*: the virtual pad (XInputGetState and XInputGetCapabilities of slot 0, which the core answers while a claim
+   holds it). pad_owners and pad_owners_seen are SWOFTY_LAP_PAD_* bits: who holds a claim now, and who held one
+   since the process started. pad_set counts the slot 0 reads the virtual pad answered with held buttons or
+   triggers, pad_idle the reads it answered with an idle pad because no real pad was in slot 0, and pad_real the
+   reads a real pad passed through while a claim held it; all three only grow. devices: the game controllers,
+   XInput slots first, then the HID joysticks, gamepads and multi-axis controllers Raw Input lists (an XInput pad
+   is in both, its HID entry with SWOFTY_LAP_INPUT_XINPUT_HID). devices_total counts every one found, past the 16
+   the array holds; keyboards and mice are counted only. name is the HID product string, UTF-8, "" when it
+   could not be read; vendor and product are 0 when unknown. A module calls input only on version 4 or later, on
+   a table of at least SWOFTY_LAP_HOST_V3_SIZE + sizeof(void *) bytes. */
 typedef struct SwoftyLapClient {
     uint32_t size, version;
     void (*offer)(void);
@@ -1662,6 +1747,40 @@ typedef struct SwoftyLapMotion {
     float pos[3], vel[3], angvel[3], quat[4], spin[4], slip_angle[4], slip_ratio[4], drs;
     int32_t player, ai;
 } SwoftyLapMotion;
+
+#define SWOFTY_LAP_INPUT_DEVICES 16
+#define SWOFTY_LAP_INPUT_NAME 64
+#define SWOFTY_LAP_INPUT_KIND_XINPUT 1u
+#define SWOFTY_LAP_INPUT_KIND_JOYSTICK 2u
+#define SWOFTY_LAP_INPUT_KIND_GAMEPAD 3u
+#define SWOFTY_LAP_INPUT_KIND_MULTI_AXIS 4u
+#define SWOFTY_LAP_INPUT_VIRTUAL 1u
+#define SWOFTY_LAP_INPUT_XINPUT_HID 2u
+#define SWOFTY_LAP_PAD_TITLE 1u
+#define SWOFTY_LAP_PAD_AGENT 2u
+#define SWOFTY_LAP_PAD_PLUGIN 4u
+
+/* One game controller. kind: SWOFTY_LAP_INPUT_KIND_*. slot: the XInput user index of an XInput device, 255
+   otherwise. subtype: the XInput XINPUT_DEVSUBTYPE_* of an XInput device (1 gamepad, 2 wheel, 3 arcade stick,
+   4 flight stick, ...), 0 otherwise. flags: SWOFTY_LAP_INPUT_VIRTUAL for slot 0 answered by the virtual pad,
+   SWOFTY_LAP_INPUT_XINPUT_HID for a HID entry whose device path marks an XInput device. usage_page and usage are
+   the HID top-level collection's, 0 for an XInput slot. */
+typedef struct SwoftyLapInputDevice {
+    uint8_t kind, slot, subtype, flags;
+    uint16_t vendor, product, usage_page, usage;
+    char name[SWOFTY_LAP_INPUT_NAME];
+} SwoftyLapInputDevice;
+
+typedef struct SwoftyLapInput {
+    uint32_t size, version;
+    uint32_t pad_owners, pad_owners_seen;
+    uint64_t pad_set, pad_idle, pad_real;
+    uint32_t keyboards, mice, count, devices_total;
+    double age_s;
+    SwoftyLapInputDevice devices[SWOFTY_LAP_INPUT_DEVICES];
+} SwoftyLapInput;
+
+#define SWOFTY_LAP_INPUT_VERSION 1
 
 typedef void (*SwoftyLapFlowLinkFn)(uint8_t *state, uint32_t *link);
 typedef int32_t (*SwoftyLapSectionFn)(void *user, const char *tag, const void *bytes, uint32_t len);
@@ -1714,11 +1833,14 @@ typedef struct SwoftyLapHost {
     int (*mark)(int32_t lap, int32_t which, int32_t game_ms);
     /* Version 3: the core's own version (the launcher's, such as "1.10.0"), for the lap file header. */
     const char *(*core_version)(void);
+    /* Version 4: the input devices and the virtual pad, SwoftyLapInput. */
+    int (*input)(SwoftyLapInput *out);
 } SwoftyLapHost;
 
-#define SWOFTY_LAP_HOST_VERSION 3
+#define SWOFTY_LAP_HOST_VERSION 4
 #define SWOFTY_LAP_HOST_V1_SIZE offsetof(SwoftyLapHost, mark)
 #define SWOFTY_LAP_HOST_V2_SIZE offsetof(SwoftyLapHost, core_version)
+#define SWOFTY_LAP_HOST_V3_SIZE offsetof(SwoftyLapHost, input)
 #define SWOFTY_LAP_CAR_SPEED 1u
 #define SWOFTY_LAP_CAR_PEDALS 2u
 #define SWOFTY_LAP_CAR_STEER 4u
@@ -1792,6 +1914,8 @@ typedef const SwoftyCarOps *(*SwoftyCoreCarOpsFn)(void);
 typedef const SwoftyContentOps *(*SwoftyCoreContentOpsFn)(void);
 typedef const SwoftyLive *(*SwoftyCoreLiveFn)(void);
 typedef const SwoftyMem *(*SwoftyCoreMemFn)(void);
+typedef const SwoftyGameAssets *(*SwoftyCoreGameAssetsFn)(void);
+typedef const SwoftyGameMem *(*SwoftyCoreGameMemFn)(void);
 typedef const SwoftyLapHost *(*SwoftyCoreLapHostFn)(void);
 typedef const SwoftySessionHost *(*SwoftyCoreSessionHostFn)(void);
 typedef uint32_t (*SwoftyCoreLangVersionFn)(void);
@@ -1817,6 +1941,8 @@ SWOFTY_EXPORT const SwoftyCarOps *SwoftyCoreCarOps(void);
 SWOFTY_EXPORT const SwoftyContentOps *SwoftyCoreContentOps(void);
 SWOFTY_EXPORT const SwoftyLive *SwoftyCoreLive(void);
 SWOFTY_EXPORT const SwoftyMem *SwoftyCoreMem(void);
+SWOFTY_EXPORT const SwoftyGameAssets *SwoftyCoreGameAssets(void);
+SWOFTY_EXPORT const SwoftyGameMem *SwoftyCoreGameMem(void);
 SWOFTY_EXPORT const SwoftyLapHost *SwoftyCoreLapHost(void);
 SWOFTY_EXPORT const SwoftySessionHost *SwoftyCoreSessionHost(void);
 SWOFTY_EXPORT uint32_t SwoftyCoreLangVersion(void);

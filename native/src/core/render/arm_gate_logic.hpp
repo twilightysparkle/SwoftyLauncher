@@ -17,9 +17,11 @@
 // device is released, as when the arm runs in the stage.
 //
 // A call goes straight through when it comes from the worker, from a thread that holds the loader lock (the worker
-// may need it to load the driver), from the core's own code on another thread, or from code under the Windows
-// folder or the game's D3D12 folder (the D3D12 and DXGI runtimes and the driver, whose threads the worker's device
-// may wait for). Any other caller is the game or a module it loaded, and waits.
+// may need it to load the driver), or from code under the Windows folder or the game's D3D12 folder (the D3D12 and
+// DXGI runtimes and the driver, whose threads the worker's device may wait for). Any other caller waits: the game, a
+// module it loaded, and the core's own code on another thread (the profiler's adapter walk). Steam's overlay hooks
+// each new factory's vtable on its first CreateDXGIFactory calls, and two threads that make their first factories at
+// once both install that hook and can leave its original-function pointer 0 or pointing back into its own detour.
 
 namespace render::d3d12::arm_gate {
 
@@ -56,10 +58,11 @@ inline Choice choose(const Inputs &in)
     return {true, {}};
 }
 
-// Why a call may go straight through while the worker runs.
+// Who a caller is, for the gate: loader_lock and system go straight through while the worker runs; core (the core's
+// own code on another thread) and none wait.
 enum class Exempt { none, loader_lock, core, system };
 
-enum class Pass { open, worker, loader_lock, core, system, waited, timed_out };
+enum class Pass { open, worker, loader_lock, system, waited, timed_out };
 
 inline const char *pass_name(Pass p)
 {
@@ -70,8 +73,6 @@ inline const char *pass_name(Pass p)
         return "the arm's own call";
     case Pass::loader_lock:
         return "passed: its thread holds the loader lock";
-    case Pass::core:
-        return "passed: the core's own call";
     case Pass::system:
         return "passed: a Windows, D3D12 runtime or driver module's call";
     case Pass::waited:
@@ -102,6 +103,11 @@ inline bool system_module(std::wstring_view module_path, std::wstring_view windo
 
 // Open until schedule() and again from finish(). In between, a call from the worker or an exempt one passes and any
 // other waits for finish(), for at most the cap it is given; one that waits that long goes on (timed_out).
+//
+// The worker still takes the factory hooks out after finish(), and retire() marks the end of that. The exit waits
+// for retire() (wait_retired): ExitProcess ends every other thread, and a worker ended inside a hook removal leaves
+// the page it was patching without execute access or one of the hook library's locks held, so the exiting thread
+// faults on that page without end or waits on that lock for good when the DLLs detach.
 class Gate {
 public:
     void schedule(uint32_t worker)
@@ -120,7 +126,22 @@ public:
         done_.notify_all();
     }
 
+    void retire()
+    {
+        {
+            std::lock_guard<std::mutex> g(lock_);
+            state_.store(RETIRED);
+        }
+        done_.notify_all();
+    }
+
     bool running() const { return state_.load() == RUNNING; }
+
+    bool working() const
+    {
+        int s = state_.load();
+        return s == RUNNING || s == DONE;
+    }
 
     // Read after running() was true: the worker's id is written before the state turns to running.
     bool is_worker(uint32_t thread) const { return state_.load() != IDLE && thread == worker_; }
@@ -138,8 +159,6 @@ public:
             return Pass::worker;
         if (exempt == Exempt::loader_lock)
             return Pass::loader_lock;
-        if (exempt == Exempt::core)
-            return Pass::core;
         if (exempt == Exempt::system)
             return Pass::system;
         auto from = std::chrono::steady_clock::now();
@@ -149,8 +168,26 @@ public:
         return done ? Pass::waited : Pass::timed_out;
     }
 
+    Pass wait_retired(uint32_t thread, std::chrono::milliseconds cap, double *waited_ms = nullptr)
+    {
+        if (waited_ms)
+            *waited_ms = 0;
+        if (!working())
+            return Pass::open;
+        std::unique_lock<std::mutex> g(lock_);
+        if (!working())
+            return Pass::open;
+        if (thread == worker_)
+            return Pass::worker;
+        auto from = std::chrono::steady_clock::now();
+        bool done = done_.wait_for(g, cap, [&] { return !working(); });
+        if (waited_ms)
+            *waited_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - from).count();
+        return done ? Pass::waited : Pass::timed_out;
+    }
+
 private:
-    static constexpr int IDLE = 0, RUNNING = 1, DONE = 2;
+    static constexpr int IDLE = 0, RUNNING = 1, DONE = 2, RETIRED = 3;
     std::mutex lock_;
     std::condition_variable done_;
     std::atomic<int> state_{IDLE};
@@ -184,12 +221,13 @@ template <class Platform> Choice begin(Inputs in, Gate &gate, Platform &p)
 }
 
 // The worker: the block, with the probe device made and released inside it, then the gate opens and the factory
-// export hooks come out (the device export's stays until the game's first call through it).
+// export hooks come out (the device export's stays until the game's first call through it), then it retires.
 template <class Platform> void run_worker(Gate &gate, void (*block)(), Platform &p)
 {
     block();
     gate.finish();
     p.unhook_factories();
+    gate.retire();
 }
 
 }

@@ -2,6 +2,7 @@
 
 #include "core/frontend/main_menu/context.hpp"
 #include "core/frontend/main_menu_logic.hpp"
+#include "core/frontend/tt_blocked.hpp"
 #include "core/frontend/ui_vm.hpp"
 #include "core/apply/moments.hpp"
 
@@ -195,6 +196,11 @@ Action *Navigation::card_pressed(HomeItem *item, Action *out)
         return out;
     }
     bool gp = !std::strcmp(id_of(item), ID_GRAND_PRIX);
+    if (!gp && tt_blocked::refuse("the main menu's Time Trial card")) {
+        out->type = 0;
+        out->str = nullptr;
+        return out;
+    }
     const char *route = route_name();
     if (entry_by_route()) {
         if (gp)

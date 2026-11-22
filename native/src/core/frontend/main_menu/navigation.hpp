@@ -32,6 +32,7 @@ public:
     uint64_t went_home(void *vm, uint8_t state);
     swofty::game::NeStr **migrated(void *cmd, swofty::game::NeStr **out, void *node);
     void route_fired(void *router, void *vm, swofty::game::NeStr **name, uint64_t a4);
+    void hook_container();
 
 private:
     enum class Step { idle, wait_container, done };
@@ -68,13 +69,13 @@ private:
     void hook_migrate();
     void hook_addtabs();
     void hook_gohome();
-    void hook_container();
     void recover(Expect e);
     void watch_cover();
     void watch_saves_back(uint64_t now);
 
     Chain chain;
     std::mutex chain_lock;
+    std::mutex container_hook_lock;
     NavState nav;
     std::mutex flow_lock;
     std::string flow_now = FRONTEND_FLOW;

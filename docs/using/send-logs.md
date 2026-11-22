@@ -43,8 +43,9 @@ When a game session ends in a crash, the launcher opens a full-window **F1 25 cr
 | F1 25 left the race weekend for Team HQ as it opened | The core's `[career] session ended <N> ms after start (StateSession exited; the career hub opened <M> ms after start)` line, then a crash in F1 25's code reading `0x9c58` at `Game_Read_OverridesCarMonitorMaximisedConfig_2+0xe6c` (`fn base+0x1f8aff0+0xe6c` on the current Steam build). The screen names the round and, when the `[career] hub opened` line names it, the calendar item the check put first, such as a season break over the race weekend |
 | Your graphics driver stopped responding | `DXGI_ERROR_DEVICE_REMOVED` (`0x887a0005`) in the crash. When Swofty's in-game overlay drew just before, the screen names the addons it drew for. It also names full car packs on at once that replace each other's cars, and frame generation when it is on |
 | F1 25 ran out of graphics memory | `E_OUTOFMEMORY` (`0x8007000e`) in the crash |
+| An addon stopped F1 25 from starting | A crash in F1 25's own code before its window opened and before the game made a DXGI factory or a D3D12 device, while an addon on in the profile puts its own `game.dat` or `game.daf`, the files that hold F1 25's packed game data. The screen names the addon and says to turn it off, and, for an addon made for another F1 game, such as one with a `2020_asset_groups` folder, to remove it |
 | A program that hooks into games | The crash in RivaTuner Statistics Server, Windhawk, Medal, Discord's overlay, OBS Studio's game capture, the NVIDIA app's overlay, the Steam overlay, Special K, or Windows' force feedback driver for a wheel (`pid.dll`). With no unhandled exception and no crash report, the last exception the mod loader saw counts when the game's exit code matches it |
-| Graphics mods in the game folder | ReShade, OptiScaler, Special K or an ASI loader in the game folder, and a crash in graphics code or before the game's window opened |
+| Graphics mods in the game folder | ReShade, OptiScaler, Special K or an ASI loader in the game folder, and a crash in graphics code, or a crash before the game's window opened once the game made a DXGI factory or a D3D12 device, or on the thread where Swofty's core made its own. A crash before either doesn't name them |
 | A crash in the graphics driver | The crash in an NVIDIA, AMD or Intel driver DLL |
 | A crash in frame generation | The crash in DLSS Frame Generation or XeSS frame generation |
 
@@ -54,7 +55,7 @@ A session that ended without a crash opens the same screen for a known problem t
 
 | Cause | What the launcher looks for |
 |---|---|
-| Your addons' team logos were not built | `team.logo: the game can't create files in swofty/addons/swofty.logos/ (error N)`: F1 25 couldn't write the team logo archives, and the logos and badges addons add were missing. The screen names the folder and the Windows error. `state/wrapper-run.log` gets a `[warning] known problem logos_not_built: ...` line |
+| Your addons' team logos were not built | `team.logo: the game can't create files in swofty/addons/swofty.logos/ (error N)`: F1 25 couldn't write the team logo archives, and the logos and badges addons add were missing. The screen names the folder and the Windows error, and says to run Swofty Launcher as administrator, or, when the launcher already runs as administrator, to move F1 25 to a folder outside Program Files. `state/wrapper-run.log` gets a `[warning] known problem logos_not_built: ...` line |
 | F1 25 could not save your profile | `[saves] profile save: writing back the kept save containers failed with code N`: the game failed the save and showed its corrupted save prompt. With an older mod loader's `[saves] put back ReplayHighlights_ReplayHighlights` line in the same log, the race highlights had gone into the profile save and made it too big to write; the screen says to update Swofty Launcher. It also says that Continue Without Saving and Cancel on the prompt both leave the save file as it is, and that only the progress since the last save that worked is not kept. `state/wrapper-run.log` gets a `[warning] known problem profile_not_saved: ...` line |
 | Your career is stuck at the start of a race weekend | The session's last Team HQ weekend line is `[career] weekend already started, session never ran: round N/M, ...`, with no `StateLoadSession` after it: the career was saved inside a race weekend before any session of it ran. The screen names the round and the track and points to **Restore** on the Career saves page. A session that then hit F1 25's error on closing shows this instead of **F1 25 hit an error as it closed**. `state/wrapper-run.log` gets a `known problem stuck_weekend: ...` line |
 
@@ -100,9 +101,7 @@ The logs go to the developers' Discord as one zip file, `swofty-logs-<username>-
 | `config.json` | The launcher's settings |
 | `game/career-editor/snapshot.json` | The Career Mode Editor's snapshot, when the game folder has one |
 
-The logs can include folder paths with your computer's user name, your hardware, and your installed mods and profiles. Passwords, tokens and keys in `config.json`, in addon settings and in each session's `env.txt` are replaced with `[redacted]`. Each file is cut to its last 5 MB, and the whole zip holds at most 40 MB before compression.
-
-A bot in the developers' Discord reads each report with Anthropic's Claude API to suggest a cause, so the zip's contents are also sent to Anthropic.
+The logs can include folder paths with your computer's user name, your hardware, and your installed mods and profiles. Passwords, tokens and keys in `config.json`, in addon settings and in each session's `env.txt` are replaced with `[redacted]`. Each file is cut to its last 5 MB. A `loader.log` over 5 MB keeps its first 2.5 MB, up to 512 KB from its `stage: window` line, and its end. The whole zip holds at most 40 MB before compression.
 
 ## From the command line
 

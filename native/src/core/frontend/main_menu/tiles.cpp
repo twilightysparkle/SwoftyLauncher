@@ -4,6 +4,7 @@
 #include "core/frontend/main_menu/context.hpp"
 #include "core/frontend/main_menu_logic.hpp"
 #include "core/frontend/tile_list.hpp"
+#include "core/frontend/tt_blocked.hpp"
 #include "core/frontend/vm_string.hpp"
 
 #include <swofty/game.hpp>
@@ -281,7 +282,11 @@ void Tiles::populate_card(HomeItem *item, void *node, uint32_t a7)
     uint8_t no = 0;
     set_string(reg, parent, "title", gp ? "GRAND PRIX" : "TIME TRIAL");
     Vm_Set_Bool(reg, parent, "title_localised", &no, 1);
-    set_string(reg, parent, "description", gp ? "Race a Grand Prix weekend" : "Set the fastest lap on any track");
+    const char *blocked = gp ? nullptr : tt_blocked::card_description();
+    set_string(reg, parent, "description",
+               gp        ? "Race a Grand Prix weekend"
+               : blocked ? blocked
+                         : "Set the fastest lap on any track");
     Vm_Set_Bool(reg, parent, "description_localised", &no, 1);
     style_item(item);
 }

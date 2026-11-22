@@ -9,7 +9,7 @@ use swofty_i18n::{tr, trf};
 
 use super::moderation::flag;
 use super::state::{Load, Pick, TtPage, View};
-use crate::shell::Shell;
+use crate::shell::{PlayState, Shell};
 use crate::ui::scale::{Hit, px};
 use crate::ui::theme::{Palette, ScrollArea};
 use crate::ui::tokens::space::GUTTER;
@@ -30,6 +30,7 @@ impl Shell {
             .label(tr("Refresh"))
             .on_click(cx.listener(|this, _, _, cx| {
                 TtPage::load_barred(this, cx);
+                TtPage::load_integrity(this, cx);
                 TtPage::load_catalog(this, cx);
                 TtPage::reload(this, cx);
                 TtPage::load_runs(this, cx);
@@ -71,6 +72,7 @@ impl Shell {
             }
         };
         let tabs = admin.then(|| self.tt_tabs(p, cx));
+        let blocked = self.tt_integrity_notice(p, cx);
         let header = self.header(
             tr("Time Trial"),
             tr("Leaderboards for every track").to_owned(),
@@ -81,10 +83,52 @@ impl Shell {
         v_flex()
             .size_full()
             .child(header)
+            .children(blocked)
             .children(barred)
             .children(tabs)
             .child(body)
             .into_any_element()
+    }
+
+    /// While a session runs that could not load the integrity module: Time Trial is blocked in game.
+    fn tt_integrity_notice(&mut self, p: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !matches!(self.play_state(), PlayState::Running | PlayState::Launching) {
+            return None;
+        }
+        if self
+            .tt
+            .integrity_read
+            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(5))
+        {
+            TtPage::load_integrity(self, cx);
+        }
+        self.tt.integrity_blocked.as_ref()?;
+        Some(
+            h_flex()
+                .mx(px(GUTTER))
+                .mb(px(12.))
+                .px(px(14.))
+                .py(px(10.))
+                .gap(px(8.))
+                .items_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(p.error.opacity(0.45))
+                .bg(p.error.opacity(0.14))
+                .text_color(p.error)
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size(px(16.))
+                        .text_color(p.error),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(13.))
+                        .child(tr("The integrity module could not be loaded, so Time Trial is blocked in game this session. Start the game again with a working connection, or turn off Time Trial boards in Settings to play it without the boards.")),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The barred addons the active profile has enabled, by name and why, in red.

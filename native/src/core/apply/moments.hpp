@@ -31,6 +31,9 @@ void career_renamed(const char *from, const char *to);
 void box_picked(const char *entrant_list);
 void box_picked(const char *entrant_list, const void *mode_context);
 void session_load(const char *source);
+// StateSession is updating: the loaded session's facts take the weekend's current session again, for a game that moves
+// the weekend on to the session that starts only after that session's start.
+void session_running();
 std::pair<std::string, std::string> session_mode_track();
 // The current championship weekend of the loaded game mode, read live: round and rounds 1-based, the weekend's
 // progress state (0 not started, 1 in progress, 2 complete), the current session's index, the session count and how
@@ -41,6 +44,16 @@ struct CareerWeekend {
     std::string session, track;
 };
 bool career_weekend(CareerWeekend &out);
+// The current championship session's own copy of the entrant records, read live: the session (weekend +0x220 +
+// current index (+0x238) * 0xa0) and its record vector (Session +0x20 .. +0x28, 0x88 per record), at most 64 records.
+// False when the chain does not read (team.vehicle_override, vehicle_override.cpp).
+struct SessionEntrants {
+    uintptr_t session = 0, begin = 0, end = 0;
+    uint32_t session_id = 0;
+};
+bool session_entrants(SessionEntrants &out);
+// Whether this game start is a shared session's (a direct start that targets a room).
+bool room_boot();
 // The kind of game mode the game is in: kept by a watch on its own thread (started by mode_watch) and by every session load.
 facts::ModeKind mode_kind();
 void mode_watch();

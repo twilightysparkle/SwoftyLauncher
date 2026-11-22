@@ -2,6 +2,7 @@
 #include "core/runtime/runtime.hpp"
 #include "core/runtime/settings.hpp"
 #include "core/frontend/main_menu.hpp"
+#include "core/frontend/tt_blocked.hpp"
 #include "core/hud/toast.hpp"
 #include "core/services/lap_host.hpp"
 #include "core/render/badges/badge_images.hpp"
@@ -91,6 +92,7 @@ const Step STEPS[] = {
     {"lap_host::tick", [] { runtime::lap_host::tick(); }},
     {"popup_tick", [] { runtime::popup_tick(); }},
     {"main_menu::tick", [] { frontend::main_menu::tick(); }},
+    {"tt_blocked::tick", [] { frontend::tt_blocked::tick(); }},
     {"mfd_tick", [] { runtime::mfd_tick(); }},
     {"career_content_tick", [] { runtime::career_content_tick(); }},
     {"entitlements_tick", [] { runtime::entitlements_tick(); }},

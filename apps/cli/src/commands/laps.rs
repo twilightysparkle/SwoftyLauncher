@@ -4,11 +4,11 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use serde_json::Value;
-use swofty_core::game_folder::baseline::Identity;
 use swofty_core::install::Game;
 use swofty_core::online::server::api::{Api, Boards};
 use swofty_core::online::server::integrity::{self, Module};
 use swofty_core::online::timetrial::barred::{self, Barred};
+use swofty_core::online::timetrial::fingerprint::{self, Played, Session, Setup};
 use swofty_core::online::timetrial::queue::{Entry, Folder, Limits, Queue, unix_now};
 use swofty_core::online::timetrial::upload::{self, Watcher};
 use swofty_core::online::timetrial::{self, token};
@@ -208,12 +208,6 @@ fn hand_over(game: &std::path::Path, addons: &[Barred]) {
     }
 }
 
-fn fingerprint(store: &Store, profile: &str, identity: &Identity) -> Option<Value> {
-    let p = store.profile(profile).ok()?;
-    let fp = swofty_core::online::multiplayer::fingerprint::fingerprint(store, &p, identity).ok()?;
-    Some(swofty_core::online::timetrial::fingerprint::wire(&fp))
-}
-
 fn send(store: &Store, profile: &str, file: Option<PathBuf>) -> Result<()> {
     let Some(token) = token(&store.root, &store.config()) else {
         bail!(
@@ -223,7 +217,14 @@ fn send(store: &Store, profile: &str, file: Option<PathBuf>) -> Result<()> {
     let api = Api::new(&token);
     let print = crate::commands::build::game(store, None)
         .ok()
-        .and_then(|g| fingerprint(store, profile, &g.identity))
+        .and_then(|g| {
+            let played = Played {
+                store: store.clone(),
+                profile: profile.to_owned(),
+                game_build: g.identity,
+            };
+            played.fingerprint().map(|f| fingerprint::wire(&f))
+        })
         .unwrap_or(Value::Null);
     let queue = Queue::new(&store.root);
     match file {
@@ -270,10 +271,17 @@ pub fn begin(
     g: &Game,
 ) -> Option<Watcher> {
     barred_for_launch(store, profile, &g.dir);
+    hand_over_integrity(&g.dir, session_integrity().as_ref());
     let Some(_) = token(&store.root, config) else {
         timetrial::clear_session_keys(&g.dir);
         return None;
     };
+    let played = Played {
+        store: store.clone(),
+        profile: profile.to_owned(),
+        game_build: g.identity.clone(),
+    };
+    let prints = Session::start(played, |line| say("laps", line));
     let build = Some(g.identity.exe_sha256.to_ascii_lowercase()).filter(|b| !b.is_empty());
     let nonce = match upload::nonce(&store.root, config, build.as_deref()) {
         Ok(n) => Some(n),
@@ -289,7 +297,6 @@ pub fn begin(
         say("laps", &format!("lap recording is off: {e}"));
         return None;
     }
-    let (s, p, identity) = (store.clone(), profile.to_owned(), g.identity.clone());
     let integrity = session_integrity()
         .and_then(|state| serde_json::to_value(state).ok())
         .unwrap_or(Value::Null);
@@ -300,7 +307,7 @@ pub fn begin(
         nonce.is_none(),
         build,
         integrity,
-        move || fingerprint(&s, &p, &identity),
+        prints,
         |line| say("laps", line),
     ))
 }
@@ -309,7 +316,8 @@ pub fn begin(
 pub type Asked = (Result<Module, integrity::Unavailable>, bool);
 
 /// The verified integrity module for a session when Time Trial boards is on and the player is signed in, or
-/// `None` when the session does not ask for it. Any trouble is one log line and the session goes on without it.
+/// `None` when the session does not ask for it. Any trouble is one log line; the session goes on without it and
+/// Time Trial is blocked in game.
 pub fn integrity(store: &Store, out: &dyn Fn(&str)) -> Option<Asked> {
     let token = token(&store.root, &store.config())?;
     let asked = match integrity::local() {
@@ -330,9 +338,13 @@ pub fn integrity(store: &Store, out: &dyn Fn(&str)) -> Option<Asked> {
 
 static SESSION_INTEGRITY: std::sync::Mutex<Option<integrity::State>> = std::sync::Mutex::new(None);
 
+/// The line a session prints when it blocks Time Trial in game.
+pub const BLOCKED_LINE: &str = "integrity module: Time Trial is blocked in game this session, as its laps would not count; \
+     start the game again with a working connection, or turn off Time Trial boards to play it without the boards";
+
 /// Keep what this session did about the integrity module: as the note the launcher shows at Play when none was
-/// placed, and for the laps the session records. `core` is whether the build runs the core; one without it
-/// records no laps, so it asked for nothing.
+/// placed, for the core when the game starts ([`begin`]) and for the laps the session records. `core` is whether
+/// the build runs the core; one without it records no laps, so it asked for nothing.
 pub fn note_integrity(store: &Store, asked: Option<&Asked>, core: bool, out: &dyn Fn(&str)) {
     let asked = asked.filter(|_| core);
     let state = asked.map(|(found, local)| integrity::State::of(found, *local));
@@ -341,6 +353,9 @@ pub fn note_integrity(store: &Store, asked: Option<&Asked>, core: bool, out: &dy
         out(&format!(
             "integrity module: could not keep the note for the launcher: {e}"
         ));
+    }
+    if state.as_ref().and_then(integrity::State::blocked).is_some() {
+        out(BLOCKED_LINE);
     }
     *SESSION_INTEGRITY.lock().unwrap_or_else(|e| e.into_inner()) = state;
 }
@@ -352,10 +367,20 @@ fn session_integrity() -> Option<integrity::State> {
         .clone()
 }
 
+fn hand_over_integrity(game: &std::path::Path, state: Option<&integrity::State>) {
+    if let Err(e) = integrity::write_session(game, state) {
+        say(
+            "laps",
+            &format!("integrity module: the session file is not writable: {e}"),
+        );
+    }
+}
+
 pub fn end(watcher: Option<Watcher>, game: &std::path::Path) {
     if let Some(w) = watcher {
         w.finish();
         timetrial::clear_session_keys(game);
     }
     barred::write_session(game, &[]).ok();
+    hand_over_integrity(game, None);
 }

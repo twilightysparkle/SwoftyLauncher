@@ -3,6 +3,7 @@ use gpui_kit::*;
 use std::convert::Infallible;
 use std::path::Path;
 use swofty_core::online::server::api::{Api, ApiError};
+use swofty_core::online::server::integrity;
 use swofty_core::online::server::sign_in::Session;
 use swofty_core::online::timetrial::barred::{self, Barred};
 use swofty_core::online::timetrial::boards::{Group, Row, Run, RunBoard};
@@ -64,6 +65,8 @@ pub(crate) struct TtPage {
     sub: Option<Subscription>,
     generation: u64,
     pub barred: Vec<Barred>,
+    pub integrity_blocked: Option<String>,
+    pub integrity_read: Option<std::time::Instant>,
 }
 
 impl Default for TtPage {
@@ -92,6 +95,8 @@ impl Default for TtPage {
             sub: None,
             generation: 0,
             barred: Vec::new(),
+            integrity_blocked: None,
+            integrity_read: None,
         }
     }
 }
@@ -216,6 +221,7 @@ impl Hosted for TtPage {
 impl TtPage {
     pub(crate) fn open<H: Host<Self>>(host: &mut H, cx: &mut Context<H>) {
         Self::load_barred(host, cx);
+        Self::load_integrity(host, cx);
         if host.split().1.admin() {
             Self::load_runs(host, cx);
         } else {
@@ -224,6 +230,29 @@ impl TtPage {
         if matches!(host.split().0.catalog, Load::Idle | Load::Failed(_)) {
             Self::load_catalog(host, cx);
         }
+    }
+
+    /// Whether the running session blocks Time Trial in game: the note the wrapper keeps when the session placed
+    /// no integrity module.
+    pub(super) fn load_integrity<H: Host<Self>>(host: &mut H, cx: &mut Context<H>) {
+        let (page, needs) = host.split();
+        page.integrity_read = Some(std::time::Instant::now());
+        let data = needs.data.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let got = cx
+                .background_executor()
+                .spawn(async move { integrity::Notice::read(&data).map(|n| n.why) })
+                .await;
+            this.update(cx, |host, cx| {
+                let page = host.split().0;
+                if page.integrity_blocked != got {
+                    page.integrity_blocked = got;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The barred list, from the cache while it is fresh, else from the server.

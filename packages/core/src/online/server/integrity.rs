@@ -7,13 +7,14 @@
 //! hash; else the offer's `cdn_url`, else the server's file; and when the server can't be reached, the newest
 //! cached copy whose kept offer and bytes still verify and that the server offered within [`CACHE_MAX_AGE`].
 //! Nothing is placed in the game folder unless the signature checks out against the key pinned here. Every
-//! failure is an [`Unavailable`] with one line of text for the log; play goes on without the module.
+//! failure is an [`Unavailable`] with one line of text for the log; the session then hands the core
+//! [`BLOCKED_KEY`] ([`write_session`]) and the core blocks Time Trial in game.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::api::{Api, ApiError};
 use crate::game_folder::baseline::sha256_bytes;
@@ -266,6 +267,40 @@ impl State {
             },
         }
     }
+}
+
+impl State {
+    /// Why Time Trial is blocked in game for a session in this state: every state but [`Status::Loaded`] blocks it.
+    pub fn blocked(&self) -> Option<&str> {
+        (self.state != Status::Loaded).then(|| self.detail.as_deref().unwrap_or_default())
+    }
+}
+
+/// The [`SESSION_FILE`](crate::online::timetrial::SESSION_FILE) key naming the module the session placed:
+/// `{"version", "dll"}`.
+pub const MODULE_KEY: &str = "tt_module";
+/// The [`SESSION_FILE`](crate::online::timetrial::SESSION_FILE) key that blocks Time Trial in game: `{"reason"}`.
+pub const BLOCKED_KEY: &str = "tt_blocked";
+
+/// Hand the core what the session did about the module through
+/// [`SESSION_FILE`](crate::online::timetrial::SESSION_FILE): [`MODULE_KEY`] when one was placed, [`BLOCKED_KEY`]
+/// when the session asked for one and none was placed, and neither when it did not ask (`None`). Other keys stay
+/// as they are.
+pub fn write_session(game: &Path, state: Option<&State>) -> std::io::Result<()> {
+    crate::online::timetrial::edit_session(game, |doc| {
+        doc.remove(MODULE_KEY);
+        doc.remove(BLOCKED_KEY);
+        let Some(state) = state else {
+            return;
+        };
+        match state.blocked() {
+            None => doc.insert(
+                MODULE_KEY.into(),
+                json!({"version": state.version.as_deref().unwrap_or("local"), "dll": DLL}),
+            ),
+            Some(why) => doc.insert(BLOCKED_KEY.into(), json!({"reason": why})),
+        };
+    })
 }
 
 /// The note a session that placed no module leaves in the data folder. The launcher shows it once, as a
@@ -1130,6 +1165,49 @@ pub(crate) mod tests {
         );
         let long = wire(&Err("x".repeat(1000).into()), false);
         assert_eq!(long["detail"].as_str().map(|d| d.chars().count()), Some(200));
+    }
+
+    #[test]
+    fn the_session_keys_tell_the_core_whether_time_trial_is_blocked() {
+        let game = data("ttjson");
+        let file = game.join(crate::online::timetrial::SESSION_FILE);
+        let read = || -> Value { serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap() };
+        let placed = |source| Module {
+            version: "v1".into(),
+            dll: PathBuf::from(DLL),
+            sha256: String::new(),
+            fallback: None,
+            source,
+        };
+        let missing = Unavailable {
+            why: "couldn't reach the server".into(),
+            kind: Kind::Unreachable,
+            status: 0,
+        };
+        write_session(&game, None).unwrap();
+        assert!(!file.exists());
+        crate::online::timetrial::write_session_keys(&game, None, false).unwrap();
+        write_session(&game, Some(&State::of(&Err(missing), false))).unwrap();
+        assert_eq!(
+            read(),
+            json!({"tt_boards": true, "tt_blocked": {"reason": "couldn't reach the server"}})
+        );
+        write_session(&game, Some(&State::of(&Ok(placed(Source::Cache)), false))).unwrap();
+        assert_eq!(read()["tt_module"], json!({"version": "v1", "dll": DLL}));
+        assert!(read().get("tt_blocked").is_none());
+        write_session(&game, Some(&State::of(&Ok(placed(Source::Env)), true))).unwrap();
+        assert_eq!(read()["tt_module"], json!({"version": "local", "dll": DLL}));
+        let refused = Unavailable {
+            why: "no module".into(),
+            kind: Kind::Refused,
+            status: 404,
+        };
+        let state = State::of(&Err(refused), false);
+        assert_eq!(state.blocked(), Some("no module"));
+        crate::online::timetrial::clear_session_keys(&game);
+        write_session(&game, None).unwrap();
+        assert!(!file.exists());
+        std::fs::remove_dir_all(game).ok();
     }
 
     #[test]

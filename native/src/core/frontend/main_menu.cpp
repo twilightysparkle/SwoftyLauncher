@@ -3,6 +3,7 @@
 #include "core/frontend/main_menu.hpp"
 #include "core/frontend/main_menu/context.hpp"
 #include "core/frontend/main_menu_logic.hpp"
+#include "core/frontend/tt_blocked.hpp"
 
 #include <swofty/game.hpp>
 
@@ -86,6 +87,8 @@ bool wants_overlay()
     return !runtime::read_file(runtime::under_swofty("home_menu.json"), size_t(1) << 20).empty();
 }
 
+void arm_container() { menu.navigation.hook_container(); }
+
 bool arm_patch()
 {
     if (!menu.tiles.resolve())
@@ -164,6 +167,8 @@ void command(void *, uint32_t command_hash, uint32_t focused_hash)
     if (!tt && !gp)
         return;
     if (uint64_t at = menu.home_opened_at.load(); at && GetTickCount64() - at < 700)
+        return;
+    if (tt && tt_blocked::active())
         return;
     if (!tt && !menu.navigation.entry_by_route())
         menu.navigation.start_chain(false);

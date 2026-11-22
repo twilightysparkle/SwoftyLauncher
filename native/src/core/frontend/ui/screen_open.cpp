@@ -8,6 +8,7 @@
 
 #include "core/diagnostics/perf.hpp"
 #include "core/frontend/main_menu.hpp"
+#include "core/frontend/tt_blocked.hpp"
 #include "core/frontend/ui/screen_loader.hpp"
 #include "core/runtime/runtime.hpp"
 #include "core/services/lap_host.hpp"
@@ -104,6 +105,7 @@ uint64_t ScreenLoader::opened(void *scene, void *screen, void *a3, void *a4)
         runtime::session_host_screen(chars(*reinterpret_cast<void **>(static_cast<uint8_t *>(screen) + 0x68)));
         frontend::main_menu::screen(chars(*reinterpret_cast<void **>(static_cast<uint8_t *>(screen) + 0x68)));
         runtime::lap_host::screen(chars(*reinterpret_cast<void **>(static_cast<uint8_t *>(screen) + 0x68)));
+        frontend::tt_blocked::screen(chars(*reinterpret_cast<void **>(static_cast<uint8_t *>(screen) + 0x68)));
         runtime::testagent_screen(chars(*reinterpret_cast<void **>(static_cast<uint8_t *>(screen) + 0x68)));
         runtime::direct_start_screen(chars(*reinterpret_cast<void **>(static_cast<uint8_t *>(screen) + 0x68)));
     }

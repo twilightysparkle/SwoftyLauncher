@@ -72,6 +72,8 @@ struct Export {
 struct FakePlatform {
     bool hooks_take = true, thread_starts = true;
     int hooked = 0, unhooked = 0, factories_unhooked = 0, made = 0, resumed = 0;
+    std::chrono::milliseconds unhook_takes{0};
+    std::atomic<bool> factories_out{false};
     std::thread worker;
     std::atomic<bool> go{false};
     std::function<void()> body;
@@ -108,7 +110,12 @@ struct FakePlatform {
     }
 
     void unhook() { unhooked++; }
-    void unhook_factories() { factories_unhooked++; }
+    void unhook_factories()
+    {
+        std::this_thread::sleep_for(unhook_takes);
+        factories_unhooked++;
+        factories_out.store(true);
+    }
 };
 
 ag::Gate *the_gate;
@@ -197,7 +204,8 @@ void test_gate_waits()
 
     std::this_thread::sleep_for(10ms);
     expect(gate.running(), "the gate is running while the worker runs");
-    ag::Pass game_factory = ag::Pass::open, game_device = ag::Pass::open;
+    ag::Pass game_factory = ag::Pass::open, game_device = ag::Pass::open, core = ag::Pass::open;
+    std::thread profiler([&] { core = factory.call("core", ag::Exempt::core); });
     std::thread game([&] {
         game_calling.store(true);
         game_factory = factory.call("game");
@@ -205,23 +213,25 @@ void test_gate_waits()
     });
     auto from = std::chrono::steady_clock::now();
     ag::Pass driver = factory.call("driver", ag::Exempt::system);
-    ag::Pass core = factory.call("core", ag::Exempt::core);
     ag::Pass locked = device.call("loader lock holder", ag::Exempt::loader_lock);
     double quick = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - from).count();
-    expect(driver == ag::Pass::system && core == ag::Pass::core && locked == ag::Pass::loader_lock && quick < 50,
-           "the runtimes and driver, the core and a loader lock holder pass straight through while the worker runs");
+    expect(driver == ag::Pass::system && locked == ag::Pass::loader_lock && quick < 50,
+           "the runtimes and driver and a loader lock holder pass straight through while the worker runs");
     game.join();
+    profiler.join();
     platform.worker.join();
 
     expect(game_factory == ag::Pass::waited && game_device == ag::Pass::open,
            "the game's CreateDXGIFactory made before the worker is done waits for it; its device call then finds it open");
+    expect(core == ag::Pass::waited && trace.at("core CreateDXGIFactory2") > trace.at("probe device released"),
+           "the core's own factory on another thread (the profiler's adapter walk) waits for the worker too");
     expect(trace.at("probe device made, the worker passed") >= 0 && trace.at("probe factory made, the worker passed") >= 0,
            "the worker's own calls pass straight through");
     int released = trace.at("probe device released"), hooks = trace.at("hooks in");
     int game_fac = trace.at("game CreateDXGIFactory2"), game_dev = trace.at("game D3D12CreateDevice");
     expect(hooks >= 0 && released > hooks && game_fac > released && game_dev > game_fac,
            "the game's factory and device come after every hook is in and the probe device is released");
-    expect(trace.at("driver CreateDXGIFactory2") < released && trace.at("core CreateDXGIFactory2") < released,
+    expect(trace.at("driver CreateDXGIFactory2") < released && trace.at("loader lock holder D3D12CreateDevice") < released,
            "the exempt calls went before the worker was done");
     expect(!gate.running() && platform.factories_unhooked == 1 && platform.unhooked == 0,
            "once the worker is done the gate is open and only the factory hooks came out");
@@ -240,6 +250,30 @@ void test_game_after_worker()
     Export device{gate, trace, "D3D12CreateDevice"};
     expect(device.call("game") == ag::Pass::open && trace.at("game D3D12CreateDevice") > trace.at("probe device released"),
            "a game that reaches its device after the worker is done does not wait");
+}
+
+void quick_block() { the_trace->add("block done"); }
+
+void test_exit_waits_for_unhook()
+{
+    ag::Gate gate;
+    Trace trace;
+    FakePlatform platform;
+    the_gate = &gate, the_trace = &trace, the_platform = &platform;
+    platform.unhook_takes = 300ms;
+    platform.body = [&] { ag::run_worker(gate, quick_block, platform); };
+    expect(ag::begin(ready(), gate, platform).worker, "the worker starts");
+    while (gate.running())
+        std::this_thread::yield();
+    expect(gate.working() && !platform.factories_out.load(),
+           "the gate is open while the worker still takes the factory hooks out");
+    double waited = 0;
+    ag::Pass p = gate.wait_retired(thread_key(), ag::WAIT_CAP, &waited);
+    expect(p == ag::Pass::waited && platform.factories_out.load() && waited >= 100,
+           "the exit waits until the worker has taken the factory hooks out");
+    platform.worker.join();
+    expect(!gate.working() && gate.wait_retired(thread_key(), ag::WAIT_CAP) == ag::Pass::open,
+           "once the worker has retired the exit does not wait");
 }
 
 void test_arm_inputs()
@@ -269,6 +303,15 @@ void test_cap()
     gate.finish();
     expect(gate.wait(thread_key(), ag::Exempt::none, 80ms, &waited) == ag::Pass::open && waited == 0,
            "after finish nothing waits");
+    from = std::chrono::steady_clock::now();
+    p = gate.wait_retired(thread_key(), 80ms, &waited);
+    took = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - from).count();
+    expect(p == ag::Pass::timed_out && waited >= 75 && took < 2000,
+           "an exit wait for a worker that does not retire stops at its cap");
+    expect(gate.wait_retired(thread_key() + 2, 80ms) == ag::Pass::worker, "the worker does not wait for itself");
+    gate.retire();
+    expect(gate.wait_retired(thread_key(), 80ms, &waited) == ag::Pass::open && waited == 0,
+           "after retire the exit does not wait");
 }
 
 void test_fallback()
@@ -316,6 +359,7 @@ int main()
     test_system_module();
     test_gate_waits();
     test_game_after_worker();
+    test_exit_waits_for_unhook();
     test_arm_inputs();
     test_cap();
     test_fallback();

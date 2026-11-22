@@ -121,8 +121,8 @@ pub(super) fn show_launch_failed(f: &launch::Failure, window: &mut Window, cx: &
     });
 }
 
-/// A Play whose session could not load the integrity module: the game still starts, but its Time Trial laps
-/// carry no seal and do not rank.
+/// A Play whose session could not load the integrity module: the game still starts, but Time Trial is blocked in
+/// game, as its laps would carry no seal and not rank.
 pub(super) fn show_integrity_missing(n: &integrity::Notice, window: &mut Window, cx: &mut App) {
     let cause = match n.kind {
         integrity::Kind::Unreachable => tr("The launcher couldn't reach Swofty's server in time."),
@@ -131,7 +131,7 @@ pub(super) fn show_integrity_missing(n: &integrity::Notice, window: &mut Window,
     };
     let text = [
         cause.to_owned(),
-        tr("Time Trial laps you drive this session won't be sealed, so they won't rank on the boards. Everything else works as usual. To try again, close the game and press Play.").to_owned(),
+        tr("The integrity module could not be loaded, so Time Trial is blocked in game this session. Start the game again with a working connection, or turn off Time Trial boards in Settings to play it without the boards.").to_owned(),
         trf!("Details: {why}", why = n.why),
     ]
     .join("\n\n");
