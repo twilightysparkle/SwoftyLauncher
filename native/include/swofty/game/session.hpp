@@ -401,6 +401,7 @@ using Sess_Assign_GarageSlotsByTeamOrder_t = void(void *out_assignments, void *e
 inline constexpr fn<"Sess_Assign_GarageSlotsByTeamOrder", Sess_Assign_GarageSlotsByTeamOrder_t> Sess_Assign_GarageSlotsByTeamOrder{}; // L2 experimental
 inline constexpr address<"Sess_AutoCrossRuleset_PlaceVehicles"> Sess_AutoCrossRuleset_PlaceVehicles{}; // L2 experimental
 inline constexpr address<"Sess_Build_ChampionshipEntrantSelection"> Sess_Build_ChampionshipEntrantSelection{}; // L2 experimental
+inline constexpr address<"Sess_Build_DevWeekendStructure"> Sess_Build_DevWeekendStructure{}; // L2 experimental
 using Sess_Build_GroupResult_t = void(void *weekend, uint8_t group, void *result);
 inline constexpr fn<"Sess_Build_GroupResult", Sess_Build_GroupResult_t> Sess_Build_GroupResult{}; // L2 experimental
 inline constexpr address<"Sess_Build_SafetyCarLogicGraph"> Sess_Build_SafetyCarLogicGraph{}; // L2 experimental
@@ -900,6 +901,7 @@ inline constexpr data<"g_Sess_TyreRulesSessionType", uint32_t> g_Sess_TyreRulesS
 inline constexpr data<"g_Sess_VehicleCount", uint32_t> g_Sess_VehicleCount{}; // L2 experimental
 inline constexpr data<"g_Sess_VehicleTable", void *[]> g_Sess_VehicleTable{}; // L2 experimental
 inline constexpr data<"k_Sess_TyreComponentType", void *> k_Sess_TyreComponentType{}; // L2 experimental
+inline constexpr data<"k_Sess_WeekendSetupComponentDesc", uint8_t[32]> k_Sess_WeekendSetupComponentDesc{}; // L2 experimental
 inline constexpr site<"site_Sess_AiRecords_NameHash"> site_Sess_AiRecords_NameHash{}; // L2 experimental
 inline constexpr call<"site_Sess_AiVehicleRegisterCall"> site_Sess_AiVehicleRegisterCall{}; // L2 experimental
 inline constexpr call<"site_Sess_ControllerSystem_ApplyRecordCall"> site_Sess_ControllerSystem_ApplyRecordCall{}; // L2 experimental

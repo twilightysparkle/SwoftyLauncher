@@ -33,6 +33,7 @@ inline constexpr address<"Vm_FinanceHistoryGraph_UpdateCostCapLabelPosition"> Vm
 inline constexpr address<"Vm_FinancePeriod_Bind"> Vm_FinancePeriod_Bind{}; // L2 experimental
 inline constexpr address<"Vm_FinanceTransactionEntry_Bind"> Vm_FinanceTransactionEntry_Bind{}; // L2 experimental
 inline constexpr address<"Vm_FinanceTransactionRow_SetIcon"> Vm_FinanceTransactionRow_SetIcon{}; // L2 experimental
+inline constexpr address<"Vm_Fire_Route"> Vm_Fire_Route{}; // L2 experimental
 inline constexpr address<"Vm_Format_LoyaltyRewardIncomeText"> Vm_Format_LoyaltyRewardIncomeText{}; // L2 experimental
 using Vm_GetOrCreate_ListChild_t = void **(void *registry, void *parent, const uint32_t *hash);
 inline constexpr fn<"Vm_GetOrCreate_ListChild", Vm_GetOrCreate_ListChild_t> Vm_GetOrCreate_ListChild{}; // L2 experimental
@@ -50,6 +51,8 @@ inline constexpr address<"Vm_MyTeamUpgradeScreen_Bind"> Vm_MyTeamUpgradeScreen_B
 inline constexpr address<"Vm_MyTeamWeekendSummary_Bind"> Vm_MyTeamWeekendSummary_Bind{}; // L2 experimental
 inline constexpr address<"Vm_MyTeamWorkforce_Bind"> Vm_MyTeamWorkforce_Bind{}; // L2 experimental
 inline constexpr address<"Vm_NodeSet_Bool"> Vm_NodeSet_Bool{}; // L2 experimental
+using Vm_Node_Clear_t = bool(void *unused, void *node);
+inline constexpr fn<"Vm_Node_Clear", Vm_Node_Clear_t> Vm_Node_Clear{}; // L2 experimental
 using Vm_NotificationButton_BuildNameCommand_t = void *(void *out, void *src, void *a3, void *a4);
 inline constexpr fn<"Vm_NotificationButton_BuildNameCommand", Vm_NotificationButton_BuildNameCommand_t> Vm_NotificationButton_BuildNameCommand{}; // L2 experimental
 inline constexpr address<"Vm_Register_CustomisationAndMenuViewModelTypes"> Vm_Register_CustomisationAndMenuViewModelTypes{}; // L2 experimental
