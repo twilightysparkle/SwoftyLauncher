@@ -86,6 +86,8 @@ UNITS = [
     Unit('game_message_log', 'Stock game message log unit test'),
     Unit('garage_crew', 'Garage crew guard unit test'),
     Unit('garage_setup', 'Garage setup guard unit test'),
+    Unit('setup_layout', 'Setup layout unit test'),
+    Unit('setup_steps', 'Setup steps read unit test'),
     Unit('garage_slots', 'Garage slot guard unit test'),
     Unit('gp_continue', 'Grand Prix continue guard unit test'),
     Unit('gp_track', 'Grand Prix remembered-track fallback unit test'),
@@ -130,6 +132,7 @@ UNITS = [
     Unit('player_name', 'Player name sanitising unit test'),
     Unit('postfx', 'Post-process pass logic unit test'),
     Unit('race_control', 'Race control events unit test', 'zig'),
+    Unit('live_udp', 'Live state UDP source, race HUD visibility and broadcast race control events unit test', 'zig'),
     Unit('tyre_damage', 'Tyre damage events unit test', 'zig'),
     Unit('speech', 'Speech events unit test', 'zig'),
     Unit('race_retirement', 'Race retirement driver guard unit test'),
@@ -151,6 +154,9 @@ UNITS = [
     Unit('arm_gate', 'D3D12 arm gate unit test'),
     Unit('asset_template', 'Asset group template archives unit test'),
     Unit('font_upload', 'Overlay font atlas upload unit test'),
+    Unit('overlay_fonts', 'Overlay loaded fonts, glyph atlas and concave fill unit test',
+         args=['../../apps/launcher/assets/fonts/DejaVuSans.ttf', 'fonts/swofty-test-cff.otf'],
+         inputs=['../apps/launcher/assets/fonts/DejaVuSans.ttf', 'test/fonts/*.otf']),
     Unit('lang_scope', 'String scope unit test'),
     Unit('stall_order', 'Load-stall report running-threads order unit test'),
     Unit('standings_drop', 'Standings dropped scores unit test'),
@@ -336,7 +342,7 @@ SNAPSHOTS = [Program('snapshots_test', [
 
 CAR_LIVE = [Program(t, [Objects([f'test/hooks/{t}.cpp'], ['-Isrc', '-Iinclude', '-std=c++23', '-O1', '-Wall', '-Wextra', '-Werror',
                                                           '-Wno-nullability-completeness', SDK])])
-            for t in ('car_live_test', 'car_profile_test', 'car_identity_test', 'ai_racecraft_test')]
+            for t in ('car_live_test', 'car_profile_test', 'car_identity_test', 'ai_racecraft_test', 'setup_layout_registry_test')]
 
 FAST_FAIL = [Program('fast_fail_test', [Objects(['test/fast_fail_test.cpp'], ['-Isrc', '-std=c++23', '-O2', '-Wall', '-Wextra',
                                                                               '-Wno-nullability-completeness'])])]
@@ -409,7 +415,7 @@ SCRIPTS = [
     Script('game_points', 'Game hook points host test', ['{out}/game_points_test'], cwd='test', programs=[hook_test('game_points')]),
     Script('session_points', 'Session control, AI controller and spectator points host test', ['{out}/session_points_test'],
            cwd='test', programs=[hook_test('session_points')]),
-    Script('car_live', 'Live car operations host test', each('car_live_test', 'car_profile_test', 'car_identity_test', 'ai_racecraft_test'), cwd='test',
+    Script('car_live', 'Live car operations host test', each('car_live_test', 'car_profile_test', 'car_identity_test', 'ai_racecraft_test', 'setup_layout_registry_test'), cwd='test',
            programs=CAR_LIVE),
     Script('w5_review', 'Hook points review test', ['{out}/w5_review_test'], cwd='test',
            programs=[Program('w5_review_test', [Objects(['test/hooks/w5_review_test.cpp'], HOOK_FLAGS)])]),

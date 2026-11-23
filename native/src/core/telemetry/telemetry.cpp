@@ -281,13 +281,14 @@ void setup()
 
 namespace runtime {
 
-bool telemetry_wants_udp() { return g_on && (!live_memory_verified() || live_collision_needs_udp()); }
+bool telemetry_wants_udp() { return g_on; }
 
 void telemetry_udp(const uint8_t *buf, size_t len)
 {
-    if (!g_on || !g_live.load(std::memory_order_acquire))
+    if (!g_on)
         return;
-    if (!udp_tel::identify(buf, len))
+    runtime::live_udp(buf, len);
+    if (!g_live.load(std::memory_order_acquire) || !udp_tel::identify(buf, len))
         return;
     std::vector<udp_tel::Event> events;
     const udp_tel::Spec *sp;

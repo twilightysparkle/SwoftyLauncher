@@ -103,6 +103,7 @@ core/frontend/main_menu/navigation_hooks.cpp: auto h = safetyhook::InlineHook::c
 core/frontend/main_menu/navigation_hooks.cpp: auto h = safetyhook::InlineHook::create(reinterpret_cast<void *>(at), reinterpret_cast<void *>(container_detour)); => inline sig S_CONTAINER
 core/frontend/main_menu/tiles.cpp: if (!VirtualProtect(block.at, sizeof jmp, PAGE_EXECUTE_READWRITE, &old)) { => bytes=5 sig S_BLOCK
 core/frontend/mfd.cpp: auto r = safetyhook::InlineHook::create(reinterpret_cast<void *>(update), reinterpret_cast<void *>(&update_hook)); => inline sig S_UPDATE
+core/diagnostics/tyre_models.cpp: } else if (auto r = safetyhook::InlineHook::create(target, detour)) { => inline sig S_UPDATE_VEHICLE
 core/frontend/player_name.cpp: auto h = safetyhook::InlineHook::create(reinterpret_cast<void *>(at), reinterpret_cast<void *>(&lookup_hook)); => inline sig S_NAME
 core/frontend/player_name/copies.cpp: return WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), data, n, &done) != 0 && done == n; => none
 core/frontend/popup.cpp: auto r = safetyhook::InlineHook::create(reinterpret_cast<void *>(a_construct), reinterpret_cast<void *>(&construct_hook)); => inline rel32 S_MOTD MOTD_CONSTRUCT
@@ -165,17 +166,21 @@ core/hooks/car_live.cpp: g_reset = std::make_unique<GamePoint>("car.reset", "Car
 core/hooks/car_live.cpp: g_replay = std::make_unique<GamePoint>("car.upgrades.replayed", "Car_Upgrades_ApplyToVehicle", => inline binding Car_Upgrades_ApplyToVehicle
 core/hooks/car_live.cpp: g_wing = std::make_unique<GamePoint>("car.parts.register", "Car_FrontWing_Init", reinterpret_cast<void *>(&d_wing_init), => inline binding Car_FrontWing_Init
 core/hooks/car_live.cpp: std::make_unique<GamePoint>("car.damage", "Car_FrontWing_OnCollision", reinterpret_cast<void *>(&d_wing_hit), game_ops()); => inline binding Car_FrontWing_OnCollision
+core/hooks/car_live.cpp: g_apply = std::make_unique<GamePoint>("car.setup.apply_entry", "Car_Setup_ApplyTuning", => inline binding Car_Setup_ApplyTuning
 core/hooks/car_live.cpp: g_pit = std::make_unique<GamePoint>("session.pit", "Game_Pitlane_SetVehicleStatus", reinterpret_cast<void *>(&d_pit_status), => inline binding Game_Pitlane_SetVehicleStatus
 core/hooks/car_live.cpp: g_pit_tyres = std::make_unique<GamePoint>("session.pit_stop.tyres", "Game_PitLane_ApplyPitstopTyres", => inline binding Game_PitLane_ApplyPitstopTyres
 core/hooks/car_live.cpp: std::make_unique<session_points::MidPoint>("car.setup.applied", "site_Car_SetupTuningApplied", &m_setup, game_ops()); => mid binding site_Car_SetupTuningApplied
 core/hooks/dispatch.hpp: virtual bool install(bool late, const std::string &subscribers) = 0; => none
 core/hooks/game_point.hpp: bool install(bool late, const std::string &subscribers) override => none
 core/hooks/game_point.hpp: auto h = safetyhook::InlineHook::create(reinterpret_cast<void *>(at), detour_); => via
+core/hooks/game_points.cpp: auto h = safetyhook::MidHook::create(reinterpret_cast<void *>(at), FNS[i]); => mid binding site_Game_DriverSelect_TeamLogoFormat site_Game_TeamSelect_TeamLogoFormat
+core/hooks/game_points.cpp: bool install(bool late, const std::string &subscribers) override => none
 core/hooks/game_points.hpp: slot = std::make_unique<GamePoint>(s.point, s.binding, detour, ops); => via
 core/hooks/game_points.hpp: make(add, ADD_ACTIVITY, reinterpret_cast<void *>(&d_add_activity), ce::AddActivity::version); => inline spec ADD_ACTIVITY
 core/hooks/game_points.hpp: make(decide, DECIDE, reinterpret_cast<void *>(&d_decide), ce::ContractDecide::version); => inline spec DECIDE
 core/hooks/game_points.hpp: make(sign, SIGN, reinterpret_cast<void *>(&d_sign), ce::ContractSign::version); => inline spec SIGN
 core/hooks/game_points.hpp: make(fuel, FUEL, reinterpret_cast<void *>(&d_fuel), te::FuelLoad::version); => inline spec FUEL
+core/hooks/car_live.cpp: if (!VirtualProtect(p, sizeof want, PAGE_EXECUTE_READWRITE, &old)) => bytes=2 binding site_Game_Mfd_FuelMixMaxRaceGate
 core/hooks/session_points.cpp: if (!VirtualProtect(slot, sizeof(void *), PAGE_READWRITE, &old)) => via
 core/hooks/session_points.hpp: bool install(bool late, const std::string &subscribers) override => none
 core/hooks/session_points.hpp: auto h = safetyhook::MidHook::create(reinterpret_cast<void *>(at), fn_); => via
@@ -257,3 +262,6 @@ core/testing/virtual_pad.cpp: auto g = safetyhook::InlineHook::create(get, reint
 core/testing/virtual_pad.cpp: auto c = safetyhook::InlineHook::create(caps, reinterpret_cast<void *>(x_get_caps)); => outside xinput
 loader/version.c: if (!VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old)) => import USER32.dll!RegisterClassExW USER32.dll!CreateWindowExW KERNEL32.dll!CreateMutexW
 loader/version.c: if (!VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old)) => outside kernel32 kernelbase
+core/hooks/setup_layout_hooks.cpp: auto b = runtime::loader::install(h_build, build, S_BUILD.what, reinterpret_cast<void *>(&d_build)); => inline sig S_BUILD
+core/hooks/setup_layout_hooks.cpp: auto p = runtime::loader::install(h_populate, populate, S_POPULATE.what, reinterpret_cast<void *>(&d_populate)); => inline sig S_POPULATE
+core/hooks/setup_layout_hooks.cpp: auto ch = runtime::loader::install(h_changed, changed, S_VALUE_CHANGED.what, reinterpret_cast<void *>(&d_changed)); => inline sig S_VALUE_CHANGED

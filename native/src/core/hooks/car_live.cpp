@@ -1,6 +1,8 @@
 #include "core/runtime/loader/core_sets.hpp"
 #include "core/runtime/runtime.hpp"
 
+#include <windows.h>
+
 #include <swofty/mem.hpp>
 #include <swofty/mixin.hpp>
 
@@ -16,6 +18,7 @@
 #include "core/apply/content/appliers.hpp"
 #include "core/apply/content/race_fuel.hpp"
 #include "core/apply/content/setup_locks.hpp"
+#include "core/apply/content/setup_steps.hpp"
 #include "core/career/ops/tables.hpp"
 #include "core/diagnostics/perf.hpp"
 #include "core/registry/table.hpp"
@@ -27,6 +30,7 @@
 #include "core/hooks/core_events.hpp"
 #include "core/hooks/hooks.hpp"
 #include "core/hooks/player_facts.hpp"
+#include "core/hooks/setup_layout_hooks.hpp"
 #include "core/hooks/race_fuel_rules.hpp"
 #include "core/frontend/view_state.hpp"
 #include "core/hooks/session_points.hpp"
@@ -59,7 +63,7 @@ bool on_flow_thread()
 }
 
 std::unique_ptr<session_points::MidPoint> g_built, g_setup;
-std::unique_ptr<GamePoint> g_reset, g_replay, g_wing, g_hit, g_pit, g_pit_tyres;
+std::unique_ptr<GamePoint> g_reset, g_replay, g_wing, g_hit, g_pit, g_pit_tyres, g_apply;
 
 // Set to 0 by the pit stop tyres detour around the game's change; race_tyres_keep sets it to 1 when it keeps the set.
 thread_local int t_tyres_kept = -1;
@@ -201,10 +205,47 @@ void lock_setup_entry(uintptr_t entry)
                     static_cast<unsigned long long>(added), static_cast<unsigned long long>(*mask));
 }
 
+// Car_Setup_ApplyTuning's third argument is the block of steps it applies; the end site (m_setup) runs inside the call,
+// so the entry hook keeps the block for it (setup_steps.hpp).
+thread_local uintptr_t t_apply_block = 0;
+
+void d_apply_tuning(void *entry, void *mask, void *block)
+{
+    setup_layout_hooks::refresh();
+    uintptr_t before = t_apply_block;
+    t_apply_block = reinterpret_cast<uintptr_t>(block);
+    g_apply->original<void>(entry, mask, block);
+    t_apply_block = before;
+}
+
+std::atomic<uint32_t> g_setup_paths{0};
+
 void m_setup(safetyhook::Context &ctx)
 {
     lock_setup_entry(ctx.rsi);
-    Ops::setup_applied(ctx.rdi);
+    apply::content::SetupSteps steps{};
+    auto read = [](uintptr_t a, void *out, size_t n) {
+        if (!mem::readable(a, n))
+            return false;
+        std::memcpy(out, reinterpret_cast<const void *>(a), n);
+        return true;
+    };
+    bool hooked = t_apply_block != 0;
+    bool got = hooked && apply::content::read_setup_steps(t_apply_block, read, steps);
+    uint32_t path = got ? 0 : 1;
+    if (!got && ctx.rsi) {
+        got = apply::content::read_setup_steps(apply::content::setup_entry_block(ctx.rsi, read), read, steps);
+        if (got)
+            path = 2;
+    }
+    uint32_t bit = 1u << (path + (hooked ? 0 : 3));
+    if (!(g_setup_paths.fetch_or(bit, std::memory_order_relaxed) & bit))
+        swofty::log("[setup] setup applied (thread %lu, ApplyTuning entry hook %s): steps %s", GetCurrentThreadId(),
+                    hooked ? "ran" : "did not run",
+                    path == 0   ? "from the hook's block"
+                    : path == 2 ? "from the setup entry's active block"
+                                : "not read");
+    Ops::setup_applied(ctx.rdi, got ? steps.data() : nullptr);
 }
 
 void d_reset(void *loader, uint32_t arg)
@@ -726,7 +767,13 @@ void frame(double, void *)
     {
         mem::Trust trust(runtime::HEAP_TRUST_MS);
         perf::Scope scope(unlock_probe);
-        Ops::unlock_tick();
+        const int gate = Ops::unlock_tick();
+        if (gate > 0) {
+            static std::atomic<bool> told{false};
+            if (!told.exchange(true))
+                swofty::log("[cars] fuel mix: an add-on unlocked Max, so the MFD offers it in race sessions too "
+                            "(site_Game_Mfd_FuelMixMaxRaceGate patched); the rule is put back when the unlock clears");
+        }
         Ops::racecraft_tick();
     }
     const frontend::view::State view_now = frontend::view::current();
@@ -768,7 +815,7 @@ void frame(double, void *)
             events::car_upgrades_replayed(car, p.progress);
             break;
         case Ops::What::setup:
-            events::car_setup_applied(car);
+            events::car_setup_applied(car, p.has_steps ? p.steps : nullptr);
             break;
         case Ops::What::damage:
             events::car_damage(car, p.part, p.progress);
@@ -848,6 +895,28 @@ void setup()
             };
         else
             swofty::log("[cars] fuel_ecu fields off: Car_FuelEcu_SetMode_Thunk does not resolve");
+        e.race_max_gate = [](bool lifted) {
+            static const uintptr_t at = swofty::api->resolve("site_Game_Mfd_FuelMixMaxRaceGate");
+            if (!at)
+                return false;
+            static const uint16_t stock = 0x2172, lifted_bytes = 0x9090;
+            uint16_t now = 0;
+            if (!mem::read(at, now))
+                return false;
+            const uint16_t want = lifted ? lifted_bytes : stock, from = lifted ? stock : lifted_bytes;
+            if (now == want)
+                return true;
+            if (now != from)
+                return false;
+            DWORD old = 0, back = 0;
+            auto p = reinterpret_cast<void *>(at);
+            if (!VirtualProtect(p, sizeof want, PAGE_EXECUTE_READWRITE, &old))
+                return false;
+            std::memcpy(p, &want, sizeof want);
+            VirtualProtect(p, sizeof want, old, &back);
+            FlushInstructionCache(GetCurrentProcess(), p, sizeof want);
+            return true;
+        };
         e.mode_avail = [rva = runtime::car_layout::mode_avail_rva(build)] {
             uintptr_t at = swofty::api->module_base() + rva, ptr = 0;
             return mem::read(at, ptr) && mem::object_like(ptr) ? ptr : uintptr_t(0);
@@ -939,6 +1008,8 @@ void declare_car_points(Table &t)
                                               reinterpret_cast<void *>(&d_pit_tyres), game_ops());
     t.declare_game("session.pit_stop.tyres", SWOFTY_POINT_NOTIFY, swofty::sessions::events::PitStopTyres::version,
                    g_pit_tyres.get());
+    g_apply = std::make_unique<GamePoint>("car.setup.apply_entry", "Car_Setup_ApplyTuning",
+                                          reinterpret_cast<void *>(&d_apply_tuning), game_ops());
     g_setup =
         std::make_unique<session_points::MidPoint>("car.setup.applied", "site_Car_SetupTuningApplied", &m_setup, game_ops());
     t.declare_game("car.setup.applied", SWOFTY_POINT_NOTIFY, swofty::cars::events::SetupApplied::version, g_setup.get());
@@ -964,10 +1035,15 @@ void arm_car_points()
         g_pit_tyres->keep(true);
         g_pit_tyres->install(false, "the core");
     }
+    if (row_ready("Car_Setup_ApplyTuning")) {
+        g_apply->keep(true);
+        g_apply->install(false, "the core");
+    }
     if (row_ready("site_Car_SetupTuningApplied")) {
         g_setup->keep(true);
         g_setup->install(false, "the core");
     }
+    setup_layout_hooks::arm();
 }
 
 }

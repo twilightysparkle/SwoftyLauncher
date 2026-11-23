@@ -326,6 +326,9 @@ struct Env {
     std::function<void(uintptr_t fuel_ecu, int mode)> fuel_set_mode;
     // The address of the object g_Game_EngineModeAvail points at (runtime::car_layout::mode_avail_rva), or 0.
     std::function<uintptr_t()> mode_avail;
+    // Lifts (true) or puts back (false) the race rule that keeps the Max row out of the MFD's fuel-mix options
+    // (site_Game_Mfd_FuelMixMaxRaceGate); returns whether the code is in the asked state afterwards.
+    std::function<bool(bool lifted)> race_max_gate;
     std::function<uintptr_t(uint32_t index, uintptr_t car)> tyre_component;
     std::function<void(uintptr_t tyre_component)> tyre_refit;
     // Whether the KB row a field needs has its independent agree verify row; null means every row is ready.
@@ -995,18 +998,27 @@ template <class Tag> struct Ops {
         What what;
         float progress;
         uint32_t part;
+        bool has_steps = false;
+        int32_t steps[42] = {};
     };
     static inline std::mutex pending_lock;
     static inline std::vector<Pending> pending;
 
-    static void queue(uintptr_t car, What what, float progress = 0, uint32_t part = 0)
+    static void queue(uintptr_t car, What what, float progress = 0, uint32_t part = 0, const int32_t *steps = nullptr)
     {
         uint8_t id = 0;
         if (!bound.load() || !car || !rd(car + CAR_VEHICLE_ID, id) || id >= MAX_CARS)
             return;
         std::lock_guard<std::mutex> g(pending_lock);
-        if (pending.size() < MAX_CARS * 8)
-            pending.push_back({id, car, what, progress, part});
+        if (pending.size() < MAX_CARS * 8) {
+            Pending p{id, car, what, progress, part};
+            if (steps) {
+                p.has_steps = true;
+                for (int i = 0; i < 42; i++)
+                    p.steps[i] = steps[i];
+            }
+            pending.push_back(p);
+        }
     }
 
     static void built(uintptr_t car) { queue(car, What::built); }
@@ -1021,11 +1033,11 @@ template <class Tag> struct Ops {
         if (amount > 0 && rd(wing + SYSTEM_CAR, car))
             queue(car, What::damage, amount, part);
     }
-    static void setup_applied(uintptr_t f1_tuning)
+    static void setup_applied(uintptr_t f1_tuning, const int32_t *steps = nullptr)
     {
         uintptr_t car = 0;
         if (rd(f1_tuning + SYSTEM_CAR, car))
-            queue(car, What::setup);
+            queue(car, What::setup, 0, 0, steps);
     }
 
     static std::vector<Pending> take()
@@ -1055,6 +1067,11 @@ template <class Tag> struct Ops {
             else {
                 it->car = p.car;
                 it->progress = p.progress;
+                if (p.has_steps || p.what != What::setup) {
+                    it->has_steps = p.has_steps;
+                    for (int i = 0; i < 42; i++)
+                        it->steps[i] = p.steps[i];
+                }
             }
         }
         return out;
@@ -1108,12 +1125,34 @@ template <class Tag> struct Ops {
         return m;
     }
 
+    static inline bool race_gate_lifted = false;
+
+    // Keeps the MFD's race rule for the Max row lifted exactly while an owner's mask holds Max: 1 when this call
+    // lifted it, -1 when it put the rule back, 0 otherwise. A call that cannot change the code is retried next frame.
+    static int race_gate_sync(uint32_t mask)
+    {
+        const bool want = (mask & SWOFTY_CAR_FUEL_MIX_MAX) != 0;
+        if (want == race_gate_lifted || !env.race_max_gate)
+            return 0;
+        if (!env.race_max_gate(want))
+            return 0;
+        race_gate_lifted = want;
+        return want ? 1 : -1;
+    }
+
     // Marks each requested mix available (the entry 0) for every car on track. The MFD's mask and the controller
     // read the entry (Game_Mfd_FuelMix_Refresh, Sess_ControllerSystem_ApplyRecord), so the game's own locks, such as
     // the practice fuel programme's, are reasserted by the game and cleared again on the next frame.
-    static void unlock_tick()
+    static int unlock_tick()
     {
         uint32_t mask = unlocked_mask();
+        const int gate = race_gate_sync(mask);
+        unlock_tick_entries(mask);
+        return gate;
+    }
+
+    static void unlock_tick_entries(uint32_t mask)
+    {
         if (!mask || !env.mode_avail || !env.write)
             return;
         uint32_t n = 0;

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -92,6 +93,33 @@ inline std::string summary_line(const std::vector<Car> &cars, uint32_t session, 
                       "[tyres] fitted tyre check (%s), session %u: all %u car(s) have their fitted tyres placed%s", when, session,
                       checked, partial ? " (some cars have a spare model not placed)" : "");
     return buf;
+}
+
+}
+
+namespace runtime::tyre_models {
+
+constexpr uint8_t PROBE_VEHICLE = 23;
+
+inline bool switched_off(const char *value) { return value && (!strcmp(value, "0") || !strcmp(value, "off")); }
+
+constexpr size_t MAX_LIST = 64;
+
+constexpr uint32_t LEARN_CALLS = 1000;
+
+inline uint32_t learned_bound(uint32_t max_seen, uint32_t calls) { return calls >= LEARN_CALLS ? max_seen + 1 : 0; }
+
+inline bool is_last_vehicle(uint32_t bound, uint32_t idx) { return bound && idx + 1 == bound; }
+
+inline size_t extra_updates(uint64_t count, uint32_t bound, const bool *has_car, uint32_t *out, size_t room)
+{
+    size_t n = 0;
+    if (!bound || count > MAX_LIST)
+        return 0;
+    for (uint64_t i = bound; i < count && n < room; i++)
+        if (has_car[i])
+            out[n++] = uint32_t(i);
+    return n;
 }
 
 }

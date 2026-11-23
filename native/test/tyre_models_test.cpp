@@ -102,5 +102,19 @@ int main()
     CHECK(tmod::summary_line(cars, 12, "60 s in").find("all 1 car(s)") != std::string::npos,
           "cars that could not be read are left out of the count");
 
+    CHECK(tmod::switched_off("0") && tmod::switched_off("off"), "0 and off switch a feature off");
+    CHECK(!tmod::switched_off("1") && !tmod::switched_off("") && !tmod::switched_off(nullptr), "anything else leaves it on");
+    CHECK(tmod::learned_bound(26, 999) == 0, "nothing is learned from a handful of calls");
+    CHECK(tmod::learned_bound(26, 5000) == 27, "the caller's vehicle count is the highest index seen plus one");
+    CHECK(tmod::is_last_vehicle(27, 26) && !tmod::is_last_vehicle(27, 25) && !tmod::is_last_vehicle(0, 0),
+          "only the last index of a learned bound triggers the extras");
+    bool has[64] = {};
+    uint32_t out[64];
+    has[27] = has[29] = true;
+    CHECK(tmod::extra_updates(30, 27, has, out, 64) == 2 && out[0] == 27 && out[1] == 29,
+          "extra entries with a car past the bound are updated");
+    CHECK(tmod::extra_updates(27, 27, has, out, 64) == 0, "a list the caller covers gets no extras");
+    CHECK(tmod::extra_updates(30, 0, has, out, 64) == 0, "an unknown bound gets no extras");
+
     return failures ? 1 : 0;
 }

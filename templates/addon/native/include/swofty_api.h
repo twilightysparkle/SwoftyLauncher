@@ -134,8 +134,8 @@ typedef void (*SwoftyPaintFn)(SwoftyPaint *paint, void *user);
    SwoftyCoreOverlayVersion and it returns 2 or more (swofty/overlay.hpp checks); the v3 entries after
    ui_scale() exist when it returns 3 or more. A text style and an input snapshot are read and written
    up to their size field, so later fields can be added. The v4 entry after focus() exists when it returns 4 or
-   more. */
-#define SWOFTY_OVERLAY_VERSION 4
+   more, and the v5 entries after load_image_rgba() and SwoftyTextStyle.font_id when it returns 5 or more. */
+#define SWOFTY_OVERLAY_VERSION 5
 
 enum {
     SWOFTY_TEXT_LEFT = 0x00,
@@ -213,6 +213,8 @@ typedef struct SwoftyTextStyle {
     float shadow_dx, shadow_dy, shadow_blur;
     float max_width;
     uint32_t font;
+    /* v5: the id of a font loaded with load_font or load_font_memory; NULL or "" is the built-in font. */
+    const char *font_id;
 } SwoftyTextStyle;
 
 typedef struct SwoftyOverlay {
@@ -261,6 +263,10 @@ typedef struct SwoftyOverlay {
     int (*focus)(int on);
     /* v4 */
     int (*load_image_rgba)(const char *id, uint32_t width, uint32_t height, const void *rgba);
+    /* v5 */
+    int (*load_font)(const char *id, const char *file);
+    int (*load_font_memory)(const char *id, const void *bytes, uint32_t size);
+    void (*polygon_concave)(SwoftyPaint *paint, const float *xy, uint32_t count, uint32_t rgba);
 } SwoftyOverlay;
 
 #define SWOFTY_TELEMETRY_VERSION 2
@@ -766,7 +772,7 @@ typedef struct SwoftyEra {
    ("/teams/slot=1/seats/0"). Selectors (layer filters, handler scopes) are a JSON array whose entries
    must all match: {"content": id}, {"content_exact": id}, {"owner": addon}, {"data_group": name},
    {"mode": "time_trial"}, {"session_type": ["race"]}, {"track": id}, {"year": [from, to]},
-   {"setup_mode": id}, {"vehicle_package": id}, {"any": [selector, ...]}, {"not": selector}. */
+   {"setup_mode": id}, {"vehicle_package": id}, {"entrant_list": name}, {"any": [selector, ...]}, {"not": selector}. */
 #define SWOFTY_REGISTRY_VERSION 1
 #define SWOFTY_HOOKS_VERSION 1
 #define SWOFTY_SERVICES_VERSION 1
@@ -1157,6 +1163,12 @@ typedef struct SwoftyContentOps {
 #define SWOFTY_LIVE_HAVE_GRID (1ull << 29)
 #define SWOFTY_LIVE_HAVE_LAP_TIMES (1ull << 30)
 #define SWOFTY_LIVE_HAVE_TYRE_AGE (1ull << 31)
+#define SWOFTY_LIVE_HAVE_DRS_ALLOWED (1ull << 32)
+#define SWOFTY_LIVE_HAVE_PIT_LIMITER (1ull << 33)
+#define SWOFTY_LIVE_HAVE_FIA_FLAG (1ull << 34)
+#define SWOFTY_LIVE_HAVE_DRIVER_STATUS (1ull << 35)
+#define SWOFTY_LIVE_HAVE_PIT_TIMING (1ull << 36)
+#define SWOFTY_LIVE_HAVE_SECTOR_BESTS (1ull << 37)
 
 #define SWOFTY_LIVE_CAR_PLAYER (1u << 0)
 #define SWOFTY_LIVE_CAR_AI_DRIVING (1u << 1)
@@ -1233,6 +1245,24 @@ typedef struct SwoftyLiveCar {
 #define SWOFTY_LIVE_SHAVE_ROAD_ORDER (1ull << 12)
 #define SWOFTY_LIVE_SHAVE_TIME_LEFT (1ull << 13)
 #define SWOFTY_LIVE_SHAVE_TOTAL_LAPS (1ull << 14)
+#define SWOFTY_LIVE_SHAVE_FASTEST_LAP (1ull << 15)
+#define SWOFTY_LIVE_SHAVE_SAFETY_CAR_PHASE (1ull << 16)
+#define SWOFTY_LIVE_SHAVE_DRS (1ull << 17)
+#define SWOFTY_LIVE_SHAVE_PIT_WINDOW (1ull << 18)
+#define SWOFTY_LIVE_SHAVE_START_LIGHTS (1ull << 19)
+#define SWOFTY_LIVE_SHAVE_HUD (1ull << 20)
+
+#define SWOFTY_LIVE_NO_CAR 0xff
+#define SWOFTY_LIVE_SC_DEPLOYED 0
+#define SWOFTY_LIVE_SC_RETURNING 1
+#define SWOFTY_LIVE_SC_RETURNED 2
+#define SWOFTY_LIVE_SC_RESUME 3
+
+#define SWOFTY_LIVE_HUD_MENU 1
+#define SWOFTY_LIVE_HUD_CUTSCENE 2
+#define SWOFTY_LIVE_HUD_REPLAY 4
+#define SWOFTY_LIVE_HUD_PHOTO 8
+#define SWOFTY_LIVE_HUD_PAUSED 16
 
 #define SWOFTY_LIVE_MODE_UNKNOWN 0
 #define SWOFTY_LIVE_MODE_GRAND_PRIX 1
@@ -1264,12 +1294,38 @@ typedef struct SwoftyLiveSession {
     uint32_t classified;
     uint32_t road_order[SWOFTY_LIVE_MAX_CARS];
     uint32_t on_track;
-    /* The session time left in seconds (SWOFTY_LIVE_SHAVE_TIME_LEFT) and the race's lap count
-       (SWOFTY_LIVE_SHAVE_TOTAL_LAPS). Not read yet on any build: both bits stay clear and both fields 0. They take
-       the first two words of what was reserved[8]: the struct's size and every other offset are unchanged. */
+    /* The session time left and the session's length in seconds (SWOFTY_LIVE_SHAVE_TIME_LEFT) and the race's lap
+       count (SWOFTY_LIVE_SHAVE_TOTAL_LAPS), from the game's UDP Session packet (formats 2024 and 2025). They take the
+       first three words of what was reserved[8]. */
     float time_left_s;
     uint32_t total_laps;
-    uint32_t reserved[6];
+    float duration_s;
+    /* The session's fastest lap (SWOFTY_LIVE_SHAVE_FASTEST_LAP): its time and its car's vehicle id. */
+    uint32_t fastest_lap_ms;
+    uint8_t fastest_lap_vehicle;
+    /* The safety car's phase (SWOFTY_LIVE_SHAVE_SAFETY_CAR_PHASE): SWOFTY_LIVE_SC_DEPLOYED, _RETURNING (in this
+       lap), _RETURNED or _RESUME, the last phase of this session's latest deployment. */
+    uint8_t safety_car_phase;
+    /* DRS (SWOFTY_LIVE_SHAVE_DRS): drs_enabled 1 once race control enables DRS, 0 once it disables it; drs_reason
+       is why it was disabled (0 wet track, 1 safety car, 2 red flag, 3 minimum lap not reached, 0xff none given). */
+    uint8_t drs_enabled;
+    uint8_t drs_reason;
+    /* The player's pit window (SWOFTY_LIVE_SHAVE_PIT_WINDOW): the ideal and the latest lap to pit and the predicted
+       position on rejoining, 0 where the game gives none. */
+    uint8_t pit_window_ideal_lap;
+    uint8_t pit_window_latest_lap;
+    uint8_t pit_rejoin_position;
+    /* The start lights (SWOFTY_LIVE_SHAVE_START_LIGHTS): the lights lit, 1 to 5, and 0 from lights out. */
+    uint8_t start_lights;
+    /* The race HUD (SWOFTY_LIVE_SHAVE_HUD): hud_visible 1 while the game shows its race HUD (driving, or its
+       spectator HUD while spectating), 0 while it hides it; hud_hidden_by is what hides it, SWOFTY_LIVE_HUD_*
+       bits: _MENU no driving view (menus, the track intro, the grid's Start Race screen, the results),
+       _CUTSCENE, _REPLAY, _PHOTO photo mode, _PAUSED a pause reason held (the pause menu). From the game's flow
+       states and pause calls, not its HUD setting. */
+    uint8_t hud_visible;
+    uint8_t hud_hidden_by;
+    uint8_t pad2[2];
+    uint32_t reserved[1];
 } SwoftyLiveSession;
 
 #define SWOFTY_LIVE_TURN_OFFICIAL 1
@@ -1302,7 +1358,20 @@ typedef struct SwoftyLiveTurn {
    best_sector_ms, the fastest valid completed lap and its sectors (0 while there is none); lap_flags,
    SWOFTY_LIVE_LAP_CURRENT_VALID and SWOFTY_LIVE_LAP_LAST_VALID.
    SWOFTY_LIVE_HAVE_TYRE_AGE: tyre_age_laps, the laps the fitted set has run, earlier stints on it included (the
-   count the game sends as tyresAgeLaps); tyre_stint_laps, the laps since it was fitted. */
+   count the game sends as tyresAgeLaps); tyre_stint_laps, the laps since it was fitted.
+   The fields below take the first ten words of what was reserved[17] and come from the game's UDP packets:
+   SWOFTY_LIVE_HAVE_DRS_ALLOWED: drs_allowed, 1 while the car may open DRS; drs_distance_m, the distance to the
+   next activation point (0 where the game gives none).
+   SWOFTY_LIVE_HAVE_PIT_LIMITER: pit_limiter, 1 while the limiter is on.
+   SWOFTY_LIVE_HAVE_FIA_FLAG: fia_flag, the flag shown to the car (-1 invalid, 0 none, 1 green, 2 blue, 3 yellow).
+   SWOFTY_LIVE_HAVE_DRIVER_STATUS: driver_status, 0 in the garage, 1 flying lap, 2 in lap, 3 out lap, 4 on track.
+   SWOFTY_LIVE_HAVE_PIT_TIMING: pit_lane_timer_active, 1 while the car is in the pit lane; pit_lane_ms, the time in
+   the pit lane of the current or last visit; pit_stop_ms, the time stationary in the box.
+   SWOFTY_LIVE_HAVE_IDENTITY: race_number; team_id and driver_id, the team and driver ids the game sends over UDP
+   (before the core's stock id rewrite); team_colour, the livery's first colour as 0xRRGGBB (0 where the game sends
+   none).
+   SWOFTY_LIVE_HAVE_SECTOR_BESTS: personal_best_sector_ms, the car's best time in each sector this session, from any
+   lap (0 while it has none). */
 typedef struct SwoftyLiveCarDetail {
     uint32_t version;
     uint32_t size;
@@ -1321,7 +1390,21 @@ typedef struct SwoftyLiveCarDetail {
     uint32_t best_lap_ms;
     uint32_t best_lap_number;
     uint32_t best_sector_ms[3];
-    uint32_t reserved[17];
+    uint8_t drs_allowed;
+    uint8_t pit_limiter;
+    int8_t fia_flag;
+    uint8_t driver_status;
+    float drs_distance_m;
+    uint8_t pit_lane_timer_active;
+    uint8_t race_number;
+    uint16_t team_id;
+    uint32_t pit_lane_ms;
+    uint32_t pit_stop_ms;
+    uint32_t team_colour;
+    uint16_t driver_id;
+    uint8_t pad[2];
+    uint32_t personal_best_sector_ms[3];
+    uint32_t reserved[7];
 } SwoftyLiveCarDetail;
 
 typedef struct SwoftyLiveImages SwoftyLiveImages;

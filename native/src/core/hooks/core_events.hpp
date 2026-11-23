@@ -31,6 +31,13 @@ struct SafetyCar;
 struct RedFlag;
 struct Sector;
 struct CarStatus;
+struct Penalty;
+struct PenaltyServed;
+struct Drs;
+struct StartLights;
+struct SafetyCarPhase;
+struct FastestLap;
+struct Classification;
 }
 namespace swofty::tyre_damage::events {
 struct Damage;
@@ -79,7 +86,7 @@ bool car_vtf_read(const swofty::cars::live::Car &car, const char *section, const
 bool car_built(const swofty::cars::live::Car &car);
 bool car_reset(const swofty::cars::live::Car &car, bool upgrade);
 bool car_upgrades_replayed(const swofty::cars::live::Car &car, float progress);
-bool car_setup_applied(const swofty::cars::live::Car &car);
+bool car_setup_applied(const swofty::cars::live::Car &car, const int32_t *steps);
 bool car_parts_register(int32_t car, const char *vehicle, void *front_wing,
                         const std::function<int32_t(const char *node, float detach_at, bool debris)> &add);
 bool audio_bundle_resolve(int32_t car, const char *vehicle, const char *switch_name, std::string &engine_sound);
@@ -91,6 +98,13 @@ bool session_lap(uint32_t car);
 bool session_flag(swofty::race_control::events::Flag &payload);
 bool session_safety_car(swofty::race_control::events::SafetyCar &payload);
 bool session_red_flag(swofty::race_control::events::RedFlag &payload);
+bool session_penalty(swofty::race_control::events::Penalty &payload);
+bool session_penalty_served(swofty::race_control::events::PenaltyServed &payload);
+bool session_drs(swofty::race_control::events::Drs &payload);
+bool session_start_lights(swofty::race_control::events::StartLights &payload);
+bool session_safety_car_phase(swofty::race_control::events::SafetyCarPhase &payload);
+bool session_fastest_lap(swofty::race_control::events::FastestLap &payload);
+bool session_classification(swofty::race_control::events::Classification &payload);
 bool session_sector(swofty::race_control::events::Sector &payload);
 bool session_car_status(swofty::race_control::events::CarStatus &payload);
 bool car_tyre_damage(swofty::tyre_damage::events::Damage &payload);
