@@ -134,8 +134,9 @@ typedef void (*SwoftyPaintFn)(SwoftyPaint *paint, void *user);
    SwoftyCoreOverlayVersion and it returns 2 or more (swofty/overlay.hpp checks); the v3 entries after
    ui_scale() exist when it returns 3 or more. A text style and an input snapshot are read and written
    up to their size field, so later fields can be added. The v4 entry after focus() exists when it returns 4 or
-   more, and the v5 entries after load_image_rgba() and SwoftyTextStyle.font_id when it returns 5 or more. */
-#define SWOFTY_OVERLAY_VERSION 5
+   more, and the v5 entries after load_image_rgba() and SwoftyTextStyle.font_id when it returns 5 or more. From 6 the
+   core fills SwoftyInput's joy_* fields and gives mouse buttons to every addon while nobody holds focus. */
+#define SWOFTY_OVERLAY_VERSION 6
 
 enum {
     SWOFTY_TEXT_LEFT = 0x00,
@@ -198,6 +199,12 @@ typedef struct SwoftyInput {
     uint32_t pad_pressed;
     float pad_lx, pad_ly, pad_rx, pad_ry;
     float pad_lt, pad_rt;
+    /* v6: wheels, joysticks and other game controllers the game reads through DirectInput. joy_connected has a bit
+       per controller read in the last 2 s; joy_buttons the first 32 buttons held on any of them, bit n for button n;
+       joy_pressed the buttons that went down since the last frame. */
+    uint32_t joy_connected;
+    uint32_t joy_buttons;
+    uint32_t joy_pressed;
 } SwoftyInput;
 
 typedef struct SwoftyTextStyle {
@@ -1045,6 +1052,70 @@ typedef struct SwoftyCareerSaves {
     int (*missing)(char *json, size_t cap, size_t *len);
 } SwoftyCareerSaves;
 
+/* Championship standings (standard library 1.10, experimental), from the core export SwoftyCoreStandings; not a
+   SwoftyApi field. Table version 1. The loaded Driver Career's or My Team's current season: the drivers' and the
+   constructors' championships in the game's order with the game's totals (the dropped scores rule included for the
+   drivers), and where the season is. The core reads them on the game's flow thread about once a second while a career
+   is loaded and every call copies from that snapshot, so the calls are cheap and work from any thread.
+   season: the snapshot's facts; seq changes whenever the snapshot does. round is the weekend the career is at (the
+   next race to run, 1-based) and rounds the season's weekend count, both 0 while the season has no built weekends;
+   scored counts the rounds with points or results and raced the rounds whose main race has results; flags has
+   SWOFTY_STANDINGS_COMPLETE once the last round's main race has results. year is the season's year as the career's
+   content reported it (career::report_season), 0 when none did.
+   drivers and constructors: up to cap rows into out and the row count into *count (out may be NULL with cap 0 to ask
+   for the count). A row's points are the game's total, round_points the points each round gave (calendar order; a
+   round past SWOFTY_STANDINGS_MAX_ROUNDS is in the total only). wins and podiums count main-race finishes in first and
+   in the top three with a status that scores (0 or 1); the main race is the round's last race session (a sprint
+   weekend's sprint is not). A driver row names the driver (driver stat id), the team he races for now or, off the
+   grid, the team of his last round, and his racing number (0 when it is not known); a constructors row has driver
+   SWOFTY_STANDINGS_NONE, race number 0, and the wins and podiums of the drivers it fielded in each round. The player's
+   row has SWOFTY_STANDINGS_PLAYER in flags. Before the first scored session the drivers list is empty and the
+   constructors list holds the game's season-start order on 0 points.
+   Every call reports SWOFTY_ASSET_LATE while no career is loaded (also in Grand Prix and the other modes) and before the
+   first read, and SWOFTY_ASSET_UNAVAILABLE on a build the read is not proven on. */
+#define SWOFTY_STANDINGS_VERSION 1
+#define SWOFTY_STANDINGS_MAX_ROUNDS 32
+#define SWOFTY_STANDINGS_NONE 0xffffffffu
+enum { SWOFTY_STANDINGS_PLAYER = 1 };
+enum { SWOFTY_STANDINGS_COMPLETE = 1 };
+
+typedef struct SwoftyStandingsSeason {
+    uint64_t seq;
+    uint32_t mode;
+    int32_t year;
+    int32_t season_index;
+    int32_t round;
+    int32_t rounds;
+    int32_t scored;
+    int32_t raced;
+    uint32_t flags;
+    uint32_t drivers;
+    uint32_t constructors;
+    uint32_t reserved[4];
+} SwoftyStandingsSeason;
+
+typedef struct SwoftyStandingsRow {
+    uint32_t driver;
+    uint32_t team;
+    int32_t position;
+    int32_t points;
+    int32_t wins;
+    int32_t podiums;
+    uint8_t race_number;
+    uint8_t flags;
+    uint8_t pad[2];
+    int32_t round_points[SWOFTY_STANDINGS_MAX_ROUNDS];
+    uint32_t reserved[1];
+} SwoftyStandingsRow;
+
+typedef struct SwoftyStandings {
+    uint32_t version;
+    int (*available)(void);
+    int (*season)(SwoftyStandingsSeason *out);
+    int (*drivers)(SwoftyStandingsRow *out, uint32_t cap, uint32_t *count);
+    int (*constructors)(SwoftyStandingsRow *out, uint32_t cap, uint32_t *count);
+} SwoftyStandings;
+
 /* Session operations (standard library 1.6), from the core export SwoftyCoreSessionOps; not a SwoftyApi
    field. Table version 1. Every call runs on the game's flow thread and reports SWOFTY_ASSET_UNAVAILABLE
    when a game function it needs does not resolve on the running build. control: the mode (0 human, 1 AI)
@@ -1103,9 +1174,9 @@ typedef struct SwoftyContentOps {
    zero, never another car's value. Calls answer SWOFTY_ASSET_UNAVAILABLE while no session is live, the build is
    not the one the offsets are from, or the group is off because a KB row it needs has no independent verify row
    yet (the core logs "live <group> off: needs <row>" once), and SWOFTY_ASSET_INVALID for a bad argument.
-   Table version 6 appends car_detail; version 5 appends tyre_icon_texture; version 4 appends images (see
+   Table version 7 appends driver_portrait; version 6 appends car_detail; version 5 appends tyre_icon_texture; version 4 appends images (see
    swofty/live_images.h); version 3 appends team_badge_texture. Check version >= 6 before calling car_detail and
-   version >= 5 before reading tyre_icon_texture.
+   version >= 5 before reading tyre_icon_texture, and version >= 7 before calling driver_portrait.
    Version 2 adds driver_name and version 1 is the members up to seq; each keeps its layout, so
    check version >= 3 before calling team_badge_texture and version >= 2 before calling driver_name.
    session: the session header. car: one car by vehicle id. subject: the watched car while the spectator HUD is
@@ -1124,7 +1195,7 @@ typedef struct SwoftyContentOps {
    Steam 26566308 build use the saved assignment for the active mode and loaded career slot; an unavailable
    saved assignment is not replaced by the entrant fallback.
    SWOFTY_ASSET_UNAVAILABLE when the reference cannot be read or the path does not fit cap. */
-#define SWOFTY_LIVE_VERSION 6
+#define SWOFTY_LIVE_VERSION 7
 #define SWOFTY_LIVE_MAX_CARS 32
 #define SWOFTY_LIVE_NO_GAP INT32_MIN
 
@@ -1169,6 +1240,7 @@ typedef struct SwoftyContentOps {
 #define SWOFTY_LIVE_HAVE_DRIVER_STATUS (1ull << 35)
 #define SWOFTY_LIVE_HAVE_PIT_TIMING (1ull << 36)
 #define SWOFTY_LIVE_HAVE_SECTOR_BESTS (1ull << 37)
+#define SWOFTY_LIVE_HAVE_SC_DELTA (1ull << 38)
 
 #define SWOFTY_LIVE_CAR_PLAYER (1u << 0)
 #define SWOFTY_LIVE_CAR_AI_DRIVING (1u << 1)
@@ -1366,12 +1438,15 @@ typedef struct SwoftyLiveTurn {
    SWOFTY_LIVE_HAVE_FIA_FLAG: fia_flag, the flag shown to the car (-1 invalid, 0 none, 1 green, 2 blue, 3 yellow).
    SWOFTY_LIVE_HAVE_DRIVER_STATUS: driver_status, 0 in the garage, 1 flying lap, 2 in lap, 3 out lap, 4 on track.
    SWOFTY_LIVE_HAVE_PIT_TIMING: pit_lane_timer_active, 1 while the car is in the pit lane; pit_lane_ms, the time in
-   the pit lane of the current or last visit; pit_stop_ms, the time stationary in the box.
+   the pit lane of the current visit, held at the last visit's time after the car leaves the lane; pit_stop_ms, the
+   time stationary in the box, held the same way.
    SWOFTY_LIVE_HAVE_IDENTITY: race_number; team_id and driver_id, the team and driver ids the game sends over UDP
    (before the core's stock id rewrite); team_colour, the livery's first colour as 0xRRGGBB (0 where the game sends
    none).
    SWOFTY_LIVE_HAVE_SECTOR_BESTS: personal_best_sector_ms, the car's best time in each sector this session, from any
-   lap (0 while it has none). */
+   lap (0 while it has none).
+   SWOFTY_LIVE_HAVE_SC_DELTA: safety_car_delta_s, the car's delta to the time the safety car or the virtual safety car
+   requires, in seconds as the game sends it (in every Lap Data packet; it has a meaning while one is out). */
 typedef struct SwoftyLiveCarDetail {
     uint32_t version;
     uint32_t size;
@@ -1404,7 +1479,8 @@ typedef struct SwoftyLiveCarDetail {
     uint16_t driver_id;
     uint8_t pad[2];
     uint32_t personal_best_sector_ms[3];
-    uint32_t reserved[7];
+    float safety_car_delta_s;
+    uint32_t reserved[6];
 } SwoftyLiveCarDetail;
 
 typedef struct SwoftyLiveImages SwoftyLiveImages;
@@ -1428,6 +1504,13 @@ typedef struct SwoftyLive {
     int (*tyre_icon_texture)(uint32_t vehicle, char *path, uint32_t cap);
     /* Version 6: one car's SwoftyLiveCarDetail by vehicle id, from the same snapshot as car. */
     int (*car_detail)(uint32_t vehicle, SwoftyLiveCarDetail *out);
+    /* Version 7: the car's grid rundown portrait as a reference for images()->image or images()->image_full
+       ("eaid://game_rtt_tex_NNNN", 25 bytes with its NUL), read from the view model leaf the game binds for the
+       driver of the car's session entrant (<driver>.textures.GridRundownLeft.Thumbnail, else GridRundownRight).
+       UNAVAILABLE while the entrant, its driver or the leaf is not there (no rundown queued, or before the race load
+       asks for it), INVALID for a short buffer or a bad car. The reference can come before its pixels: image answers
+       UNAVAILABLE until the capture armed by images()->start_portraits has read them. */
+    int (*driver_portrait)(uint32_t vehicle, char *reference, uint32_t cap);
 } SwoftyLive;
 
 /* Live car operations (standard library 1.6, experimental), from the core export SwoftyCoreCarOps; not a SwoftyApi
@@ -1992,6 +2075,7 @@ typedef const SwoftyHooks *(*SwoftyCoreHooksFn)(void);
 typedef const SwoftyServices *(*SwoftyCoreServicesFn)(void);
 typedef const SwoftyCareerOps *(*SwoftyCoreCareerOpsFn)(void);
 typedef const SwoftyCareerSaves *(*SwoftyCoreCareerSavesFn)(void);
+typedef const SwoftyStandings *(*SwoftyCoreStandingsFn)(void);
 typedef const SwoftySessionOps *(*SwoftyCoreSessionOpsFn)(void);
 typedef const SwoftyCarOps *(*SwoftyCoreCarOpsFn)(void);
 typedef const SwoftyContentOps *(*SwoftyCoreContentOpsFn)(void);
@@ -2019,6 +2103,7 @@ SWOFTY_EXPORT const SwoftyHooks *SwoftyCoreHooks(void);
 SWOFTY_EXPORT const SwoftyServices *SwoftyCoreServices(void);
 SWOFTY_EXPORT const SwoftyCareerOps *SwoftyCoreCareerOps(void);
 SWOFTY_EXPORT const SwoftyCareerSaves *SwoftyCoreCareerSaves(void);
+SWOFTY_EXPORT const SwoftyStandings *SwoftyCoreStandings(void);
 SWOFTY_EXPORT const SwoftySessionOps *SwoftyCoreSessionOps(void);
 SWOFTY_EXPORT const SwoftyCarOps *SwoftyCoreCarOps(void);
 SWOFTY_EXPORT const SwoftyContentOps *SwoftyCoreContentOps(void);

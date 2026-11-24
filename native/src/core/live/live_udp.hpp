@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 // The live state's UDP source: the session, car and race control values the game's memory gives the core no read
@@ -14,7 +15,7 @@
 //   Session (1), 753 bytes, 2024 and 2025: totalLaps 32, sessionTimeLeft u16 38, sessionDuration u16 40,
 //     safetyCarStatus 153, pitStopWindowIdealLap 682, pitStopWindowLatestLap 683, pitStopRejoinPosition 684.
 //   Lap Data (2): 2024 22 x 50 bytes, 2025 22 x 57, 2026 24 x 57, from 29. With base 30 (2024) or 32 (the rest):
-//     driverStatus base+12, pitLaneTimerActive base+14, pitLaneTimeInLaneInMS u16 base+15, pitStopTimerInMS u16
+//     safetyCarDelta f32 base-4, driverStatus base+12, pitLaneTimerActive base+14, pitLaneTimeInLaneInMS u16 base+15, pitStopTimerInMS u16
 //     base+17.
 //   Event (3), 45 bytes, every format: code at 29, details at 33. PENA penaltyType, infringementType, vehicleIdx,
 //     otherVehicleIdx, time, lapNum, placesGained; DTSV vehicleIdx; SGSV vehicleIdx, stopTime f32 (2025); FTLP
@@ -112,6 +113,7 @@ struct Car {
     uint64_t lap_at = 0, status_at = 0, who_at = 0;
     uint8_t driver_status = 0, pit_timer = 0;
     uint32_t pit_lane_ms = 0, pit_stop_ms = 0;
+    float sc_delta = 0;
     uint8_t drs_allowed = 0, pit_limiter = 0;
     int8_t fia_flag = 0;
     bool status_full = false;
@@ -155,8 +157,10 @@ public:
     {
         auto keep = std::move(moments_.classifications);
         uint64_t uid = uid_;
+        auto last = last_class_;
         reset();
         uid_ = uid;
+        last_class_ = last;
         moments_.classifications = std::move(keep);
     }
 
@@ -227,6 +231,7 @@ private:
         lights_ = 0xff;
         fastest_car_ = SWOFTY_LIVE_NO_CAR;
         fastest_ms_ = 0;
+        last_class_.reset();
         moments_ = {};
     }
 
@@ -251,8 +256,12 @@ private:
             c.lap_at = now;
             c.driver_status = e[base + 12];
             c.pit_timer = e[base + 14];
-            c.pit_lane_ms = u16(e + base + 15);
-            c.pit_stop_ms = u16(e + base + 17);
+            uint32_t lane = u16(e + base + 15), stop = u16(e + base + 17);
+            if (c.pit_timer || lane || stop) {
+                c.pit_lane_ms = lane;
+                c.pit_stop_ms = stop;
+            }
+            c.sc_delta = f32(e + base - 4);
         }
     }
 
@@ -311,6 +320,9 @@ private:
             c.race_ms = race_s > 0 && race_s < 4e6 ? uint32_t(race_s * 1000.0 + 0.5) : 0;
             c.penalties_s = r[at + 12];
         }
+        if (last_class_ && std::memcmp(&*last_class_, &e, sizeof e) == 0)
+            return;
+        last_class_ = e;
         moments_.classifications.push_back(e);
     }
 
@@ -430,6 +442,10 @@ private:
                 d.pit_stop_ms = u.pit_stop_ms;
                 mark(c, d, SWOFTY_LIVE_HAVE_PIT_TIMING);
             }
+            if (!(d.have & SWOFTY_LIVE_HAVE_SC_DELTA)) {
+                d.safety_car_delta_s = u.sc_delta;
+                mark(c, d, SWOFTY_LIVE_HAVE_SC_DELTA);
+            }
         }
         if (u.status_at && now - u.status_at <= STALE_MS) {
             if (!(d.have & SWOFTY_LIVE_HAVE_DRS_ALLOWED)) {
@@ -488,6 +504,7 @@ private:
     uint8_t total_laps_ = 0, sc_status_ = 0, pit_ideal_ = 0, pit_latest_ = 0, pit_rejoin_ = 0;
     uint16_t time_left_ = 0, duration_ = 0;
     uint8_t sc_phase_ = 0xff, sc_type_ = 0, drs_ = 0xff, drs_reason_ = 0xff, lights_ = 0xff;
+    std::optional<rc::events::Classification> last_class_;
     uint32_t fastest_car_ = SWOFTY_LIVE_NO_CAR, fastest_ms_ = 0;
     struct Cars {
         Car at[CARS];

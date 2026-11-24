@@ -169,6 +169,13 @@ export default defineConfigWithTheme<DocsThemeConfig>({
           {
             text: "Releases",
             items: [
+              { text: "1.10.41", link: "/releases/1.10.41" },
+              { text: "1.10.40", link: "/releases/1.10.40" },
+              { text: "1.10.39", link: "/releases/1.10.39" },
+              { text: "1.10.38", link: "/releases/1.10.38" },
+              { text: "1.10.37", link: "/releases/1.10.37" },
+              { text: "1.10.36", link: "/releases/1.10.36" },
+              { text: "1.10.35", link: "/releases/1.10.35" },
               { text: "1.10.34", link: "/releases/1.10.34" },
               { text: "1.10.33", link: "/releases/1.10.33" },
               { text: "1.10.32", link: "/releases/1.10.32" },
@@ -738,6 +745,7 @@ export default defineConfigWithTheme<DocsThemeConfig>({
                       { text: "Voice lines", link: "/reference/std/speech", icon: "file" },
                       { text: "Weather setup", link: "/reference/std/weather", icon: "file" },
                       { text: "Standings", link: "/reference/std/standings", icon: "file" },
+                      { text: "Championship standings", link: "/reference/std/championship", icon: "file" },
                       { text: "Database", link: "/reference/std/db", icon: "file" },
                       { text: "Storage", link: "/reference/std/storage", icon: "file" },
                       { text: "Game assets", link: "/reference/std/game-assets", icon: "file" },

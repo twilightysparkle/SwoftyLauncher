@@ -9,7 +9,9 @@
 #include <swofty/fake_live.hpp>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -139,6 +141,7 @@ static void test_cars()
     e[32 + 14] = 1;
     lap[29 + 2 * 57 + 47] = 0x10, lap[29 + 2 * 57 + 48] = 0x27;
     lap[29 + 2 * 57 + 49] = 0xd0, lap[29 + 2 * 57 + 50] = 0x07;
+    putf(lap, 29 + 2 * 57 + 28, -1.25f);
     feed(u, lap);
     Bytes st = packet(2025, 7, 1239);
     uint8_t *c = &st[29 + 2 * 55];
@@ -163,6 +166,14 @@ static void test_cars()
     expect(swofty::live::driver_status(d) == swofty::live::DriverStatus::in_lap, "Lap Data driverStatus 2: in lap");
     expect(d.pit_lane_timer_active == 1 && d.pit_lane_ms == 10000 && d.pit_stop_ms == 2000,
            "pit lane timer on, 10.000 s in the lane, 2.000 s in the box");
+    expect(swofty::live::safety_car_delta_s(d) == -1.25f, "Lap Data safetyCarDelta -1.25 s at entry+28 (2025)");
+    e[32 + 14] = 0;
+    lap[29 + 2 * 57 + 47] = lap[29 + 2 * 57 + 48] = lap[29 + 2 * 57 + 49] = lap[29 + 2 * 57 + 50] = 0;
+    feed(u, lap);
+    lv::Snapshot out = snapshot();
+    merge(u, out);
+    expect(out.details[2].pit_lane_timer_active == 0 && out.details[2].pit_lane_ms == 10000 && out.details[2].pit_stop_ms == 2000,
+           "out of the lane the game sends 0: the last visit's times hold");
     expect(swofty::live::drs_allowed(d) == true && d.drs_distance_m == 120.f && swofty::live::pit_limiter(d) == true &&
                swofty::live::fia_flag(d) == int8_t(2),
            "Car Status: DRS allowed 120 m out, limiter on, blue flag");
@@ -195,10 +206,12 @@ static void test_cars()
 
     Bytes lap24 = packet(2024, 2, 1131);
     lap24[29 + 30 + 12] = 3;
+    putf(lap24, 29 + 26, 2.5f);
     feed(v, lap24);
     n = snapshot();
     merge(v, n);
     expect(swofty::live::driver_status(n.details[0]) == swofty::live::DriverStatus::out_lap, "2024 Lap Data: out lap");
+    expect(swofty::live::safety_car_delta_s(n.details[0]) == 2.5f, "2024 Lap Data safetyCarDelta at entry+26");
 }
 
 static void test_sector_bests()
@@ -251,6 +264,13 @@ static void test_classification()
                c.best_lap_ms == 91500 && c.race_ms == 512250 && c.penalties_s == 5,
            "vehicle 0: P2 from P1, 5 laps, 18 points, one stop, best 1:31.500, 8:32.250, 5 s of penalties");
     expect(m.classifications[0].entries[1].position == 1 && m.classifications[0].entries[1].points == 25, "vehicle 1 won");
+    feed(u, fc);
+    feed(u, fc);
+    expect(u.take().classifications.empty(), "the game sends it again every few seconds: the same one fires once");
+    b[3] = 26;
+    feed(u, fc);
+    m = u.take();
+    expect(m.classifications.size() == 1 && m.classifications[0].entries[1].points == 26, "a changed one fires again");
 }
 
 static void test_messages()
@@ -348,6 +368,56 @@ static void test_broadcast_moments()
     expect(m.fastest.empty(), "the same fastest lap again fires nothing");
 }
 
+static void test_start_reaction()
+{
+    rcl::Tracker t;
+    lv::Snapshot s = snapshot();
+    for (uint32_t id = 0; id < 3; id++)
+        s.cars[id].have |= SWOFTY_LIVE_HAVE_SPEED;
+    t.step(&s, 1000);
+    s.ses.have |= SWOFTY_LIVE_SHAVE_START_LIGHTS;
+    s.ses.start_lights = 3;
+    expect(t.step(&s, 2000).reactions.empty(), "lights lit, nobody moving: no reaction");
+    s.cars[2].speed = 1.0f;
+    expect(t.step(&s, 2500).reactions.empty(), "a car creeping while the lights are lit fires nothing yet");
+    s.ses.start_lights = 0;
+    s.cars[2].speed = 0;
+    expect(t.step(&s, 4000).reactions.empty(), "lights out at 4000: nobody over 0.5 m/s yet");
+    s.cars[0].speed = 0.4f;
+    expect(t.step(&s, 4150).reactions.empty(), "0.4 m/s is not moving off");
+    s.cars[0].speed = 1.0f;
+    s.cars[2].speed = 2.0f;
+    expect(t.step(&s, 4300).reactions.empty(), "the first reading over 0.5 m/s waits for a second one");
+    expect(t.step(&s, 4306).reactions.empty(), "the same reading on the next frame is not a second one");
+    s.cars[0].speed = 3.0f;
+    s.cars[2].speed = 4.0f;
+    rcl::Moments m = t.step(&s, 4400);
+    expect(m.reactions.size() == 2 && m.reactions[0].car == 0 && m.reactions[0].reaction_ms == 250 && !m.reactions[0].jumped,
+           "1 m/s at 4300 and 3 m/s at 4400: 20 m/s2, moved off at 4250, 250 ms after lights out");
+    expect(m.reactions[1].car == 2 && m.reactions[1].reaction_ms == 200 && m.reactions[1].jumped,
+           "vehicle 2 extrapolates back to 4200 and is flagged as a jump start");
+    s.cars[1].speed = 5.0f;
+    expect(t.step(&s, 4500).reactions.empty(), "vehicle 1's first reading");
+    s.cars[1].speed = 6.0f;
+    m = t.step(&s, 4600);
+    expect(m.reactions.size() == 1 && m.reactions[0].car == 1 && m.reactions[0].reaction_ms == 0,
+           "a move-off extrapolated to before lights out clamps to lights out");
+    expect(t.step(&s, 4700).reactions.empty(), "each car fires once");
+    s.ses.start_lights = 1;
+    t.step(&s, 20000);
+    s.ses.start_lights = 0;
+    s.cars[0].speed = s.cars[1].speed = s.cars[2].speed = 0;
+    t.step(&s, 21000);
+    s.cars[1].speed = 2;
+    t.step(&s, 21300);
+    m = t.step(&s, 21900);
+    expect(m.reactions.size() == 1 && m.reactions[0].car == 1 && m.reactions[0].reaction_ms == 300,
+           "a restarted start times again; a reading that never changes reports its own time after 500 ms");
+    s.cars[0].speed = 2;
+    t.step(&s, 31500);
+    expect(t.step(&s, 32100).reactions.empty(), "past ten seconds after lights out nothing fires");
+}
+
 static void test_fastest_from_memory()
 {
     udp::Source u;
@@ -374,7 +444,7 @@ static void test_points()
 {
     expect(rcl::fires("session.penalty") && rcl::fires("session.penalty.served") && rcl::fires("session.drs") &&
                rcl::fires("session.start_lights") && rcl::fires("session.safety_car.phase") &&
-               rcl::fires("session.fastest_lap") && rcl::fires("session.classification"),
+               rcl::fires("session.fastest_lap") && rcl::fires("session.classification") && rcl::fires("session.start_reaction"),
            "the broadcast points read the live state");
 }
 
@@ -408,6 +478,122 @@ static void test_hud()
            "replay and photo mode hide it");
     expect(at(true, fv::SPECTATING, 0) == true, "spectating shows the spectator HUD");
     expect(!at(false, 0, 0) && s.hud_visible == 0 && s.hud_hidden_by == 0, "losing the flow clears the fields");
+
+    hud::Bridge b;
+    auto step = [&](uint32_t flags, uint32_t pause, uint64_t now) {
+        hud::apply(s, b.step(hud::from_view(true, flags, pause), now));
+        return swofty::live::hud_visible(s) == true;
+    };
+    expect(!step(fv::MENU, 0, 0), "the grid: hidden");
+    expect(step(0, 0, 1000), "the start lights: shown");
+    expect(step(fv::MENU, 0, 1006) && step(fv::MENU, 0, 1012), "lights out's unnamed flow nodes stay shown");
+    expect(step(0, 0, 1018), "InGame: shown");
+    expect(!step(0, 1u << 3, 1024), "a pause hides it at once");
+    expect(step(0, 0, 2000) && !step(fv::CUTSCENE | fv::MENU, 0, 2006), "a cutscene hides it at once");
+    expect(step(0, 0, 3000) && step(fv::MENU, 0, 3100) && !step(fv::MENU, 0, 3101), "a menu that stays past 100 ms hides it");
+}
+
+namespace fake_db {
+
+using Row = std::map<std::string, std::string>;
+std::vector<Row> rows;
+std::map<std::string, std::string> texts;
+
+int available() { return 1; }
+int open(const char *table, SwoftyDbCursor *c)
+{
+    if (std::string(table) != "entrants.drivers")
+        return SWOFTY_ASSET_INVALID;
+    c->index = 0;
+    c->count = rows.size();
+    return rows.empty() ? SWOFTY_ASSET_LATE : SWOFTY_ASSET_OK;
+}
+int step(SwoftyDbCursor *c) { return ++c->index < c->count ? SWOFTY_ASSET_OK : SWOFTY_ASSET_LATE; }
+int cell(const SwoftyDbCursor *c, const char *field, SwoftyDbValue *out)
+{
+    const Row &r = rows[c->index];
+    auto it = r.find(field);
+    if (it == r.end())
+        return SWOFTY_ASSET_INVALID;
+    out->s = it->second.c_str();
+    out->i = std::atoll(it->second.c_str());
+    out->tag = SWOFTY_DB_STRING;
+    return SWOFTY_ASSET_OK;
+}
+const char *row_name(const SwoftyDbCursor *c) { return rows[c->index].at("_metadata_").c_str(); }
+int text(const char *key, char *out, size_t cap, size_t *len)
+{
+    auto it = texts.find(key);
+    if (it == texts.end())
+        return SWOFTY_ASSET_INVALID;
+    *len = it->second.size();
+    if (cap <= *len)
+        return SWOFTY_TOO_SMALL;
+    std::memcpy(out, it->second.c_str(), *len + 1);
+    return SWOFTY_ASSET_OK;
+}
+
+}
+
+static void test_identity()
+{
+    SwoftyDb db{};
+    db.available = fake_db::available;
+    db.open = fake_db::open;
+    db.step = fake_db::step;
+    db.cell = fake_db::cell;
+    db.row_name = fake_db::row_name;
+    SwoftyLang lang{};
+    lang.available = fake_db::available;
+    lang.text = fake_db::text;
+    SwoftyApi api{};
+    api.version = 8;
+    api.db = &db;
+    api.lang = &lang;
+    swofty::api = &api;
+    swofty::lang::detail::set_version(2);
+    fake_db::rows = {
+        {{"_metadata_", "carlos_sainz-jr"},
+         {"stat_id", "0"},
+         {"initials", "SAI"},
+         {"first_name", "lng_carlos"},
+         {"last_name", "lng_sainz"},
+         {"is_name_reversed", "0"}},
+        {{"_metadata_", "zhou_guanyu"},
+         {"stat_id", "58"},
+         {"initials", "ZHO"},
+         {"first_name", "lng_guanyu"},
+         {"last_name", "lng_zhou"},
+         {"is_name_reversed", "1"}},
+        {{"_metadata_", "added_driver"},
+         {"stat_id", "300"},
+         {"initials", "ADD"},
+         {"first_name", "Ada"},
+         {"last_name", "default"}},
+    };
+    fake_db::texts = {{"lng_carlos", "Carlos"}, {"lng_sainz", "Sainz"}, {"lng_guanyu", "Guanyu"}, {"lng_zhou", "Zhou"}};
+    SwoftyLiveCarDetail d{};
+    d.have = SWOFTY_LIVE_HAVE_IDENTITY;
+    auto sai = swofty::live::driver_identity(d);
+    expect(sai && sai->code == "SAI" && sai->first_name == "Carlos" && sai->last_name == "Sainz" &&
+               sai->label == "carlos_sainz-jr" && !sai->name_reversed,
+           "driver id 0: SAI, Carlos Sainz, from the lng texts");
+    d.driver_id = 58;
+    auto zho = swofty::live::driver_identity(d);
+    expect(zho && zho->code == "ZHO" && zho->last_name == "Zhou" && zho->name_reversed, "driver id 58: family name first");
+    d.driver_id = 300;
+    auto add = swofty::live::driver_identity(d);
+    expect(add && add->code == "ADD" && add->first_name == "Ada" && add->last_name.empty(),
+           "a 2026 id above 254 names its row; a stored string reads as is, \"default\" as empty");
+    d.driver_id = 300 & 0xff;
+    fake_db::rows.push_back({{"_metadata_", "stock_44"}, {"stat_id", "44"}, {"initials", "HAM"}});
+    expect(!swofty::live::driver_identity(d), "a one-byte id two rows share is ambiguous");
+    d.driver_id = 255;
+    expect(!swofty::live::driver_identity(d), "255 (a network human, no stock ancestor) names no one");
+    d.driver_id = 0;
+    d.have = 0;
+    expect(!swofty::live::driver_identity(d), "no identity bit, no driver");
+    swofty::api = nullptr;
 }
 
 static void test_sdk_fake()
@@ -434,9 +620,11 @@ int main()
     test_messages();
     test_broadcast_moments();
     test_fastest_from_memory();
+    test_start_reaction();
     test_points();
     test_hud();
     test_pause_clock();
+    test_identity();
     test_sdk_fake();
     printf("%s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;

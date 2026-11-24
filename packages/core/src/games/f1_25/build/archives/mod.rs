@@ -174,12 +174,23 @@ impl Pipeline<'_, '_> {
         let base = |rel: &str| bases.path(rel);
         let resolve = |rel: &str| run.original(rel);
         let name = |origin: &str| run.origin_name(origin);
+        let required = |id: &str| {
+            run.order
+                .iter()
+                .filter_map(|o| run.addons.get(o))
+                .any(|m| m.id != id && m.requires.iter().any(|r| r.id == id))
+        };
         let mfd_rows = match inputs.menus {
             true => crate::ui::mfd_rows(session),
             false => Vec::new(),
         };
         let page = crate::ui::mfd_page_rows(&mfd_rows);
         let mfd_edit = |data: &[u8]| crate::ui::mfd::templates(data, &page);
+        let gate = |data: &[u8]| crate::ui::patch::persistent_gate(data);
+        let menus = inputs.menus;
+        let screen_edit = |res: &str| {
+            (menus && res == crate::ui::PERSISTENT_UI).then_some(&gate as crate::hud::TemplateBase)
+        };
         let put_names: Vec<String> = bases.puts.keys().cloned().collect();
         let composed = crate::hud::integrate::compose_in_build(
             &crate::hud::integrate::Context {
@@ -189,11 +200,13 @@ impl Pipeline<'_, '_> {
                 baseline: &resolve,
                 puts: &put_names,
                 name: &name,
+                required: &required,
                 packer: &packer,
             },
             erp_ops,
             hud_inputs,
             (!page.is_empty()).then_some(&mfd_edit as crate::hud::TemplateBase),
+            Some(&screen_edit),
         )?;
         let owner = hud_inputs[0].addon.clone();
         composed
@@ -203,6 +216,7 @@ impl Pipeline<'_, '_> {
             .lines
             .extend(composed.lines.iter().map(|l| format!("hud: {l}")));
         built.warnings.extend(composed.warnings);
+        built.report.hud_editor = composed.editor;
         Ok(composed.ops)
     }
 

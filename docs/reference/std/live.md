@@ -59,7 +59,7 @@ SWOFTY_ADDON()
 ```
 
 - **Header:** `swofty/live.hpp`, namespace `swofty::live`; host test fake `swofty/fake_live.hpp`
-- **Table:** the core export `SwoftyCoreLive` (`SwoftyLive`, table version 6 appends `car_detail`; version 5 appends `tyre_icon_texture`; version 4 appends image access; version 2 adds `driver_name` and version 1 ends at `seq`; version 3 adds `team_badge_texture`); `SWOFTY_API_VERSION` is unchanged
+- **Table:** the core export `SwoftyCoreLive` (`SwoftyLive`, table version 7 appends `driver_portrait`; version 6 appends `car_detail`; version 5 appends `tyre_icon_texture`; version 4 appends image access; version 2 adds `driver_name` and version 1 ends at `seq`; version 3 adds `team_badge_texture`); `SWOFTY_API_VERSION` is unchanged
 - **Feature:** `telemetry`, experimental, off by default (the live state is the memory source of std telemetry)
 - **Thread:** any thread; car/session calls copy the core's per-frame snapshot. Badge/name getters read the game's memory at the call; `tyre_icon_texture` resolves the snapshot's fitted visual compound through the loaded GameDB.
 
@@ -191,12 +191,13 @@ typedef struct SwoftyLiveCarDetail {
     uint8_t race_number;           // SWOFTY_LIVE_HAVE_IDENTITY
     uint16_t team_id;              // the UDP team id (SWOFTY_LIVE_HAVE_IDENTITY)
     uint32_t pit_lane_ms;          // in the pit lane, this or the last visit (SWOFTY_LIVE_HAVE_PIT_TIMING)
-    uint32_t pit_stop_ms;          // stationary in the box (SWOFTY_LIVE_HAVE_PIT_TIMING)
+    uint32_t pit_stop_ms;          // stationary in the box, this or the last visit (SWOFTY_LIVE_HAVE_PIT_TIMING)
     uint32_t team_colour;          // 0xRRGGBB, the livery's first colour; 0 when the game sends none (SWOFTY_LIVE_HAVE_IDENTITY)
     uint16_t driver_id;            // the UDP driver id, before the core's stock id rewrite (SWOFTY_LIVE_HAVE_IDENTITY)
     uint8_t pad[2];
     uint32_t personal_best_sector_ms[3]; // the car's best time in each sector this session, 0 for none (SWOFTY_LIVE_HAVE_SECTOR_BESTS)
-    uint32_t reserved[7];
+    float safety_car_delta_s;      // delta to the safety car's required time, s, as the game sends it (SWOFTY_LIVE_HAVE_SC_DELTA)
+    uint32_t reserved[6];
 } SwoftyLiveCarDetail;
 ```
 
@@ -207,6 +208,18 @@ typedef struct SwoftyLiveCarDetail {
 | `live::drs_allowed(d)`, `live::pit_limiter(d)`, `live::fia_flag(d)`, `live::driver_status(d)` | `std::optional`, empty when the bit is clear; `driver_status` is a `live::DriverStatus` |
 | `live::race_number(d)`, `live::team_colour(d)` | `std::optional`, empty when the identity bit is clear (`team_colour` also when it is 0) |
 | `live::sector_bests(d)` | `std::array<uint32_t, 3>` of the personal best sectors, empty when the bit is clear |
+| `live::safety_car_delta_s(d)` | `std::optional<float>`, the car's safety car delta, empty when the bit is clear |
+| `live::driver_identity(d)` | `live::DriverIdentity{stat_id, code, first_name, last_name, label, name_reversed}`, see [Driver names](#driver-names) |
+
+### Driver names
+
+```cpp
+if (auto who = live::driver_identity(*d))  // reads entrants.drivers: call it when Session::generation moves, not every frame
+    swofty::log("[my-osd] %s %s (%s)", who->first_name.c_str(), who->last_name.c_str(), who->code.c_str());
+// "Charles LECLERC (LEC)": the game's text for family names is upper case
+```
+
+`driver_identity` reads the `entrants.drivers` row whose `stat_id` is the car's `driver_id` with [swofty/db.hpp](./db): `code` is its `initials`, `first_name` and `last_name` the text of its `lng_*` keys in the game's language through [swofty/lang.hpp](./strings) (a stored string that is not a key reads as is, `default` as empty), `label` its `_metadata_` and `name_reversed` its `is_name_reversed` (the family name first). `live::driver_identity(uint32_t driver_id)` takes the id directly. It is empty without `SWOFTY_LIVE_HAVE_IDENTITY`, before the game has loaded its database, for driver id 255 (a network human, or an added driver with no stock ancestor), and when the id names more than one row: the 2024 and 2025 UDP formats carry one byte, so an added driver whose `stat_id` is above 254 shares its low byte with another row.
 
 The values are the ones the game sends in its UDP output:
 
@@ -319,7 +332,7 @@ void on_frame(double)
 | `SWOFTY_LIVE_HUD_PHOTO` | photo mode |
 | `SWOFTY_LIVE_HUD_PAUSED` | a held pause reason (`swofty::view::pause_reasons()`), the pause menu among them |
 
-`hud_visible` is 1 while driving (from the start lights on) and while spectating (the spectator HUD). The value comes from the game's flow states (the `[view] kind=… flags=…` log lines) and its pause calls, the same sources as [`swofty::view`](./events#pause-and-resume) and the post-processing view. The game's own HUD setting (HUD off in the options) is not read. `SWOFTY_LIVE_SHAVE_HUD` is clear until the core has seen a flow state, and `live::session()` itself is empty outside a session.
+`hud_visible` is 1 while driving (from the start lights on) and while spectating (the spectator HUD). The value comes from the game's flow states (the `[view] kind=… flags=…` log lines) and its pause calls, the same sources as [`swofty::view`](./events#pause-and-resume) and the post-processing view. At lights out the game passes through unnamed flow states for two or three frames between the start lights and the race; a menu reading that lasts 100 ms or less straight after the HUD showed keeps `hud_visible` at 1, so a menu that opens from driving reads hidden up to 100 ms late. The game's own HUD setting (HUD off in the options) is not read. `SWOFTY_LIVE_SHAVE_HUD` is clear until the core has seen a flow state, and `live::session()` itself is empty outside a session.
 
 The watched car follows the spectator director only while the spectator HUD is up. The safety car cinematic and the winner sequence also switch the director on, and those do not count. A red flag is reported when the game's red flag system says so, or when every marshal zone reads red; the game's own byte stayed 0 through a red flag in a race, so the zones are the second witness. The safety car value is 0 while a red flag is out, because the game's byte also reads 1 then.
 
@@ -398,6 +411,75 @@ Differing duplicate archive resources answer unavailable rather than selecting
 an arbitrary copy. In-place edits at unchanged routes need an explicit clear;
 runtime-only GPU texture modifications are not captured for tyre icons.
 
+## Driver portraits
+
+`live::driver_portrait(vehicle)` (Live table version 7) returns the car's grid rundown portrait, the 600 x 800 render of
+the driver the race load makes for the pre-race grid rundown. Arm the capture once at addon init with
+`live::start_portraits()`, before the race loads: the game renders each portrait once, during the load, and the core can
+only read it back while it is armed.
+
+```cpp
+#include <swofty/live.hpp>
+
+namespace live = swofty::live;
+
+SWOFTY_ON_LOAD { live::start_portraits(); }
+
+void draw_row(uint32_t vehicle)
+{
+    auto reference = live::driver_portrait(vehicle); // "eaid://game_rtt_tex_0012"
+    if (!reference)
+        return; // no portrait for this car: no rundown queued, or not asked for yet
+
+    // Full size: 600 x 800 RGBA8 for the rundown, tight rows, alpha kept.
+    if (auto image = live::portrait_image(*reference)) {
+        if (image->revision != shown_revision[vehicle]) {
+            upload_texture(vehicle, image->width, image->height, image->rgba.data());
+            shown_revision[vehicle] = image->revision;
+        }
+    }
+
+    // Or a thumbnail through the same call as badges and tyre icons: at most 64 x 64 (48 x 64 for the rundown).
+    uint8_t rgba[64 * 64 * 4];
+    uint32_t width = 0, height = 0;
+    uint64_t revision = 0;
+    if (live::images()->image(reference->c_str(), rgba, sizeof rgba, &width, &height, &revision) == SWOFTY_ASSET_OK)
+        draw_thumbnail(rgba, width, height);
+}
+```
+
+The game renders the portraits only when it queues the grid rundown: a race session with more than 10 entrants, offline,
+with `Game.SkipGridRundown` off, so not with the core's `loading_skip_grid_rundown` feature on. Qualifying, practice, Time
+Trial and small grids have none, and `driver_portrait` answers empty there.
+
+How a car finds its portrait:
+
+- **The reference.** The core takes the driver of the car's session entrant (the same entrant `team_badge_texture` reads)
+  and reads the view model leaf the game binds for the rundown, `<driver>.textures.GridRundownLeft.Thumbnail`, else
+  `GridRundownRight`, where `<driver>` is `preloaded_drivers`, `custom_drivers` or `network_drivers` at the driver's
+  index. The leaf holds `eaid://game_rtt_tex_NNNN.srv` or `_srgb.srv`; the reference is the render target's name without
+  the view suffix. The answer is kept for a second per car.
+- **The pixels.** Armed, the core follows the D3D12 names of the game's render target pool (`eaid://game_rtt_tex_NNNN`)
+  and copies a target to a readback buffer when the game moves it from being written to being read by shaders, while a
+  session loads or runs or when it is 600 x 800 or 400 x 400. It keeps up to 40 portraits, R8G8B8A8 or B8G8R8A8 at most
+  1024 on a side, until the session unloads; `images()->clear()` leaves them.
+- **The C calls.** `driver_portrait(vehicle, reference, cap)` needs 25 bytes. `images()->start_portraits(0)` arms the
+  capture and `images()->image_full(reference, rgba, cap, &width, &height, &revision)` copies the full image (images
+  table version 2): with a short `cap` or a null `rgba` it writes the size and answers `SWOFTY_ASSET_INVALID`, so
+  4,194,304 bytes (`SWOFTY_LIVE_PORTRAIT_MAX_SIDE` squared, times 4) always suffice.
+
+The reference can come before the pixels: `image` and `image_full` answer `SWOFTY_ASSET_UNAVAILABLE` until the copy is in,
+and every later capture of the same target raises `revision`. The core logs what it sees under `[portraits]`:
+
+```text
+[portraits] capture armed: following render target pool names
+[portraits] session loading: capture window open
+[portraits] named 'eaid://game_rtt_tex_0012' (eaid://game_rtt_tex_0012): 600x800 layers=1 mips=1 format=27 flags=0x1
+[portraits] captured 'eaid://game_rtt_tex_0012': 600x800 format=27 list=0 states=0x4->0xc0 serial=3 cached=1 alpha 0:301233 255:170001 other:8766 mean rgb 61 58 60
+[portraits] car 3: driver preloaded_drivers[17] -> GridRundownLeft.Thumbnail 'eaid://game_rtt_tex_0012' (srgb view), pixels captured
+[portraits] session unload: dropped 20 portrait(s), 0 pending
+```
+
 ## team_badge, team_badge_texture, driver_name and frame
 
 ```cpp
@@ -445,6 +527,8 @@ fake.set_turns({/* SwoftyLiveTurn rows */});
 fake.set_driver_name(1, "Charles Leclerc");
 fake.set_badge(1, "ferrari_2026");                 // team_badge and the catalogue team_badge_texture
 fake.set_badge_texture(0, "eaid://ui_package/art/textures/render_badge_ePreLoaded 7");
+fake.set_driver_portrait(1, "eaid://game_rtt_tex_0012");
+fake.set_image("eaid://game_rtt_tex_0012", 600, 800, std::vector<uint8_t>(600 * 800 * 4, 255));
 fake.car(0).have |= SWOFTY_LIVE_HAVE_LAP_TIMES;
 fake.detail(0).best_lap_ms = 90500;                // car_detail answers detail(0) with car(0).have
 fake.install();
@@ -452,6 +536,7 @@ fake.install();
 assert(swofty::live::gap_ahead_ms(*swofty::live::car(0)) == 950);
 assert(swofty::live::order().ahead(0)->vehicle == 1);
 assert(swofty::live::best_lap_ms(*swofty::live::car_detail(0)) == 90500u);
+assert(swofty::live::driver_portrait_image(1)->height == 800);
 ```
 
 ## When a group reads
@@ -504,8 +589,9 @@ The values below have no verified memory source. The core decodes them from the 
 | `race_number`, `team_id`, `driver_id` | `HAVE_IDENTITY` | Participants (4) `m_raceNumber`, `m_teamId`, `m_driverId` | yes | team and driver id only |
 | `team_colour` | `HAVE_IDENTITY` | Participants (4) `m_liveryColours[0]` | 2025 only | no |
 | `personal_best_sector_ms` | `HAVE_SECTOR_BESTS` | Session History (11) `m_bestSectorNLapNum` and that lap's sector time | yes | no |
+| `safety_car_delta_s` | `HAVE_SC_DELTA` | Lap Data (2) `m_safetyCarDelta` | yes | yes |
 
-`driver_id` is the `stat_id` of the car's `entrants.drivers` row for a stock driver; its names and code read from that row with [swofty/db.hpp](./db). The session's best sector is the lowest `personal_best_sector_ms` over the cars. Session History carries one car per packet, so a car's bests refresh about once a second per car on the game's rotation.
+`driver_id` is the `stat_id` of the car's `entrants.drivers` row for a stock driver; `live::driver_identity` reads its code and names ([Driver names](#driver-names)). The game sends 0 for both pit times once the car is out of the pit lane; the core holds the last visit's values until the next visit starts. `safety_car_delta_s` is the game's delta to the time the safety car or the virtual safety car requires; the game sends it in every Lap Data packet and it means something while `safety_car` reads 1 or 2. The session's best sector is the lowest `personal_best_sector_ms` over the cars. Session History carries one car per packet, so a car's bests refresh about once a second per car on the game's rotation.
 
 The car index of a UDP packet is taken as the vehicle id, as for the telemetry feed (see [Telemetry](./telemetry#availability)). The race control messages (penalties, served penalties, DRS, start lights, the safety car phase and the fastest lap) fire as events; see [Race control](./race-control#race-control-messages). The 2026 rows read the 2025 entry offsets of the packets whose 2026 size the telemetry decoder knows; the 2026 Session and Participants layouts past the team id are not catalogued.
 
@@ -515,7 +601,7 @@ The car index of a UDP packet is taken as the vehicle id, as for the telemetry f
 
 ## Not read yet
 
-Active aero mode, Boost and Overtake state, the driver's three-letter code and split names, car setup values and tyre temperatures have no verified memory source and no UDP source in the live state. `SWOFTY_LIVE_HAVE_BOOST` and `_AERO_MODE` are declared so the structs stay stable when they land and stay clear until then. The session time left, the race lap count, DRS allowed, the pit limiter and the identity fields read from UDP (above).
+Active aero mode, Boost and Overtake state, car setup values and tyre temperatures have no verified memory source and no UDP source in the live state. `SWOFTY_LIVE_HAVE_BOOST` and `_AERO_MODE` are declared so the structs stay stable when they land and stay clear until then. The session time left, the race lap count, DRS allowed, the pit limiter and the identity fields read from UDP (above).
 
 The 2026 values need the 2026 UDP layout, which the repository does not catalogue (`packages/core` has no 2026 game, and the decoders know the 2026 packet sizes only):
 

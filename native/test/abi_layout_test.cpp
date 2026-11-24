@@ -130,7 +130,8 @@ static_assert(offsetof(SwoftyLiveSession, duration_s) == 416 && offsetof(SwoftyL
     X(team_colour, 112)                                                                                                          \
     X(driver_id, 116)                                                                                                            \
     X(personal_best_sector_ms, 120)                                                                                              \
-    X(reserved, 132)
+    X(safety_car_delta_s, 132)                                                                                                   \
+    X(reserved, 136)
 static_assert(sizeof(SwoftyLiveCarDetail) == 160 && alignof(SwoftyLiveCarDetail) == 8);
 #define X(f, at) static_assert(offsetof(SwoftyLiveCarDetail, f) == (at), #f);
 DETAIL
@@ -138,6 +139,41 @@ DETAIL
 
 // The table only grows: car_detail follows tyre_icon_texture.
 static_assert(offsetof(SwoftyLive, car_detail) == offsetof(SwoftyLive, tyre_icon_texture) + sizeof(void *));
+
+// SwoftyStandingsSeason and SwoftyStandingsRow (SwoftyCoreStandings, table version 1).
+#define STANDINGS_SEASON                                                                                                         \
+    X(seq, 0)                                                                                                                    \
+    X(mode, 8)                                                                                                                   \
+    X(year, 12)                                                                                                                  \
+    X(season_index, 16)                                                                                                          \
+    X(round, 20)                                                                                                                 \
+    X(rounds, 24)                                                                                                                \
+    X(scored, 28)                                                                                                                \
+    X(raced, 32)                                                                                                                 \
+    X(flags, 36)                                                                                                                 \
+    X(drivers, 40)                                                                                                               \
+    X(constructors, 44)                                                                                                          \
+    X(reserved, 48)
+static_assert(sizeof(SwoftyStandingsSeason) == 64 && alignof(SwoftyStandingsSeason) == 8);
+#define X(f, at) static_assert(offsetof(SwoftyStandingsSeason, f) == (at), #f);
+STANDINGS_SEASON
+#undef X
+#define STANDINGS_ROW                                                                                                            \
+    X(driver, 0)                                                                                                                 \
+    X(team, 4)                                                                                                                   \
+    X(position, 8)                                                                                                               \
+    X(points, 12)                                                                                                                \
+    X(wins, 16)                                                                                                                  \
+    X(podiums, 20)                                                                                                               \
+    X(race_number, 24)                                                                                                           \
+    X(flags, 25)                                                                                                                 \
+    X(round_points, 28)                                                                                                          \
+    X(reserved, 156)
+static_assert(sizeof(SwoftyStandingsRow) == 160 && alignof(SwoftyStandingsRow) == 4 && SWOFTY_STANDINGS_MAX_ROUNDS == 32);
+#define X(f, at) static_assert(offsetof(SwoftyStandingsRow, f) == (at), #f);
+STANDINGS_ROW
+#undef X
+static_assert(offsetof(SwoftyStandings, constructors) == 4 * sizeof(void *) && SWOFTY_STANDINGS_VERSION == 1);
 
 int main()
 {
@@ -158,7 +194,7 @@ int main()
     expect(SWOFTY_LIVE_HAVE_GRID == (1ull << 29) && SWOFTY_LIVE_HAVE_LAP_TIMES == (1ull << 30) &&
                SWOFTY_LIVE_HAVE_TYRE_AGE == (1ull << 31) && SWOFTY_LIVE_HAVE_TYRE_WEAR == (1ull << 17),
            "version 6 adds the grid, lap times and tyre age bits and fills the tyre wear bit");
-    expect(sizeof(SwoftyLiveSession) == 440 && sizeof(SwoftyLiveCarDetail) == 160 && SWOFTY_LIVE_VERSION == 6,
+    expect(sizeof(SwoftyLiveSession) == 440 && sizeof(SwoftyLiveCarDetail) == 160 && SWOFTY_LIVE_VERSION >= 6,
            "the session keeps its size and the car detail is 160 bytes");
     expect(SWOFTY_LIVE_HAVE_GARAGE == (1ull << 27) &&
                !(SWOFTY_LIVE_HAVE_GARAGE & (SWOFTY_LIVE_HAVE_PIT_LANE | SWOFTY_LIVE_HAVE_GAP_AHEAD)),

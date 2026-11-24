@@ -13,7 +13,7 @@
 #include "core/runtime/build.hpp"
 #include "core/runtime/runtime.hpp"
 #include "core/telemetry/telemetry_feed.hpp"
-#include "core/render/badges/badge_images.hpp"
+#include "core/render/portraits/driver_portraits.hpp"
 
 #include <swofty/mem.hpp>
 #include <swofty/mixin.hpp>
@@ -100,6 +100,7 @@ std::atomic<bool> g_bus_armed;
 double g_bus_tried = -1e9;
 lv::udp::Source g_udp;
 lv::udp::Clock g_udp_clock;
+lv::hud::Bridge g_hud;
 std::mutex g_udp_lock;
 std::atomic<bool> g_udp_said;
 
@@ -256,8 +257,9 @@ void publish()
         else
             g_udp.end();
     }
-    lv::hud::apply(g_snap.ses, lv::hud::from_view(frontend::view::flow_seen(), frontend::view::current().flags,
-                                                  frontend::view::pause_reasons()));
+    lv::hud::apply(g_snap.ses, g_hud.step(lv::hud::from_view(frontend::view::flow_seen(), frontend::view::current().flags,
+                                                             frontend::view::pause_reasons()),
+                                          GetTickCount64()));
     g_snap.official = g_official;
     g_snap.turn_length = g_turns.length;
     lv::snap_end(&g_snap);
@@ -440,9 +442,10 @@ const SwoftyLive table = {SWOFTY_LIVE_VERSION,
                           live_seq,
                           live_driver_name,
                           live_team_badge_texture,
-                          badge_images::api,
+                          driver_portraits::live_images,
                           live_tyre_icon_texture,
-                          live_car_detail};
+                          live_car_detail,
+                          driver_portraits::driver_portrait};
 
 }
 

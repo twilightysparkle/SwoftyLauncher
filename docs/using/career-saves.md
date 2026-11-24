@@ -116,13 +116,13 @@ Restore waits until F1 25 is closed, and for the Vanilla save until Steam is clo
 
 ## Using your Steam saves instead
 
-The arrow beside **Play** opens a menu. **Use launcher saves** (ticked by default, absent for Vanilla) turns the profile's own save on or off; with it off the profile plays on your Steam save like Vanilla does. While it is on, **Play once with your Steam saves** runs one session on the Steam save and leaves the setting on:
+The arrow beside **Play** opens a menu. **Use launcher saves** (ticked by default, absent for Vanilla) turns the profile's own save on or off; with it off the profile plays on your Steam save like Vanilla does. While it is on, **Play once with your Steam saves** runs one session on the Steam save and leaves the setting on. On the EA app copy the item is **Play once with your EA app saves** and runs the session on the EA app's own save:
 
 ```text
 $ swofty run --steam-saves-once
 ```
 
-If the core can't use launcher saves it closes F1 25 before the title screen, and the play bar says `Launcher saves could not be used, so F1 25 closed before loading a save`, with the same **Play once with your Steam saves**, **Open logs** and **Dismiss**. Nothing was read or written. The launcher has a save backend for the EA app copy of F1 25. EA app copies of 1.0.145 still run without add-ons.
+If the core can't use launcher saves it closes F1 25 before the title screen, and the play bar says `Launcher saves could not be used, so F1 25 closed before loading a save`, with the same **Play once with your Steam saves** (**Play once with your EA app saves** on the EA app copy), **Open logs** and **Dismiss**. Nothing was read or written. The EA app copy plays on launcher saves too: see [The EA app copy](/reference/saves#the-ea-app-copy).
 
 ## Which save Play will use
 
@@ -134,7 +134,7 @@ A line on the play bar names the save the next **Play** uses. With launcher save
 | `launcher saves are off` | **Use launcher saves** is unticked for the profile. |
 | `this game version is not supported yet` | The game's `F1_25.exe` is a build the launcher doesn't know. This holds for every profile. |
 | `you chose to play once with your Steam saves` | **Play once with your Steam saves** is starting. |
-| `launcher saves are not available on the EA app copy` | The active copy is from the EA app. |
+| `you chose to play once with your EA app saves` | **Play once with your EA app saves** is starting on the EA app copy. |
 
 The line is read-only, and `swofty run` makes the same decision. Your launcher careers stay in `saves/<profile>/remote` and are not changed by a run on the Steam save.
 
@@ -152,7 +152,7 @@ Each profile now has its own save, starting from a copy of your Steam save. Play
 
 ## When careers go missing
 
-A banner at the top of the page, and on the **Addons** page, names the missing careers, the profile whose save they went missing from, and the time they were last in the save. **Restore** asks the game to put them back the next time you press Play. **Review the restore** opens that profile's versions with the panel for that version. **Dismiss** hides the banner until the next career goes missing. A career counts as missing when the last save a launcher session wrote has it and the save the game read since does not; the size of the save file is not looked at.
+A banner at the top of the page, and on the **Addons** page, names the missing careers, the profile whose save they went missing from, and the time they were last in the save. **Restore** asks the game to put them back the next time you press Play. **Review the restore** opens that profile's versions with the panel for that version. **Dismiss** hides the banner until the next career goes missing. A career counts as missing when the last save a launcher session wrote has it and the save the game read since does not; the size of the save file is not looked at. A career is known by its save slot: when an add-on's career type gives it a new id at its first load (Progressive Career does), it is the same career, and it is never missing while its save slot is in the save.
 
 A save that keeps F1 25 on Loading... after Press any button gets a banner with **Restore** of the last version that loaded and **Dismiss**. The launcher changes nothing until you choose.
 

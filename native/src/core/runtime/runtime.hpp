@@ -186,6 +186,7 @@ bool save_sandbox_test_mode();
 bool save_sandbox_launcher_mode();
 bool save_sandbox_armed();
 std::string save_sandbox_source();
+// The save file the last profile load read, or what read it when the core did not see the read.
 std::string save_sandbox_file();
 std::string career_saves_id_for_slot(const std::string &key);
 std::string career_saves_content_for_slot(const std::string &key);
@@ -350,6 +351,10 @@ bool frame_capture_request(const std::wstring &path);
 int frame_capture_poll(std::string *why);
 int group_add(const json::Value &entry);
 int group_extend(const std::string &group, const std::string &erp);
+// A stock group that lists `erp` (size bytes) first only while `box` is the session's box (content.box_assets kind scene).
+int group_extend_box(const std::string &group, const std::string &erp, uint64_t size, const std::string &box);
+// Switches the groups of group_extend_box to the box's ERP lists, or to their stock lists for any other box ("" = none).
+void box_groups_select(const std::string &box);
 void own_item(uint32_t key, const std::string &addon, const std::string &what);
 int db_add(const json::Value &entry);
 void db_older_edits(const std::function<void(uint64_t key, int tag, const std::string &text)> &fn);
