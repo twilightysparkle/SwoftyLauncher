@@ -15,12 +15,19 @@ use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::*;
 
 fn main() {
+    if std::env::args().any(|a| a == "--selection-demo") {
+        app::selection_demo::run();
+        return;
+    }
     if std::env::args().any(|a| a == "--chart-demo") {
         chart_demo::run();
         return;
     }
     swofty_core::data::relocate::recover_at_start();
     app_log::start();
+    for line in swofty_core::data::relocate::take_log() {
+        app_log::note(&line);
+    }
     app_log::step("starting the app runtime");
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     let prepared = app.background_executor().spawn(async { shell::Prepared::load() });
@@ -80,6 +87,7 @@ impl Launcher {
                     s.restore_console(cx);
                     s.run_startup(window, cx);
                     s.show_data_move_result(window, cx);
+                    s.finish_data_move_delete(window, cx);
                     s.scan_for_lost_data(window, cx);
                     s.start_ui_mode(window, cx);
                 });

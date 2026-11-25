@@ -17,7 +17,9 @@ mod hooks;
 mod logos;
 mod memory;
 mod package_ids;
+mod render_slots;
 mod saves;
+mod session_exit;
 mod slow_init;
 mod stall;
 mod startup;
@@ -69,6 +71,25 @@ use system::{
 };
 pub use tyres::unplaced_tyres;
 use withdrawn::{noted, withdrawn_crash};
+
+/// The markers in a loader log that the notices computed after a run match on, for the lines Send Logs keeps from
+/// a part of a long log it leaves out: the tyre check, the team logo cache, the profile save writes and load, the
+/// stuck weekend line, the game's fatal exception line and the hang watchdog's register. Left out, because they are
+/// matched by their order or their count in the whole log, not by one line: the weekend and session-load flow lines
+/// (a session load clears a stuck weekend), the module, hardware and overlay lines (read from the start, which is
+/// always kept), the pitlane, addon init timing and thread-stamp checks, and the indented lines of a crash record.
+pub fn log_needles() -> &'static [&'static str] {
+    &[
+        tyres::TYRES_UNPLACED,
+        logos::LOGOS_UNWRITABLE,
+        saves::KEPT_WRITE_FAILED,
+        saves::HIGHLIGHTS_PUT_BACK,
+        stall::PROFILE_LOAD,
+        weekend::NEVER_RAN,
+        crash_record::FATAL_LINE,
+        hang::WATCHDOG_MS,
+    ]
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnosis {
@@ -207,13 +228,15 @@ const RULES: &[Rule] = &[
     |c| weekends_track_crash(&c.fatal).then(weekends_track_record_bad_index),
     |c| imported_calendar_crash(c.evidence, &c.fatal).then(|| imported_calendar_empty_season(c.evidence)),
     |c| third_car_line_crash(c.evidence, &c.fatal).then(|| third_car_line(c.evidence)),
-    |c| null_vehicle_crash(&c.fatal).then(|| career_over_grid(c.evidence)),
+    |c| null_vehicle_crash(&c.fatal).then(|| career_over_grid(c.evidence, &c.fatal)),
+    render_slots::render_slots,
+    session_exit::session_exit,
     graphics::device_removed,
     graphics::out_of_graphics_memory,
     graphics::graphics_mod_crash,
     graphics::driver_crash,
     graphics::frame_generation_crash,
-    |c| over_grid_crash(c.evidence, &c.fatal).then(|| career_over_grid(c.evidence)),
+    |c| over_grid_crash(c.evidence, &c.fatal).then(|| career_over_grid(c.evidence, &c.fatal)),
 ];
 
 fn matched(e: &Evidence) -> Option<Diagnosis> {
