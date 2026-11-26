@@ -146,6 +146,7 @@ UNITS = [
     Unit('sequencer_records', 'Events sequencer record guard unit test'),
     Unit('session_enter', 'Session enter guard unit test'),
     Unit('session_job_probe', 'Session job list scan probe unit test'),
+    Unit('part_pool', 'Model part pool log unit test'),
     Unit('session_loader', 'Load-stall report session loader section unit test'),
     Unit('boot_route', 'Load-stall report front end boot route section unit test'),
     Unit('setup_vm', 'Setup screen car guard unit test'),
@@ -295,7 +296,7 @@ CAREER_OPS_FLAGS = ['-Isrc', '-std=c++23', '-O1', '-Wall', '-Wextra', '-Werror',
 SDK_OPS_FLAGS = ['-std=c++23', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-nullability-completeness',
                  '-Wno-missing-designated-field-initializers', SDK]
 CAREER_OPS = [Program(t, [Objects([f'test/career_ops/{t}.cpp'], CAREER_OPS_FLAGS)])
-              for t in ('lineup_plan_test', 'teams_plan_test', 'ops_logic_test')] + [
+              for t in ('lineup_plan_test', 'teams_plan_test', 'ops_logic_test', 'finalise_chunks_test')] + [
     Program(f'{t}{ext}', [Objects([f'test/career_ops/{t}.cpp'], SDK_OPS_FLAGS, target)])
     for t in ('sdk_ops_test', 'sdk_ops_v4_test', 'sdk_ops_v6_test', 'sdk_ops_v7_test', 'sdk_ops_v8_test')
     for ext, target in (('', LINUX), ('.exe', WINDOWS))]
@@ -382,7 +383,7 @@ SCRIPTS = [
            ['bash', 'native/test/run_content_test.sh', '{out}'], programs=CONTENT),
     Script('bind', 'Binding resolver Wine test', ['bash', 'native/test/run_bind_test.sh'], wine=True),
     Script('career_ops', 'Career operations planner and SDK calls host test', each(
-        'lineup_plan_test', 'teams_plan_test', 'sdk_ops_test', 'ops_logic_test', 'sdk_ops_v4_test', 'sdk_ops_v6_test',
+        'lineup_plan_test', 'teams_plan_test', 'finalise_chunks_test', 'sdk_ops_test', 'ops_logic_test', 'sdk_ops_v4_test', 'sdk_ops_v6_test',
         'sdk_ops_v7_test', 'sdk_ops_v8_test'), cwd='test', programs=CAREER_OPS),
     Script('json', 'swofty::json unit test', ['bash', 'native/test/run_json_test.sh', '{out}'], programs=JSON),
     Script('build_gate', 'Loader build gate unit test', ['bash', 'native/test/run_build_gate_test.sh']),
