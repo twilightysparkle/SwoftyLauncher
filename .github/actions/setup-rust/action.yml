@@ -4,7 +4,7 @@ description: >
   libraries GPUI and the ads helper link against. Every Rust job in ci.yml and release-binaries.yml starts here.
 
 inputs:
-  # Only the test builds and the Windows installer are cached: the rest are off the critical path or build as
+  # Only the test builds and the release build are cached: the rest are off the critical path or build as
   # quickly as they restore, and the repository's 10 GB of cache space holds main's caches with room for pull
   # requests.
   cache:

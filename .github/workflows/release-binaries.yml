@@ -32,8 +32,13 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      # No Rust cache: a cold release build takes about as long as restoring one.
+      # The dependencies take five to seven minutes of a cold release build on a hosted runner, before the
+      # workspace crates start; the cache keeps them (rust-cache never keeps the workspace crates themselves).
+      # Only runs on main save it, so tags and pull requests read main's cache without adding their own.
       - uses: ./.github/actions/setup-rust
+        with:
+          cache: release
+          save: ${{ github.ref == 'refs/heads/main' }}
 
       # Only the two binaries the release ships, not the installer or the addon template.
       # The log server "Send Logs to Developers" uploads to; without it the button is disabled.
