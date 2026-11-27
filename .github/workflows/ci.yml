@@ -2,6 +2,19 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      # The release build is the slowest job by far (15 to 24 minutes against at most 8 to 14 for the tests), and
+      # this fork publishes no releases from it, so a run builds the release binaries only when asked.
+      release-binaries:
+        description: Also build the release binaries (swofty, swofty-launcher, swofty-ui) as the windows-binaries artefact (windows-binaries-no-lto without release-lto)
+        type: boolean
+        default: false
+      # Off, the release build skips cross-crate thin LTO: several minutes faster, but the binaries go up as
+      # windows-binaries-no-lto and a release never takes them (release-binaries.yml).
+      release-lto:
+        description: Build the release binaries with thin LTO, as a release ships (slower)
+        type: boolean
+        default: false
 
 # A newer push to a pull request cancels its older run. Every push to main runs to the end in its own group:
 # a release tag needs its commit's run to pass.
@@ -288,12 +301,14 @@ jobs:
       - name: Template data files
         run: python3 tools/std/templates.py --no-build
 
-  # Every push to main also builds the release binaries: the run keeps the release cache warm, and a tag on
-  # this commit takes its binaries from here (release.yml) instead of building again.
+  # Built only when the run asks for them (the release-binaries input above). A tag on this commit takes its
+  # binaries from here (release.yml) instead of building again.
   release-binaries:
     name: Release binaries
+    if: inputs.release-binaries
     uses: ./.github/workflows/release-binaries.yml
     with:
       ref: ${{ github.sha }}
       retention-days: 7
+      thin-lto: ${{ inputs.release-lto }}
 
