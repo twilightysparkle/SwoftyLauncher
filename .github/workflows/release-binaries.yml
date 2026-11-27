@@ -18,15 +18,36 @@ on:
         description: Also build the installer and upload it as installer-Windows
         type: boolean
         default: false
+      # Cross-crate thin LTO is about two thirds of the launcher's and the CLI's compile (locally 213 s against
+      # 76 s for the launcher, 80 s against 13 s for the CLI). Without it the binaries are only for testing: they
+      # go up as windows-binaries-no-lto, a name release.yml never takes a release from.
+      thin-lto:
+        description: Build with the release profile's thin LTO, as a release ships
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The CLI and the launcher each end in a long single-crate compile that cannot overlap the other's well on a
+  # 4-CPU runner, so each builds on a runner of its own. Swofty UI and the installer go with the CLI, the shorter
+  # of the two.
   windows-build:
-    name: Windows build
+    name: Windows build (${{ matrix.part }})
     runs-on: windows-latest
     timeout-minutes: 45
+    strategy:
+      matrix:
+        include:
+          - part: cli
+            package: swofty-cli
+          - part: launcher
+            package: swofty-launcher
+    # Set for the whole job, so rust-cache, which hashes every CARGO* variable into its key, keeps the builds with
+    # and without LTO apart. 'thin' is what Cargo.toml's release profile already says.
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.thin-lto && 'thin' || 'false' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -34,10 +55,11 @@ jobs:
 
       # The dependencies take five to seven minutes of a cold release build on a hosted runner, before the
       # workspace crates start; the cache keeps them (rust-cache never keeps the workspace crates themselves).
-      # Only runs on main save it, so tags and pull requests read main's cache without adding their own.
+      # Each part has its own key, as their dependencies differ. Only runs on main save it, so tags and pull
+      # requests read main's cache without adding their own.
       - uses: ./.github/actions/setup-rust
         with:
-          cache: release
+          cache: release-${{ matrix.part }}
           save: ${{ github.ref == 'refs/heads/main' }}
 
       # Only the two binaries the release ships, not the installer or the addon template.
@@ -45,48 +67,91 @@ jobs:
       # The usage address is where anonymised usage reports go; builds without it send none.
       # The ads address serves the launcher's ad slots; builds without it show none.
       - name: Build
-        run: cargo build --release -p swofty-cli -p swofty-launcher
+        run: cargo build --release -p ${{ matrix.package }}
         env:
           SWOFTY_LOGS_URL: https://api.f1.swofty.net/v1/logs
           SWOFTY_USAGE_URL: https://api.f1.swofty.net
           SWOFTY_ADS_URL: https://ads.swofty.net
 
       - uses: actions/setup-python@v7
+        if: matrix.part == 'cli'
         with:
           python-version: '3.14'
 
       - name: Install PyInstaller
+        if: matrix.part == 'cli'
         run: python -m pip install pyinstaller==6.22.3
 
       - name: Build Swofty UI
+        if: matrix.part == 'cli'
         run: python tools/swofty-ui/build.py
 
       - name: Self-test Swofty UI
+        if: matrix.part == 'cli'
         run: dist/swofty-ui/swofty-ui.exe --self-test
 
-      # The artefact keeps the paths below the checkout, target/release/ and dist/swofty-ui/.
-      - uses: actions/upload-artifact@v7
+      # Joined into one artefact by the job below. Two paths keep the checkout's layout (target/release/ and
+      # dist/swofty-ui/) in the CLI's part; the launcher's single file is stored on its own and put back under
+      # target/release/ when they are joined.
+      - name: Upload the CLI and Swofty UI
+        if: matrix.part == 'cli'
+        uses: actions/upload-artifact@v7
         with:
-          name: windows-binaries
+          name: windows-binaries-part-cli
           path: |
             target/release/swofty.exe
-            target/release/swofty-launcher.exe
             dist/swofty-ui/swofty-ui.exe
           if-no-files-found: error
-          retention-days: ${{ inputs.retention-days }}
+          retention-days: 1
+
+      - name: Upload the launcher
+        if: matrix.part == 'launcher'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-binaries-part-launcher
+          path: target/release/swofty-launcher.exe
+          if-no-files-found: error
+          retention-days: 1
 
       # The installer as ci.yml's pull request Installer job builds it: without the server addresses, and in a
       # cargo run of its own, so that its features cannot change the binaries above. It comes after their
       # upload; rebuilding swofty-core without the addresses leaves the linked binaries as they are.
       - name: Build the installer
-        if: inputs.installer
+        if: inputs.installer && matrix.part == 'cli'
         run: cargo build --release -p swofty-launcher-installer
 
       - name: Upload the installer
-        if: inputs.installer
+        if: inputs.installer && matrix.part == 'cli'
         uses: actions/upload-artifact@v7
         with:
           name: installer-${{ runner.os }}
           path: target/release/swofty-launcher-installer.exe
           if-no-files-found: error
           retention-days: 14
+
+  # The one artefact release.yml downloads, with the paths below the checkout it copies from.
+  windows-binaries:
+    name: Windows binaries
+    needs: windows-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-binaries-part-cli
+          path: .
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-binaries-part-launcher
+          path: target/release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.thin-lto && 'windows-binaries' || 'windows-binaries-no-lto' }}
+          path: |
+            target/release/swofty.exe
+            target/release/swofty-launcher.exe
+            dist/swofty-ui/swofty-ui.exe
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
