@@ -216,6 +216,8 @@ pub(super) struct Tracks {
     pub slots: Vec<Option<&'static str>>,
     /// The addons whose track records add their rows in game.
     pub recorded: BTreeSet<String>,
+    /// The circuit intros the kept track records ship.
+    pub videos: Vec<crate::tracks::TrackVideo>,
     /// The codes of the tracks left out that no kept track stands for.
     left_codes: Vec<String>,
 }
@@ -264,10 +266,18 @@ impl Tracks {
             .filter(|c| !tracks.iter().any(|(_, p, _)| p.track_code == *c))
             .map(str::to_owned)
             .collect();
+        let kept_codes = tracks
+            .iter()
+            .filter(|(_, _, o)| recorded.contains(&o.addon))
+            .map(|(_, p, _)| p.track_code.clone())
+            .collect();
+        let (videos, notes) = crate::tracks::track_videos(&store.addons_dir(), run.order, std16, &kept_codes);
+        built.warnings.extend(notes);
         Ok(Self {
             kept: tracks,
             slots: Vec::new(),
             recorded,
+            videos,
             left_codes,
         })
     }
@@ -305,6 +315,16 @@ impl Tracks {
             let erp = dir.join(&pkg.erp);
             let meta = std::fs::metadata(&erp).map_err(io_err(&erp))?;
             hash.update(format!("{}|{:?}", meta.len(), meta.modified().ok()));
+        }
+        for p in self.videos.iter().flat_map(|v| &v.placed) {
+            let meta = std::fs::metadata(&p.source).map_err(io_err(&p.source))?;
+            hash.update(format!(
+                "video {}|{}|{}|{:?}",
+                p.game_path,
+                p.source.display(),
+                meta.len(),
+                meta.modified().ok()
+            ));
         }
         Ok(())
     }
@@ -446,6 +466,31 @@ impl Pipeline<'_, '_> {
                 }
             }
         }
+        for v in &tracks.videos {
+            for p in &v.placed {
+                if built
+                    .plan
+                    .added
+                    .insert(p.game_path.clone(), p.source.clone())
+                    .is_some()
+                {
+                    return Err(Error::Map(format!("{} is placed by two tracks", p.game_path)));
+                }
+                built.lines.push(format!(
+                    "{}: {} {} ({}) goes in {}",
+                    v.code,
+                    p.slot.label(),
+                    p.source.display(),
+                    p.named_by,
+                    p.game_path
+                ));
+            }
+            if let Some(value) = &v.value {
+                built
+                    .lines
+                    .push(format!("{}: its TrackVideo row will hold {value}", v.code));
+            }
+        }
         Ok(())
     }
 }
@@ -532,6 +577,11 @@ pub(super) fn track_files(
                     .unwrap_or_default(),
                 false => Vec::new(),
             },
+            video: tracks
+                .videos
+                .iter()
+                .find(|v| v.code == pkg.track_code)
+                .and_then(|v| v.value.clone()),
         })
         .collect();
     let scan = crate::activation::facts::Scan {
